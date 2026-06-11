@@ -46,7 +46,7 @@ interface FracaoResumo {
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
-function authHeaders() {
+function authHeaders(): Record<string, string> {
   const t = getToken();
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
@@ -77,115 +77,6 @@ function KpiCard({ label, value, sub, color = "text-gray-900" }: {
       <div className="text-xs text-gray-500 mb-1">{label}</div>
       <div className={`text-2xl font-bold ${color}`}>{value}</div>
       {sub && <div className="text-xs text-gray-400 mt-1">{sub}</div>}
-      {/* ── RECONCILIAÇÃO ── */}
-      {tab === "reconciliacao" && (
-        <div className="space-y-6">
-          {/* Engine summary */}
-          {reconcData?.resumo && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <KpiCard
-                label="Total movimentos"
-                value={String(reconcData.resumo.totalMovimentos)}
-                color="text-gray-900"
-              />
-              <KpiCard
-                label="Categorizados CSV"
-                value={String(reconcData.resumo.porSource?.csv ?? 0)}
-                sub="originalmente no CSV"
-                color="text-blue-600"
-              />
-              <KpiCard
-                label="Categorizados auto"
-                value={String(reconcData.resumo.porSource?.auto ?? 0)}
-                sub="engine de reconciliação"
-                color="text-green-600"
-              />
-              <KpiCard
-                label="Não identificados"
-                value={String(reconcData.resumo.porSource?.unmatched ?? 0)}
-                sub={`${reconcData.resumo.percentagemCategorizado}% coberto`}
-                color={(reconcData.resumo.porSource?.unmatched ?? 0) === 0 ? "text-green-600" : "text-red-600"}
-              />
-            </div>
-          )}
-
-          {/* Portão status */}
-          {reconcData?.portaoStatus && (
-            <div className="bg-white rounded-xl border overflow-hidden">
-              <div className="px-5 py-4 border-b">
-                <h3 className="font-semibold text-gray-900">Estado do Portão por Fração</h3>
-                <p className="text-sm text-gray-500 mt-0.5">Pagamentos portão/garagem identificados no extracto bancário</p>
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-px bg-gray-100">
-                {(reconcData.portaoStatus as any[]).sort((a, b) => (b.pago ? 1 : 0) - (a.pago ? 1 : 0)).map((ps: any) => (
-                  <div key={ps.fracao} className={`bg-white p-3 ${ps.pago ? "border-l-4 border-green-400" : "border-l-4 border-gray-200"}`}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-bold text-sm text-gray-900">Fração {ps.fracao}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                        ps.pago ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"
-                      }`}>
-                        {ps.pago ? "Pago" : "Em dívida"}
-                      </span>
-                    </div>
-                    <div className="text-xs text-gray-500 truncate">{ps.nome}</div>
-                    <div className="text-sm font-medium text-gray-700 mt-1">{formatEuro(ps.amount)}</div>
-                    {ps.pagamentos?.length > 0 && (
-                      <div className="text-xs text-green-600 mt-1">{ps.pagamentos[0].data}</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Auto-categorised movements */}
-          {reconcData?.autoCatEntradas && (
-            <div className="bg-white rounded-xl border overflow-hidden">
-              <div className="px-5 py-4 border-b flex items-center justify-between">
-                <div>
-                  <h3 className="font-semibold text-gray-900">Movimentos auto-categorizados</h3>
-                  <p className="text-sm text-gray-500 mt-0.5">Entradas categorizadas pelo engine (não tinham categoria no CSV)</p>
-                </div>
-                <span className="text-sm text-gray-500">{reconcData.autoCatEntradas.length} registos</span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50 border-b">
-                    <tr>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Data</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Descritivo</th>
-                      <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase">Montante</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Categoria</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Fração</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Nota</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {(reconcData.autoCatEntradas as any[]).map((m: any, i: number) => (
-                      <tr key={i} className="hover:bg-gray-50">
-                        <td className="px-4 py-2 text-gray-500 whitespace-nowrap">{m.data}</td>
-                        <td className="px-4 py-2 text-gray-700 max-w-[200px] truncate" title={m.descritivo}>{m.descritivo}</td>
-                        <td className="px-4 py-2 text-right font-medium text-green-700">{formatEuro(m.montante)}</td>
-                        <td className="px-4 py-2">
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
-                            {m.categoria}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2">
-                          {m.subCategoria && (
-                            <span className="font-bold text-blue-700">{m.subCategoria}</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-2 text-xs text-gray-500 max-w-[200px] truncate" title={m.nota}>{m.nota}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

@@ -307,10 +307,11 @@ export const dashboard = new Hono()
     const anoAtual = agora.getFullYear();
 
     // Total frações ativas
-    const [{ totalFracoes }] = await db
+    const fracaoCountRows = await db
       .select({ totalFracoes: sql<number>`count(*)` })
       .from(schema.fracoes)
       .where(eq(schema.fracoes.ativo, true));
+    const totalFracoes = fracaoCountRows[0]?.totalFracoes ?? 0;
 
     // Quotas do mês atual (condomínio + fundo reserva)
     const quotasMes = await db
@@ -622,8 +623,8 @@ export const dashboard = new Hono()
       obras: {
         totalPago: totalObrasPago,
         // Se BD sem dados, usar valor real do Excel
-        totalAtraso: totalObrasAtraso > 0 ? totalObrasAtraso : saldos.a_receber_obras,
-        totalTotal: totalObrasTotal > 0 ? totalObrasTotal : (totalObrasPago + saldos.a_receber_obras),
+        totalAtraso: totalObrasAtraso > 0 ? totalObrasAtraso : (saldos.a_receber_obras ?? 0),
+        totalTotal: totalObrasTotal > 0 ? totalObrasTotal : (totalObrasPago + (saldos.a_receber_obras ?? 0)),
         fracoesEmAtraso: obrasEmAtraso.length > 0 ? obrasEmAtraso.length : OBRAS_DEVEDORES_EXCEL.length,
         morosos: obrasEmAtraso.length > 0 ? obrasEmAtraso : OBRAS_DEVEDORES_EXCEL,
         saldoConta: saldos.saldo_obras,
@@ -664,10 +665,7 @@ export const dashboard = new Hono()
   })
   // Quick morosos count for sidebar badge
   .get("/morosos-count", async (c) => {
-    const agora = new Date();
-    const mesAtual = agora.getMonth() + 1;
-    const anoAtual = agora.getFullYear();
-    // Count unique frações com quotas em atraso (todos os meses, tipo condominio)
+    // Count unique frações com quotas de condomínio em atraso (todos os meses)
     const rows = await db
       .select({ fracaoId: schema.quotas.fracaoId })
       .from(schema.quotas)
@@ -676,20 +674,5 @@ export const dashboard = new Hono()
         eq(schema.quotas.pago, false)
       ));
     const uniq = new Set(rows.map(r => r.fracaoId)).size;
-    // --- INCÊNDIO ---
-    // Mesma lógica: Excel base − quem pagou na DB
-    const incPagosRows = await db
-      .select({ numero: schema.fracoes.numero })
-      .from(schema.quotas)
-      .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
-      .where(and(
-        eq(schema.quotas.tipo, "extra"),
-        eq(schema.quotas.quotaTipoId, INCENDIO_TIPO_ID),
-        eq(schema.quotas.pago, true)
-      ));
-    const incPagosNums = new Set(incPagosRows.map(r => r.numero).filter(Boolean));
-    const incendioMorososDinamico = INCENDIO_DEVEDORES_EXCEL.filter(d => !incPagosNums.has(d.fracao.numero));
-    const incendioAReceberDinamico = Math.round(incendioMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
-
     return c.json({ count: uniq });
   });
