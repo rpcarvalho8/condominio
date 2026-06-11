@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Redirect } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { authClient } from "../lib/auth";
+import { authClient, getToken } from "../lib/auth";
 
 // Sync silencioso no arranque — corre uma vez por sessão de browser
 async function silentBankSync(queryClient: ReturnType<typeof useQueryClient>) {
@@ -9,7 +9,14 @@ async function silentBankSync(queryClient: ReturnType<typeof useQueryClient>) {
   if (sessionStorage.getItem(key)) return; // já correu nesta sessão
   sessionStorage.setItem(key, "1");
   try {
-    await fetch("/api/bank/sync", { method: "POST", credentials: "include" });
+    const token = getToken();
+    await fetch("/api/bank/sync", {
+      method: "POST",
+      credentials: "include",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    // Pequena pausa para garantir que a BD já foi escrita antes de refetch
+    await new Promise(r => setTimeout(r, 500));
     await queryClient.invalidateQueries();
   } catch {
     // silencioso — falha não interrompe o utilizador
