@@ -376,6 +376,7 @@ async function step4_upsertQuotasIncendio(fracoes: Map<string, FracaoRow>): Prom
 
 async function step5_actualizarOrcamento(fracoes: Map<string, FracaoRow>): Promise<void> {
   console.log("\n📋 PASSO 5: Actualizar quota_mensal nas frações (Aba 8 Excel)...");
+  console.log("  ℹ️  quota_mensal = quota + fundo_reserva (valor total combinado que o condómino transfere)");
 
   let updated = 0;
 
@@ -386,14 +387,19 @@ async function step5_actualizarOrcamento(fracoes: Map<string, FracaoRow>): Promi
       continue;
     }
 
+    // quota_mensal armazena o valor TOTAL combinado (condomínio base + fundo de reserva).
+    // A separação condomínio/fundoReserva é gerida pela matriz em memória (identity-matrix.ts).
+    // A cascata de amortização lê SEMPRE da matriz — não há risco de duplicação.
+    const totalCombinado = parseFloat((dados.quota + dados.fundo).toFixed(2));
+
     await client.execute({
       sql: `UPDATE fracoes SET quota_mensal = ? WHERE id = ?`,
-      args: [dados.quota, fracao.id],
+      args: [totalCombinado, fracao.id],
     });
     updated++;
   }
 
-  console.log(`  ✓ ${updated} frações actualizadas`);
+  console.log(`  ✓ ${updated} frações actualizadas (quota_mensal = quota + fundo_reserva)`);
 }
 
 async function step6_actualizarQuotasMensaisCondominio(fracoes: Map<string, FracaoRow>): Promise<void> {
