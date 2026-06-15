@@ -14,6 +14,7 @@ export const fracoes = sqliteTable("fracoes", {
   proprietarioTelefone: text("proprietario_telefone"),
   telegramId: text("telegram_id"),
   tipo: text("tipo").notNull().default("apartamento"), // "apartamento" | "loja" | "garagem"
+  ibansConhecidos: text("ibans_conhecidos"),            // JSON array de IBANs associados (estáticos + aprendidos)
   quotaMensal: real("quota_mensal").notNull().default(0),
   permilagem: real("permilagem"),             // % do edifício
   ativo: integer("ativo", { mode: "boolean" }).default(true),

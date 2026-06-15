@@ -17,6 +17,7 @@ import * as schema from "../database/schema";
 import { eq, desc, and } from "drizzle-orm";
 import crypto from "node:crypto";
 import { recalcularSaldos } from "./dashboard";
+import { identifyByMultiMatch } from "../lib/identity-matrix";
 
 const CLIENT_ID = process.env.ENABLE_BANKING_CLIENT_ID ?? "";
 // Support both literal newlines and \n escape sequences in .env
@@ -261,13 +262,70 @@ async function importTransactions(transactions: any[], connectionId?: string): P
       if (isBankFeeDesc(desc)) { results.despesasSkipped++; continue; }
 
       if (!isDebit) {
-        // Entrada — can be quota payment
-        const descUpper = desc.toUpperCase();
+        // Entrada — identificar via Matriz de Identidade (multi-critério + auto-learning)
+        const ibanSender: string | undefined = tx.debtor?.account?.iban ?? tx.debtorIban ?? undefined;
+        const debtorName: string | undefined = tx.debtor?.name ?? tx.debtorName ?? undefined;
 
-        // ── Extra quota via keyword matching (Motor Garagem, Elevadores, etc.) ──
+        // ── Tentativa 1: Motor Matricial (identifyByMultiMatch) ───────────────
+        const matrixResult = await identifyByMultiMatch({
+          descricao: desc,
+          amount: valor,
+          ibanSender,
+          debtorName,
+        });
+
+        if (matrixResult && matrixResult.confidence >= 55) {
+          // Fração identificada com confiança — registar quota
+          const fracaoDB = fracaoByNum.get(matrixResult.fracao.idFracao.toUpperCase());
+          if (!fracaoDB) {
+            results.errors.push(`Fração matriz ${matrixResult.fracao.idFracao} não existe na BD — sincronizar seed`);
+            continue;
+          }
+
+          // Determinar tipo: extra (motor/elevador) ou condominio
+          const extraTipo = findExtraTipo(desc);
+          const isExtra = extraTipo || isMotorGaragemDesc(desc);
+          const tipoQuota = isExtra ? "extra" : "condominio";
+
+          const mes = date.getMonth() + 1;
+          const ano = date.getFullYear();
+          const qKey = `${fracaoDB.id}|${mes}|${ano}|${tipoQuota}`;
+
+          if (isExtra && !quotaKeys.has(qKey)) {
+            quotaKeys.add(qKey);
+            quotasToInsert.push({
+              fracaoId: fracaoDB.id,
+              tipo: "extra",
+              mes, ano, valor,
+              fundoReserva: 0,
+              quotaTipoId: extraTipo?.id ?? null,
+              pago: true, dataPagamento: date, metodoPagamento: "transferência",
+              observacoes: `[motor matricial:${matrixResult.confidence}%] ${desc}`,
+            });
+            results.quotasCreated++;
+          } else if (!isExtra) {
+            if (quotaKeys.has(qKey)) {
+              quotasToUpdate.push({ fracaoId: fracaoDB.id, mes, ano, tipo: "condominio", valor, data: date });
+              quotaKeys.delete(qKey);
+              results.quotasUpdated++;
+            } else {
+              quotaKeys.add(qKey);
+              quotasToInsert.push({
+                fracaoId: fracaoDB.id, tipo: "condominio", mes, ano, valor,
+                fundoReserva: parseFloat((valor * 0.1).toFixed(2)),
+                pago: true, dataPagamento: date, metodoPagamento: "transferência",
+                observacoes: `[motor matricial:${matrixResult.confidence}% criterios:${matrixResult.criterios.join("+")}]${matrixResult.ibanNovoAprendido ? " [IBAN aprendido]" : ""}`,
+              });
+              results.quotasCreated++;
+            }
+          }
+          continue;
+        }
+
+        // ── Tentativa 2: Fallback regex simples (compatibilidade legacy) ──────
+        const descUpper = desc.toUpperCase();
         const extraTipo = findExtraTipo(desc);
         if (extraTipo || isMotorGaragemDesc(desc)) {
-          // Extract fração from description — try multiple patterns
           let fracaoNum = "";
           const mgMatch = descUpper.match(/FRACA[OÃ]O\s+([A-Z]{1,2})\b/);
           if (mgMatch) fracaoNum = mgMatch[1];
@@ -276,29 +334,22 @@ async function importTransactions(transactions: any[], connectionId?: string): P
             if (mgSimple) fracaoNum = mgSimple[1];
           }
           if (!fracaoNum) {
-            // Try any trailing single/double letter token: "GARAGEM U", "ELEV B"
             const trailingLetter = descUpper.match(/\b([A-Z]{1,2})\s*$/);
             if (trailingLetter) fracaoNum = trailingLetter[1];
           }
-
           const fracao = fracaoNum ? fracaoByNum.get(fracaoNum) : undefined;
           if (!fracao) {
             results.errors.push(`Cota extra (${extraTipo?.nome ?? "Motor Garagem"}): fração não identificada em "${desc.slice(0, 60)}"`);
             continue;
           }
-
           const mes = date.getMonth() + 1;
           const ano = date.getFullYear();
           const qKey = `${fracao.id}|${mes}|${ano}|extra`;
-
           if (!quotaKeys.has(qKey)) {
             quotaKeys.add(qKey);
             quotasToInsert.push({
-              fracaoId: fracao.id,
-              tipo: "extra",
-              mes, ano, valor,
-              fundoReserva: 0,
-              quotaTipoId: extraTipo?.id ?? null,
+              fracaoId: fracao.id, tipo: "extra", mes, ano, valor,
+              fundoReserva: 0, quotaTipoId: extraTipo?.id ?? null,
               pago: true, dataPagamento: date, metodoPagamento: "transferência",
               observacoes: desc,
             });
@@ -307,40 +358,30 @@ async function importTransactions(transactions: any[], connectionId?: string): P
           continue;
         }
 
-        // Accept transfers that reference a fração explicitly OR generic condo payments
         const isQuota = descUpper.includes("CONDOM") || descUpper.includes("QUOTA") ||
           descUpper.includes("FRACAO") || descUpper.includes("FRAÇÃO") ||
           /\bENTRADA\b/.test(descUpper);
         if (!isQuota) continue;
 
-        // Try to find fração identifier in description:
-        // Patterns: "FRACAO U", "ENTRADA 39 1A", "- 1A -", etc.
-        // Fracoes are letters (A-Z) or double letters (AA-AJ)
         let fracaoNum = "";
-        // 1. Explicit "FRACAO X" or "FRACÃO X"
         const fracaoExplicit = descUpper.match(/FRACA[OÃ]O\s+([A-Z]{1,2})\b/);
         if (fracaoExplicit) fracaoNum = fracaoExplicit[1];
-        // 2. "ENTRADA NNN XY" — number + letter(s)
         if (!fracaoNum) {
           const entradaMatch = descUpper.match(/ENTRADA\s+\d+\s+([A-Z]{1,2})\b/);
           if (entradaMatch) fracaoNum = entradaMatch[1];
         }
-        // 3. Standalone letter/double-letter at end before reference number
         if (!fracaoNum) {
           const standaloneMatch = descUpper.match(/\s([A-Z]{1,2})-\d{5,}/);
           if (standaloneMatch) fracaoNum = standaloneMatch[1];
         }
-
         const fracao = fracaoNum ? fracaoByNum.get(fracaoNum) : undefined;
         if (!fracao) {
-          results.errors.push(`Fração não encontrada para: ${desc.slice(0, 60)}`);
+          results.errors.push(`Fração não identificada (matriz+regex): ${desc.slice(0, 60)}`);
           continue;
         }
-
         const mes = date.getMonth() + 1;
         const ano = date.getFullYear();
         const qKey = `${fracao.id}|${mes}|${ano}|condominio`;
-
         if (quotaKeys.has(qKey)) {
           quotasToUpdate.push({ fracaoId: fracao.id, mes, ano, tipo: "condominio", valor, data: date });
           quotaKeys.delete(qKey);

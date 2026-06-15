@@ -19,6 +19,7 @@ import { recibosRoutes, scheduleRecibosCron } from "./routes/recibos";
 import { configuracoesRoutes } from "./routes/configuracoes";
 import { relatorioRoutes, scheduleRelatoriosCron } from "./routes/relatorio";
 import { avisosRoutes, scheduleAvisosCron } from "./routes/avisos";
+import { identityRoutes } from "./routes/identity";
 
 // ─── Sync imediato no arranque do servidor ────────────────────────────────────
 (async () => {
@@ -95,7 +96,8 @@ const app = new Hono()
   .route("/recibos", recibosRoutes)
   .route("/configuracoes", configuracoesRoutes)
   .route("/relatorio", relatorioRoutes)
-  .route("/avisos", avisosRoutes);
+  .route("/avisos", avisosRoutes)
+  .route("/identity", identityRoutes);
 
 export type AppType = typeof app;
 export default app;
