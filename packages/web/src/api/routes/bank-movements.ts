@@ -2,16 +2,31 @@
  * Bank Movements Route — /api/bank-movements
  * Fonte única: tabela bank_transactions (Enable Banking via Turso).
  * CSV histórico removido da interface principal.
+ *
+ * PATCH /:id/classificacao — após gravar importType, repõe imported=0 e dispara
+ * processarStagedTransactions() que corre:
+ *   1. Motor matricial (identifyByMultiMatch)
+ *   2. Cascata de amortização (processarCascataAmortizacao)
+ *   3. recalcularSaldos() → atualiza dashboard + dívidas por fração
  */
 
 import { Hono } from "hono";
 import { requireAdmin } from "../middleware/auth";
 import { db } from "../database";
 import { bankTransactions } from "../database/schema";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
+import { processarStagedTransactions } from "./bank";
+import { recalcularSaldos } from "./dashboard";
 
-// Tipos válidos para classificação manual
-const VALID_CLASSIFICATIONS = ["quota", "despesa", "obras", "cativo", "outro"] as const;
+// Classificações mapeadas ao domínio real do condomínio
+// importType no DB: "quota" | "quota_obras" | "quota_incendio" | "quota_motor" | "despesa"
+const VALID_CLASSIFICATIONS = [
+  "quota",
+  "quota_obras",
+  "quota_incendio",
+  "quota_motor",
+  "despesa",
+] as const;
 type Classification = typeof VALID_CLASSIFICATIONS[number];
 
 // Mapear campos DB → shape uniforme para o frontend
@@ -121,6 +136,11 @@ export const bankMovementsRoutes = new Hono()
   })
 
   // PATCH /api/bank-movements/:id/classificacao — gravar classificação manual
+  // GATILHO EM CASCATA:
+  //   1. Grava importType + repõe imported=0 (força reprocessamento)
+  //   2. processarStagedTransactions() → motor matricial + cascata amortização
+  //   3. recalcularSaldos() já é invocado dentro de processarStagedTransactions()
+  //      → dashboard + dívidas por fração ficam sincronizados imediatamente
   .patch("/:id/classificacao", requireAdmin, async (c) => {
     try {
       const id = c.req.param("id");
@@ -128,15 +148,51 @@ export const bankMovementsRoutes = new Hono()
       const classificacao = body.classificacao as Classification;
 
       if (!VALID_CLASSIFICATIONS.includes(classificacao)) {
-        return c.json({ ok: false, error: `Classificação inválida. Valores: ${VALID_CLASSIFICATIONS.join(", ")}` }, 400);
+        return c.json({
+          ok: false,
+          error: `Classificação inválida. Valores permitidos: ${VALID_CLASSIFICATIONS.join(", ")}`,
+        }, 400);
       }
 
+      // ── Passo 1: Gravar nova classificação + repor imported=0 ──────────────
+      // Repor imported=0 força processarStagedTransactions() a reprocessar esta TXN.
+      // requiresManualReview=0 para que não seja ignorada pelo motor.
       await db
         .update(bankTransactions)
-        .set({ importType: classificacao, requiresManualReview: 0 })
+        .set({
+          importType: classificacao,
+          imported: 0,
+          requiresManualReview: 0,
+          status: "pending",
+        })
         .where(eq(bankTransactions.id, id));
 
-      return c.json({ ok: true, id, importType: classificacao });
+      // ── Passo 2: Motor em cascata ──────────────────────────────────────────
+      // processarStagedTransactions() processa TODAS as TXNs com imported=0.
+      // Inclui a que acabámos de repor. O motor vai:
+      //   a) Confirmar a fração via identifyByMultiMatch
+      //   b) Criar/atualizar a quota correspondente (tipo = classificacao)
+      //   c) Aplicar processarCascataAmortizacao → abater dívidas em atraso
+      //   d) Chamar recalcularSaldos() → dashboard + morosidade atualizados
+      const engineResult = await processarStagedTransactions();
+
+      // Fallback: se a TXN ficou em manual_review (motor não identificou fração),
+      // pelo menos recalcular saldos para reflectir a mudança de categoria.
+      const manualReviewCount = engineResult.manualReview;
+      if (manualReviewCount > 0) {
+        await recalcularSaldos();
+      }
+
+      return c.json({
+        ok: true,
+        id,
+        importType: classificacao,
+        engine: {
+          processed:    engineResult.processed,
+          manualReview: engineResult.manualReview,
+          errors:       engineResult.errors,
+        },
+      });
     } catch (e: any) {
       return c.json({ ok: false, error: e.message }, 500);
     }

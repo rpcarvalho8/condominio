@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getToken } from "../lib/auth";
 import { PageHeader } from "../components/Layout";
@@ -67,31 +67,50 @@ function KpiCard({ label, value, sub, color = "text-gray-900" }: {
   );
 }
 
+// ─── Opções de classificação reais do condomínio ─────────────────────────────
 const CLASSIFICACOES = [
-  { value: "quota",   label: "Quota Condomínio" },
-  { value: "obras",   label: "Obras / Fundo" },
-  { value: "despesa", label: "Despesa" },
-  { value: "cativo",  label: "Cativo" },
-  { value: "outro",   label: "Outro" },
+  { value: "quota",          label: "Quota Condomínio Regular" },
+  { value: "quota_obras",    label: "Quota Extra Obras" },
+  { value: "quota_incendio", label: "Quota Extra Incêndio" },
+  { value: "quota_motor",    label: "Quota Extra Motor Garagem" },
+  { value: "despesa",        label: "Despesa / Pagamento" },
 ];
+
+// ─── Toast component ──────────────────────────────────────────────────────────
+function Toast({ message, onDone }: { message: string; onDone: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 4000);
+    return () => clearTimeout(t);
+  }, [onDone]);
+  return (
+    <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 fade-in duration-300">
+      <div className="flex items-center gap-3 bg-green-600 text-white px-5 py-3 rounded-xl shadow-xl text-sm font-medium max-w-sm">
+        <span className="text-lg">✅</span>
+        <span>{message}</span>
+        <button onClick={onDone} className="ml-auto text-green-200 hover:text-white text-lg leading-none">×</button>
+      </div>
+    </div>
+  );
+}
 
 function ClassDropdown({ id, current, onSave }: {
   id: string;
   current: string;
-  onSave: (id: string, val: string) => void;
+  onSave: (id: string, val: string) => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
 
   async function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const val = e.target.value;
+    if (!val) return;
     setSaving(true);
     try {
-      await onSave(id, e.target.value);
+      await onSave(id, val);
     } finally {
       setSaving(false);
     }
   }
 
-  // Normalizar valor actual para o enum
   const normalised = CLASSIFICACOES.find(c => c.value === current)?.value ?? "";
 
   return (
@@ -99,11 +118,14 @@ function ClassDropdown({ id, current, onSave }: {
       value={normalised}
       onChange={handleChange}
       disabled={saving}
-      className={`text-xs border rounded px-2 py-1 bg-white transition-opacity ${saving ? "opacity-50" : ""}`}
+      className={`text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white text-gray-900 font-medium
+        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+        hover:border-gray-400 cursor-pointer transition-all
+        ${saving ? "opacity-50 cursor-wait" : ""}`}
     >
-      <option value="">— Não classificado —</option>
+      <option value="" className="text-gray-500">— Não classificado —</option>
       {CLASSIFICACOES.map(c => (
-        <option key={c.value} value={c.value}>{c.label}</option>
+        <option key={c.value} value={c.value} className="text-gray-900">{c.label}</option>
       ))}
     </select>
   );
@@ -116,6 +138,7 @@ export default function MovimentosBancariosPage() {
   const [filterCat, setFilterCat]   = useState("");
   const [filterTipo, setFilterTipo] = useState("");
   const [page, setPage]             = useState(1);
+  const [toast, setToast]           = useState<string | null>(null);
 
   // ── Overview (stats gerais) ──
   const { data: overview, isLoading: overviewLoading } = useQuery({
@@ -152,13 +175,24 @@ export default function MovimentosBancariosPage() {
     staleTime: 30_000,
   });
 
-  // ── Mutation: gravar classificação ──
+  // ── Mutation: gravar classificação + disparar cascata ──
   const classifyMutation = useMutation({
     mutationFn: ({ id, val }: { id: string; val: string }) => patchClassificacao(id, val),
     onSuccess: () => {
+      // Invalidar todos os dados dependentes — dashboard, lista, categorias
       qc.invalidateQueries({ queryKey: ["bm-lista"] });
       qc.invalidateQueries({ queryKey: ["bm-overview"] });
       qc.invalidateQueries({ queryKey: ["bm-categorias"] });
+      qc.invalidateQueries({ queryKey: ["bm-reconciliacao"] });
+      // Dashboard cards também precisam de refresh
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      qc.invalidateQueries({ queryKey: ["fracoes"] });
+      qc.invalidateQueries({ queryKey: ["quotas"] });
+      // Toast de confirmação
+      setToast("✨ Movimento reclassificado e saldos recalculados com sucesso!");
+    },
+    onError: (err: Error) => {
+      setToast(`❌ Erro ao reclassificar: ${err.message}`);
     },
   });
 
@@ -176,6 +210,9 @@ export default function MovimentosBancariosPage() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
+      {/* Toast global */}
+      {toast && <Toast message={toast} onDone={() => setToast(null)} />}
+
       <PageHeader
         title="Movimentos Bancários"
         subtitle="Transacções Enable Banking — conta condomínio"
@@ -292,7 +329,7 @@ export default function MovimentosBancariosPage() {
             <select
               value={filterTipo}
               onChange={e => { setFilterTipo(e.target.value); setPage(1); }}
-              className="text-sm border rounded-lg px-3 py-2 bg-white"
+              className="text-sm border rounded-lg px-3 py-2 bg-white text-gray-900 font-medium"
             >
               <option value="">Tipo: Todos</option>
               <option value="Entrada">Entradas</option>
@@ -301,7 +338,7 @@ export default function MovimentosBancariosPage() {
             <select
               value={filterCat}
               onChange={e => { setFilterCat(e.target.value); setPage(1); }}
-              className="text-sm border rounded-lg px-3 py-2 bg-white"
+              className="text-sm border rounded-lg px-3 py-2 bg-white text-gray-900 font-medium"
             >
               <option value="">Categoria: Todas</option>
               {categorias.map(c => (
@@ -354,7 +391,7 @@ export default function MovimentosBancariosPage() {
                           <ClassDropdown
                             id={m.id}
                             current={m.categoria}
-                            onSave={(id, val) => classifyMutation.mutate({ id, val })}
+                            onSave={(id, val) => classifyMutation.mutateAsync({ id, val })}
                           />
                         </td>
                         <td className={`px-4 py-3 text-right font-mono font-medium whitespace-nowrap ${
