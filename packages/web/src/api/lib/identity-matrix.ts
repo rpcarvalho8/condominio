@@ -920,6 +920,41 @@ export async function identifyByMultiMatch(
 // ─── Helpers exportados ───────────────────────────────────────────────────────
 
 /** Devolve todas as frações com dívidas activas */
+/**
+ * Rehydrata dividasAtuais de todas as frações a partir da BD.
+ * Deve ser chamada no arranque do servidor para evitar cold-start corruption.
+ * Falha silenciosamente se a BD não estiver disponível (instalação fresca).
+ */
+export async function rehydrateDividasFromDB(): Promise<void> {
+  try {
+    const rows = await db
+      .select({
+        numero: fracoes.numero,
+        obrasDivida: fracoes.obrasDivida,
+        incendioDivida: fracoes.incendioDivida,
+        indaquaDivida: fracoes.indaquaDivida,
+        motorDivida: fracoes.motorDivida,
+      })
+      .from(fracoes);
+
+    let updated = 0;
+    for (const row of rows) {
+      const fracaoId = row.numero?.toUpperCase();
+      if (!fracaoId) continue;
+      const fracao = MATRIZ_PROPRIEDADES.find(f => f.idFracao.toUpperCase() === fracaoId);
+      if (!fracao) continue;
+      fracao.dividasAtuais.obras    = Number(row.obrasDivida    ?? 0);
+      fracao.dividasAtuais.incendio = Number(row.incendioDivida ?? 0);
+      fracao.dividasAtuais.indaqua  = Number(row.indaquaDivida  ?? 0);
+      fracao.dividasAtuais.motor    = Number(row.motorDivida    ?? 0);
+      updated++;
+    }
+    console.log(`[matriz-rehydrate] ${updated} frações actualizadas a partir da BD`);
+  } catch (e) {
+    console.warn("[matriz-rehydrate] Falha ao rehydratar dívidas (BD indisponível?):", e);
+  }
+}
+
 export function getFracoesComDividas(): FracaoIdentidade[] {
   return MATRIZ_PROPRIEDADES.filter((f) => {
     const { obras, incendio, indaqua, motor } = f.dividasAtuais;

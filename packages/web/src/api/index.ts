@@ -20,9 +20,12 @@ import { configuracoesRoutes } from "./routes/configuracoes";
 import { relatorioRoutes, scheduleRelatoriosCron } from "./routes/relatorio";
 import { avisosRoutes, scheduleAvisosCron } from "./routes/avisos";
 import { identityRoutes } from "./routes/identity";
+import { rehydrateDividasFromDB } from "./lib/identity-matrix";
 
 // ─── Sync imediato no arranque do servidor ────────────────────────────────────
 (async () => {
+  // P0-1: Rehydratar dívidas da BD antes de qualquer operação matricial
+  await rehydrateDividasFromDB();
   try {
     console.log("[bank-startup] A sincronizar banco no arranque...");
     await runBankSync();

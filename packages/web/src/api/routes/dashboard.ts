@@ -570,7 +570,7 @@ export async function recalcularSaldos(): Promise<void> {
     const pagoPortao = Math.round(portaoPagosValor.reduce((s, q) => s + q.valor, 0) * 100) / 100;
 
     await upsertSaldo("a_receber_portao", aReceberPortao);
-    if (pagoPortao > 0) await upsertSaldo("portao_pago", pagoPortao);
+    await upsertSaldo("portao_pago", pagoPortao); // sempre upsert — inclui 0 para limpar valor stale
 
     // Saldo virtual portão += cativos ainda na Conta à Ordem
     if (cativos.portao > 0) {

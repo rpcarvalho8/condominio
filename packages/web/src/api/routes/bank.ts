@@ -334,8 +334,8 @@ async function importTransactions(transactions: any[], connectionId?: string): P
 
         // ── Tentativa 2: Fallback regex simples (compatibilidade legacy) ──────
         const descUpper = desc.toUpperCase();
-        const extraTipo = findExtraTipo(desc);
-        if (extraTipo || isMotorGaragemDesc(desc)) {
+        const fallbackExtraTipo = findExtraTipo(desc);
+        if (fallbackExtraTipo || isMotorGaragemDesc(desc)) {
           let fracaoNum = "";
           const mgMatch = descUpper.match(/FRACA[OÃ]O\s+([A-Z]{1,2})\b/);
           if (mgMatch) fracaoNum = mgMatch[1];
@@ -349,7 +349,7 @@ async function importTransactions(transactions: any[], connectionId?: string): P
           }
           const fracao = fracaoNum ? fracaoByNum.get(fracaoNum) : undefined;
           if (!fracao) {
-            results.errors.push(`Cota extra (${extraTipo?.nome ?? "Motor Garagem"}): fração não identificada em "${desc.slice(0, 60)}"`);
+            results.errors.push(`Cota extra (${fallbackExtraTipo?.nome ?? "Motor Garagem"}): fração não identificada em "${desc.slice(0, 60)}"`);
             continue;
           }
           const mes = date.getMonth() + 1;
@@ -359,7 +359,7 @@ async function importTransactions(transactions: any[], connectionId?: string): P
             quotaKeys.add(qKey);
             quotasToInsert.push({
               fracaoId: fracao.id, tipo: "extra", mes, ano, valor,
-              fundoReserva: 0, quotaTipoId: extraTipo?.id ?? null,
+              fundoReserva: 0, quotaTipoId: fallbackExtraTipo?.id ?? null,
               pago: true, dataPagamento: date, metodoPagamento: "transferência",
               observacoes: desc,
             });
@@ -957,25 +957,51 @@ export async function runBankSync(): Promise<void> {
   const lastSync = await db.select().from(schema.bankSyncLogs)
     .orderBy(desc(schema.bankSyncLogs.createdAt)).limit(1);
 
-  const dateFrom = lastSync[0]?.syncedTo
+  let dateFrom = lastSync[0]?.syncedTo
     ? new Date(lastSync[0].syncedTo as any)
     : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const dateTo = new Date();
 
-  const fromStr = dateFrom.toISOString().slice(0, 10);
-  const toStr = dateTo.toISOString().slice(0, 10);
+  // Cap dateFrom: Santander PT via Enable Banking não aceita mais de 89 dias para trás
+  const MAX_LOOKBACK_DAYS = 89;
+  const earliestAllowed = new Date(Date.now() - MAX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  if (dateFrom < earliestAllowed) {
+    console.log(`[bank-cron] dateFrom ${dateFrom.toISOString().slice(0,10)} capped to ${earliestAllowed.toISOString().slice(0,10)} (Santander max ${MAX_LOOKBACK_DAYS} days)`);
+    dateFrom = earliestAllowed;
+  }
+
+  // Santander PT via Enable Banking: janela máxima ~30 dias por request
+  // Dividir em chunks para evitar 422 WRONG_TRANSACTIONS_PERIOD
+  const MAX_DAYS = 30;
+  const chunks: Array<{ from: string; to: string }> = [];
+  let chunkStart = new Date(dateFrom);
+  while (chunkStart < dateTo) {
+    const chunkEnd = new Date(chunkStart);
+    chunkEnd.setDate(chunkEnd.getDate() + MAX_DAYS);
+    if (chunkEnd > dateTo) chunkEnd.setTime(dateTo.getTime());
+    chunks.push({
+      from: chunkStart.toISOString().slice(0, 10),
+      to: chunkEnd.toISOString().slice(0, 10),
+    });
+    chunkStart = new Date(chunkEnd);
+    chunkStart.setDate(chunkStart.getDate() + 1);
+  }
 
   let allTransactions: any[] = [];
   const syncErrors: string[] = [];
 
-  for (const acc of accounts) {
-    try {
-      const data = await enableBankingFetch(
-        `/accounts/${acc.uid}/transactions?date_from=${fromStr}&date_to=${toStr}`
-      );
-      allTransactions = allTransactions.concat(data.transactions ?? []);
-    } catch (e: any) {
-      syncErrors.push(`Conta ${acc.uid}: ${e.message}`);
+  for (const chunk of chunks) {
+    for (const acc of accounts) {
+      try {
+        const data = await enableBankingFetch(
+          `/accounts/${acc.uid}/transactions?date_from=${chunk.from}&date_to=${chunk.to}`
+        );
+        const txns = data.transactions ?? [];
+        allTransactions = allTransactions.concat(txns);
+        console.log(`[bank-cron] ${chunk.from}→${chunk.to}: ${txns.length} txns (conta ${acc.uid})`);
+      } catch (e: any) {
+        syncErrors.push(`Conta ${acc.uid} (${chunk.from}→${chunk.to}): ${e.message}`);
+      }
     }
   }
 
