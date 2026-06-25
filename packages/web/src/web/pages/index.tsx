@@ -146,7 +146,12 @@ export default function DashboardPage() {
   return (
     <>
       <SyncBanner isSyncing={isSyncing} syncError={syncError} syncDone={syncDone} />
-      <Overview d={d} setSecao={setSecao} onRefresh={() => qc.invalidateQueries({ queryKey: ["dashboard"] })} />
+      <Overview d={d} setSecao={setSecao} onRefresh={async () => {
+        try {
+          await api.dashboard.recalcular.$post();
+        } catch (_) { /* ignora erros de rede — o GET vai mostrar o estado actual */ }
+        await qc.invalidateQueries({ queryKey: ["dashboard"] });
+      }} />
     </>
   );
 }
@@ -364,6 +369,7 @@ function CativosAlert({ d }: { d: any }) {
 // OVERVIEW — layout principal
 // ══════════════════════════════════════════════
 function Overview({ d, setSecao, onRefresh }: any) {
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const mesNome = getMesNome(d.mesAtual);
   const taxaCobranca = d.totalQuotas > 0 ? Math.round((d.quotasPagas / d.totalQuotas) * 100) : 0;
 
@@ -392,8 +398,17 @@ function Overview({ d, setSecao, onRefresh }: any) {
         title="Dashboard"
         subtitle={`Urbanização da Fonte · ${mesNome} ${d.anoAtual}`}
         actions={
-          <Button variant="secondary" size="sm" onClick={onRefresh}>
-            <RefreshCw size={13} /> Atualizar
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={isRefreshing}
+            onClick={async () => {
+              setIsRefreshing(true);
+              try { await onRefresh(); } finally { setIsRefreshing(false); }
+            }}
+          >
+            <RefreshCw size={13} className={isRefreshing ? "animate-spin" : ""} />
+            {isRefreshing ? "A recalcular…" : "Atualizar"}
           </Button>
         }
       />
