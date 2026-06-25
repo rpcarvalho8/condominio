@@ -7,6 +7,19 @@ import {
   identificarDestinoCativo,
   type GavetaCativo,
 } from "./cativo-rules";
+import {
+  ORCAMENTO_MOTOR,
+  ORCAMENTO_INCENDIO,
+  ORCAMENTO_ELEVADORES,
+  ORCAMENTO_OBRAS,
+  ANCORA_SALDO_CC,
+  ANCORA_SALDO_FR,
+  ANCORA_SALDO_ELEVADORES,
+  ANCORA_SALDO_OBRAS,
+  ANCORA_DATA_CC,
+  ANCORA_DATA_MOVIMENTOS,
+  TOTAL_FRACOES,
+} from "../lib/identity-matrix";
 
 // ─────────────────────────────────────────────────────────
 // DADOS REAIS DO EXCEL — devedores por conta
@@ -61,13 +74,8 @@ const ELEV_TIPO_ID     = "4696eef9-bd1f-46ff-a368-47cfd455eeca";
 const INCENDIO_TIPO_ID = "dd16bd50-a2ab-4387-9d70-95822b1a61d7";
 
 // ─── ORÇAMENTOS TOTAIS APROVADOS EM ASSEMBLEIA ───────────────────────────────
-// Fonte: Atas de Assembleia — valores com IVA, para o condomínio completo.
-// Utilizados para calcular a dívida global de cada cota extraordinária:
-//   em_divida = orcamento_total − total_já_arrecadado (quotas pago=true)
-const ORCAMENTO_MOTOR      =  707.25;   // Cota Extra Motor Garagem (portão)
-const ORCAMENTO_INCENDIO   = 2644.50;   // Cota Extra Incêndio / Seguro
-const ORCAMENTO_ELEVADORES = 6958.18;   // Cota Extra Elevadores (INDAQUA)
-const ORCAMENTO_OBRAS      = 50550.04;  // Cota Extra Obras
+// Importados de identity-matrix.ts (single source of truth).
+// ORCAMENTO_MOTOR, ORCAMENTO_INCENDIO, ORCAMENTO_ELEVADORES, ORCAMENTO_OBRAS
 
 // ─── IBANs DAS POUPANÇAS FÍSICAS (Depósitos a Prazo Santander) ──────────────
 // Saídas DBIT da Conta à Ordem para estes IBANs = transferências internas.
@@ -81,18 +89,14 @@ const IBANS_POUPANCA_FISICA = new Set<string>([
   // Exemplo: "PT50003300004520936620005"
 ]);
 
-// ─── ÂNCORA DE PROCESSAMENTO DE MOVIMENTOS BANCÁRIOS ────────────────────────
-// Data a partir da qual os movimentos da conta à ordem são processados
-// pela lógica de triagem (receitas → gavetas, cativos, etc.).
-// Corresponde ao início do período coberto pelos saldos ancorados de 15/06/2026.
-const ANCORA_MOVIMENTOS = new Date("2026-06-02T00:00:00.000Z");
-const ANCORA_TS = Math.floor(ANCORA_MOVIMENTOS.getTime() / 1000);
-
-// Âncora canónica da Conta Corrente — saldo físico confirmado em 15/06/2026: 1806.74€.
-// NUNCA substituir pelo saldo_base_valor/saldo_base_data da DB (esses são dados históricos
-// da Enable Banking e produzem valores errados como 3738.39€).
-const ANCORA_CC = new Date("2026-06-15T00:00:00.000Z");
-const ANCORA_CC_TS = Math.floor(ANCORA_CC.getTime() / 1000);
+// ─── ÂNCORAS — importadas de identity-matrix.ts (single source of truth) ────
+// ANCORA_DATA_MOVIMENTOS  → 02/06/2026 (início triagem bancária)
+// ANCORA_DATA_CC          → 15/06/2026 (saldo CC canónico: 1806.74€)
+// NUNCA usar saldo_base_valor/saldo_base_data da DB — valores Enable Banking errados.
+const ANCORA_MOVIMENTOS = ANCORA_DATA_MOVIMENTOS;  // alias local para legibilidade
+const ANCORA_TS = Math.floor(ANCORA_DATA_MOVIMENTOS.getTime() / 1000);
+const ANCORA_CC = ANCORA_DATA_CC;                  // alias local para legibilidade
+const ANCORA_CC_TS = Math.floor(ANCORA_DATA_CC.getTime() / 1000);
 
 // ─── MOVIMENTO TESTE (a ignorar sempre) ─────────────────────────────────────
 // Transferência de teste de 15,00€ — eliminar do processamento.
@@ -193,11 +197,11 @@ const FUNDO_RESERVA_DEVEDORES_EXCEL = [
 // Estes valores são o ponto de partida (t=0) para o algoritmo de triagem.
 // Movimentos processados a partir de 02/06/2026 (ANCORA_MOVIMENTOS).
 const SALDO_DEFAULTS: Record<string, number> = {
-  saldo_conta_corrente: 1806.74, // Saldo físico Conta à Ordem ancorado a 15/06/2026
-  saldo_fundo_reserva: 651.30,   // Depósito a Prazo Fundo de Reserva ancorado a 15/06/2026
+  saldo_conta_corrente: ANCORA_SALDO_CC,         // Conta à Ordem — âncora 15/06/2026
+  saldo_fundo_reserva:  ANCORA_SALDO_FR,         // Dep. a Prazo FR — âncora 15/06/2026
   atraso_fundo_reserva: 7.21,    // corrigido: L pagou 25.47 (23.99 pre-2026 fundo + parcial Jan)
-  saldo_obras: 21185.29,         // Depósito a Prazo Obras ancorado a 15/06/2026
-  saldo_quota_extra: 110.45,     // Depósito a Prazo Elevadores ancorado a 15/06/2026
+  saldo_obras:          ANCORA_SALDO_OBRAS,      // Dep. a Prazo Obras — âncora 15/06/2026
+  saldo_quota_extra:    ANCORA_SALDO_ELEVADORES, // Dep. a Prazo Elevadores — âncora 15/06/2026
   saldo_incendio: 0,
   a_receber_incendio: 157.98,
   a_receber_obras: 6006.05,
@@ -215,7 +219,7 @@ const SALDO_DEFAULTS: Record<string, number> = {
   cativo_portao: 0,
   cativo_obras: 0,
   // saldo_operacional_disponivel = saldo_conta_corrente − soma de todos os cativos
-  saldo_operacional_disponivel: 1806.74,
+  saldo_operacional_disponivel: ANCORA_SALDO_CC,
   // ── Dívida global por cota extraordinária (orçamento − total arrecadado) ──
   // Calculados dinamicamente em recalcularSaldos() com base nos ORCAMENTOS_*.
   divida_total_motor:      ORCAMENTO_MOTOR,
@@ -404,10 +408,12 @@ export async function recalcularSaldos(): Promise<void> {
   //      • Saídas para IBANs de poupanças     → ignorar (transferência interna)
   //      • Movimento 15,00€ (teste)           → ignorar
   // ─────────────────────────────────────────────────────────────────────────────
-  let acumObras  = 0; // receitas de obras somadas desde a âncora (já no prazo)
-  let acumFR     = 0; // receitas FR somadas desde a âncora (já no prazo)
-  let cativoMotor    = 0; // retidos na Conta à Ordem (não transferidos)
-  let cativoIncendio = 0;
+  // BLINDAGEM: acumuladores sempre zero-init aqui — função não é reentrante
+  // (Bun é single-threaded; sem risco de concorrência, mas explícito por clareza).
+  let acumObras      = 0; // receitas de obras somadas desde ANCORA_DATA_MOVIMENTOS
+  let acumFR         = 0; // receitas FR somadas desde ANCORA_DATA_MOVIMENTOS
+  let cativoMotor    = 0; // Motor/Portão retidos na Conta à Ordem (não transferidos)
+  let cativoIncendio = 0; // Incêndio retido na Conta à Ordem (não transferido)
 
   try {
     const movimentos = await db

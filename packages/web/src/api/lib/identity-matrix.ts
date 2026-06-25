@@ -80,6 +80,34 @@ export interface FracaoIdentidade {
 //          Condomínio | Fundo Reserva | [4x Quota Extra: total | em dívida]
 // NOTA: quota_mensal BD = condominio + fundoReserva (valor total combinado).
 
+// ─── ORÇAMENTOS APROVADOS EM ASSEMBLEIA ──────────────────────────────────────
+// Fonte: Atas de Assembleia — valores com IVA, para o condomínio completo.
+// Single source of truth — importar daqui em dashboard.ts e no motor LLM.
+export const ORCAMENTO_MOTOR      =  707.25;   // Cota Extra Motor Garagem (portão)
+export const ORCAMENTO_INCENDIO   = 2644.50;   // Cota Extra Incêndio / Seguro
+export const ORCAMENTO_ELEVADORES = 6958.18;   // Cota Extra Elevadores (INDAQUA)
+export const ORCAMENTO_OBRAS      = 50550.04;  // Cota Extra Obras
+
+// ─── SALDOS ÂNCORA (15/06/2026) ──────────────────────────────────────────────
+// Fonte: Extratos físicos Santander confirmados em 15/06/2026.
+// NUNCA substituir por saldo_base_valor/saldo_base_data da DB (valores Enable Banking
+// — produzem 3738.39€ em vez do saldo real de 1806.74€).
+export const ANCORA_SALDO_CC         = 1806.74;   // Conta à Ordem ancorada a 15/06/2026
+export const ANCORA_SALDO_FR         =  651.30;   // Dep. a Prazo Fundo de Reserva
+export const ANCORA_SALDO_ELEVADORES =  110.45;   // Dep. a Prazo Elevadores
+export const ANCORA_SALDO_OBRAS      = 21185.29;  // Dep. a Prazo Obras
+
+// Data âncora da Conta Corrente — saldo físico confirmado nesta data.
+export const ANCORA_DATA_CC         = new Date("2026-06-15T00:00:00.000Z");
+// Data a partir da qual os movimentos bancários são processados pela triagem.
+// Movimentos anteriores a esta data são ignorados pelo algoritmo.
+export const ANCORA_DATA_MOVIMENTOS = new Date("2026-06-02T00:00:00.000Z");
+
+// Número total de frações do condomínio (para cálculos per-capita).
+export const TOTAL_FRACOES = 33;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const MATRIZ_PROPRIEDADES: FracaoIdentidade[] = [
   // ── ENTRADA 21 ────────────────────────────────────────────────────────────
   {
