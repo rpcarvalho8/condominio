@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../database";
 import * as schema from "../database/schema";
-import { eq, and, sql, gt } from "drizzle-orm";
+import { eq, and, sql, gt, gte } from "drizzle-orm";
 import {
   REGRAS_CATIVO,
   identificarDestinoCativo,
@@ -593,7 +593,7 @@ export async function recalcularSaldos(): Promise<void> {
     const totalDespesasDesdeAnc = despesasDesdeAnc.reduce((s, d) => s + d.valor, 0);
 
     saldoContaCorrente = Math.round(
-      (SALDO_DEFAULTS.saldo_conta_corrente + receitasQuotasBD + creditosBancariosCC - totalDespesasDesdeAnc) * 100
+      (SALDO_DEFAULTS.saldo_conta_corrente! + receitasQuotasBD + creditosBancariosCC - totalDespesasDesdeAnc) * 100
     ) / 100;
 
     console.log(
@@ -655,7 +655,7 @@ export async function recalcularSaldos(): Promise<void> {
   }
 
   // saldo_operacional_disponivel = saldo bruto − cativos comprometidos com gavetas
-  const saldoOperacional = Math.round((saldoContaCorrente - cativos.total) * 100) / 100;
+  const saldoOperacional = Math.round((saldoContaCorrente! - cativos.total) * 100) / 100;
   await upsertSaldo("saldo_operacional_disponivel", saldoOperacional);
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -670,13 +670,15 @@ export async function recalcularSaldos(): Promise<void> {
       .where(and(
         eq(schema.quotas.tipo, "condominio"),
         eq(schema.quotas.pago, false),
+        // FILTRO TEMPORAL: só quotas desde Junho 2026 — sem seeds antigos
+        sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`,
       ));
     const atrasoFundoBD = fundoEmAtrasoRows.reduce((s, q) => s + (q.fundoReserva ?? 0), 0);
     await upsertSaldo("atraso_fundo_reserva", Math.round(atrasoFundoBD * 100) / 100);
 
     // Saldo FR = base + receitas classificadas desde âncora + cativos FR ainda na conta
     const saldoFRVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_fundo_reserva + acumFR + cativos.fundo_reserva) * 100
+      (SALDO_DEFAULTS.saldo_fundo_reserva! + acumFR + cativos.fundo_reserva) * 100
     ) / 100;
     await upsertSaldo("saldo_fundo_reserva", saldoFRVirtual);
   } catch (e) {
@@ -692,7 +694,11 @@ export async function recalcularSaldos(): Promise<void> {
     const obrasEmAtraso = await db
       .select({ valor: schema.quotas.valor })
       .from(schema.quotas)
-      .where(and(eq(schema.quotas.tipo, "obras"), eq(schema.quotas.pago, false)));
+      .where(and(
+        eq(schema.quotas.tipo, "obras"),
+        eq(schema.quotas.pago, false),
+        sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`,
+      ));
     const aReceberObrasBD = obrasEmAtraso.reduce((s, q) => s + q.valor, 0);
 
     if (aReceberObrasBD > 0) {
@@ -701,7 +707,7 @@ export async function recalcularSaldos(): Promise<void> {
 
     // Saldo obras = base + receitas classificadas desde âncora (já no prazo físico)
     const saldoObrasVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_obras + acumObras) * 100
+      (SALDO_DEFAULTS.saldo_obras! + acumObras) * 100
     ) / 100;
     await upsertSaldo("saldo_obras", saldoObrasVirtual);
   } catch (e) {
@@ -722,13 +728,13 @@ export async function recalcularSaldos(): Promise<void> {
     const aReceberIndaqua = indaquaRows.reduce((s, q) => {
       if (q.pago) return s;
       const m = q.observacoes?.match(/Em d[ií]vida: ([\d.]+)€/);
-      return s + (m ? parseFloat(m[1]) : q.valor);
+      return s + (m ? parseFloat(m[1]!) : q.valor);
     }, 0);
 
     await upsertSaldo("a_receber_indaqua", Math.round(aReceberIndaqua * 100) / 100);
 
     const saldoIndaquaVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_quota_extra + cativos.indaqua) * 100
+      (SALDO_DEFAULTS.saldo_quota_extra! + cativos.indaqua) * 100
     ) / 100;
     await upsertSaldo("saldo_quota_extra", saldoIndaquaVirtual);
   } catch (e) {
@@ -746,13 +752,14 @@ export async function recalcularSaldos(): Promise<void> {
       .where(and(
         sql`${schema.quotas.observacoes} LIKE '%ncen%'`,
         eq(schema.quotas.pago, false),
+        sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`,
       ));
     const aReceberIncendio = incendioRows.reduce((s, q) => s + q.valor, 0);
     await upsertSaldo("a_receber_incendio", Math.round(aReceberIncendio * 100) / 100);
 
     // Saldo incêndio = cativos retidos (cativoIncendio da triagem + motor matricial)
     const saldoIncendioVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_incendio + cativos.incendio) * 100
+      (SALDO_DEFAULTS.saldo_incendio! + cativos.incendio) * 100
     ) / 100;
     await upsertSaldo("saldo_incendio", saldoIncendioVirtual);
   } catch (e) {
@@ -793,7 +800,7 @@ export async function recalcularSaldos(): Promise<void> {
 
     // Saldo portão = cativos Motor retidos na Conta à Ordem
     const saldoPortaoVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_portao + cativos.portao) * 100
+      (SALDO_DEFAULTS.saldo_portao! + cativos.portao) * 100
     ) / 100;
     await upsertSaldo("saldo_portao", saldoPortaoVirtual);
   } catch (e) {
@@ -974,7 +981,9 @@ export const dashboard = new Hono()
     const saldoMes = receitaMes - totalDespesasMes;
 
     // ===== SECÇÃO: CONTA CORRENTE (morosos) =====
-    // Todos os meses em atraso — quotas condomínio não pagas
+    // FILTRO TEMPORAL ABSOLUTO: só quotas vencidas a partir de 02/06/2026.
+    // Qualquer registo com data anterior é lixo de seeds/QA e NÃO deve contar.
+    // ANCORA_TS = unix timestamp de 2026-06-02 (definido acima como alias de ANCORA_DATA_MOVIMENTOS).
     const todasQuotasEmAtraso = await db
       .select({
         quota: schema.quotas,
@@ -985,7 +994,9 @@ export const dashboard = new Hono()
       .where(
         and(
           eq(schema.quotas.tipo, "condominio"),
-          eq(schema.quotas.pago, false)
+          eq(schema.quotas.pago, false),
+          // Só quotas criadas/vencidas desde a âncora 02/06/2026 — elimina seeds antigos
+          sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`
         )
       );
 
@@ -1068,7 +1079,9 @@ export const dashboard = new Hono()
             and(
               eq(schema.quotas.tipo, "extra"),
               eq(schema.quotas.quotaTipoId, qt.id),
-              eq(schema.quotas.pago, false)
+              eq(schema.quotas.pago, false),
+              // FILTRO TEMPORAL: só extras vencidas a partir de Junho 2026
+              sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`
             )
           );
 
@@ -1242,7 +1255,7 @@ export const dashboard = new Hono()
       .filter(d => d.date.getTime() >= ANCORA_CC.getTime())
       .reduce((s, d) => s + d.amount, 0);
     const saldoOperacionalDisponivel = Math.round(
-      (saldos.saldo_conta_corrente - cativos.totalCativos - Math.round(totalDebitosBancariosAposAncora * 100) / 100) * 100
+      (saldos.saldo_conta_corrente! - cativos.totalCativos - Math.round(totalDebitosBancariosAposAncora * 100) / 100) * 100
     ) / 100;
 
     // ===== PORTÃO GARAGEM e QUOTA EXTRA — derivados do extrasSecoes (100% dinâmico) =====
@@ -1434,9 +1447,9 @@ export const dashboard = new Hono()
       // saldoLiquidoBanco         = CC + Obras + FR — total real imediato em banco
       // valoresCativos            = dinheiro comprometido retido na Conta à Ordem
       // saldoOperacionalDisponivel = CC − cativos − débitos não categorizados
-      saldoContaCorrenteTotal: saldos.saldo_conta_corrente,
+      saldoContaCorrenteTotal: saldos.saldo_conta_corrente!,
       saldoLiquidoBanco: Math.round(
-        (saldos.saldo_conta_corrente + saldos.saldo_obras + saldos.saldo_fundo_reserva) * 100
+        (saldos.saldo_conta_corrente! + saldos.saldo_obras! + saldos.saldo_fundo_reserva!) * 100
       ) / 100,
       saldoOperacionalDisponivel,
       valoresCativos: {
