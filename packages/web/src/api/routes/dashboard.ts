@@ -1012,6 +1012,17 @@ export const dashboard = new Hono()
     const morosos = Array.from(morososMap.values()).sort((a, b) => b.total - a.total);
     const totalMorosos = morosos.reduce((s, m) => s + m.total, 0);
 
+    // ===== DÍVIDAS INDIVIDUAIS POR PERMILAGEM =====================================
+    // Movidas para o topo do handler — devem estar inicializadas antes de qualquer
+    // bloco que as consuma (obras, motor, incêndio, elevadores).
+    // Fix: ReferenceError TDZ (dividasIndividuais usada antes de declaração).
+    let dividasIndividuais: Record<string, DividaFracao> = {};
+    try {
+      dividasIndividuais = await calcularDividasIndividuais();
+    } catch (e) {
+      console.warn("[dashboard] calcularDividasIndividuais falhou:", e);
+    }
+
     // ===== SECÇÃO: OBRAS =====
     // Fonte primária: dividasIndividuais (permilagem × ORCAMENTO_OBRAS − pago via bank_transactions)
     // Fallback: fracoes.obras_divida > 0 (seeded do Excel) → quotas table
@@ -1192,16 +1203,6 @@ export const dashboard = new Hono()
     }));
 
     const saldos = await getSaldos();
-
-    // ===== DÍVIDAS INDIVIDUAIS POR PERMILAGEM =====================================
-    // Calculadas a partir de bank_transactions.rubrica_extra (preenchida durante sync).
-    // Se rubrica_extra não estiver populada (transações antigas), dívida = teto teórico total.
-    let dividasIndividuais: Record<string, DividaFracao> = {};
-    try {
-      dividasIndividuais = await calcularDividasIndividuais();
-    } catch (e) {
-      console.warn("[dashboard] calcularDividasIndividuais falhou:", e);
-    }
 
     // ===== VALORES CATIVOS — movimentos bancários não processados na Conta à Ordem =====
     // Lê bank_transactions(imported=0, amount>0) e classifica por gaveta via REGRAS_CATIVO.
