@@ -32,3 +32,4 @@ packages/web/drizzle/
 .env.keyfix
 packages/desktop/dist-electron/
 .git-credentials.env
+.env.push

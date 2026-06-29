@@ -670,8 +670,8 @@ export async function recalcularSaldos(): Promise<void> {
       .where(and(
         eq(schema.quotas.tipo, "condominio"),
         eq(schema.quotas.pago, false),
-        // FILTRO TEMPORAL: só quotas desde Junho 2026 — sem seeds antigos
-        sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`,
+        // FILTRO TEMPORAL: todas as quotas de 2026 (qualquer mês) — seeds são de 2025 ou anteriores
+        sql`${schema.quotas.ano} >= 2026`,
       ));
     const atrasoFundoBD = fundoEmAtrasoRows.reduce((s, q) => s + (q.fundoReserva ?? 0), 0);
     await upsertSaldo("atraso_fundo_reserva", Math.round(atrasoFundoBD * 100) / 100);
@@ -697,7 +697,7 @@ export async function recalcularSaldos(): Promise<void> {
       .where(and(
         eq(schema.quotas.tipo, "obras"),
         eq(schema.quotas.pago, false),
-        sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`,
+        sql`${schema.quotas.ano} >= 2026`,
       ));
     const aReceberObrasBD = obrasEmAtraso.reduce((s, q) => s + q.valor, 0);
 
@@ -752,7 +752,7 @@ export async function recalcularSaldos(): Promise<void> {
       .where(and(
         sql`${schema.quotas.observacoes} LIKE '%ncen%'`,
         eq(schema.quotas.pago, false),
-        sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`,
+        sql`${schema.quotas.ano} >= 2026`,
       ));
     const aReceberIncendio = incendioRows.reduce((s, q) => s + q.valor, 0);
     await upsertSaldo("a_receber_incendio", Math.round(aReceberIncendio * 100) / 100);
@@ -1087,9 +1087,8 @@ export const dashboard = new Hono()
     const saldoMes = receitaMes - totalDespesasMes;
 
     // ===== SECÇÃO: CONTA CORRENTE (morosos) =====
-    // FILTRO TEMPORAL ABSOLUTO: só quotas vencidas a partir de 02/06/2026.
-    // Qualquer registo com data anterior é lixo de seeds/QA e NÃO deve contar.
-    // ANCORA_TS = unix timestamp de 2026-06-02 (definido acima como alias de ANCORA_DATA_MOVIMENTOS).
+    // FILTRO: todas as quotas de 2026 não pagas (qualquer mês).
+    // Seeds/QA são de 2025 ou anteriores — ano >= 2026 exclui-os corretamente.
     const todasQuotasEmAtraso = await db
       .select({
         quota: schema.quotas,
@@ -1101,8 +1100,8 @@ export const dashboard = new Hono()
         and(
           eq(schema.quotas.tipo, "condominio"),
           eq(schema.quotas.pago, false),
-          // Só quotas criadas/vencidas desde a âncora 02/06/2026 — elimina seeds antigos
-          sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`
+          // Todas as quotas de 2026 em atraso — seeds são de 2025 ou anteriores
+          sql`${schema.quotas.ano} >= 2026`
         )
       );
 
@@ -1194,8 +1193,8 @@ export const dashboard = new Hono()
               eq(schema.quotas.tipo, "extra"),
               eq(schema.quotas.quotaTipoId, qt.id),
               eq(schema.quotas.pago, false),
-              // FILTRO TEMPORAL: só extras vencidas a partir de Junho 2026
-              sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 6))`
+              // FILTRO TEMPORAL: todas as extras de 2026 em atraso (qualquer mês)
+              sql`${schema.quotas.ano} >= 2026`
             )
           );
 

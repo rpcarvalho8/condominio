@@ -742,7 +742,7 @@ function SecaoContaCorrente({ data: d, onBack }: any) {
                     <div key={pag.referencia} className="flex items-center justify-between text-xs px-3 py-1.5 rounded-lg"
                       style={{ background: "var(--bg-elevated)" }}>
                       <span style={{ color: "var(--text-secondary)" }}>{pag.data} · {pag.descricao}</span>
-                      <span className="font-mono font-bold" style={{ color: "var(--green)" }}>+{formatEuro(pag.montante)}</span>
+                      <span className="font-mono font-bold" style={{ color: "var(--amber)" }}>{formatEuro(pag.montante)}</span>
                     </div>
                   ))}
                 </div>
