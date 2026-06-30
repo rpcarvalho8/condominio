@@ -254,6 +254,17 @@ function SaldoOperacionalCard({ d }: { d: any }) {
 }
 
 // ══════════════════════════════════════════════
+// ══════════════════════════════════════════════
+// GAVETA COLORS — mapeamento visual das gavetas de cativos
+// ══════════════════════════════════════════════
+const GAVETA_COLORS: Record<string, { bar: string; label: string }> = {
+  fundo_reserva: { bar: "#22c55e", label: "Fundo Reserva" },
+  indaqua:       { bar: "#38bdf8", label: "Indaqua" },
+  incendio:      { bar: "#f87171", label: "Incêndio" },
+  portao:        { bar: "#fb923c", label: "Portão" },
+  obras:         { bar: "#fbbf24", label: "Obras" },
+};
+
 // CATIVOS ALERT
 // Painel colapsível — só aparece quando há movimentos cativos (imported=0)
 // Lista cada movimento com badge da gaveta, montante e descrição
