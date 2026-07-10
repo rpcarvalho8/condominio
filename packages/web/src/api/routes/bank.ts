@@ -800,9 +800,13 @@ export const bankRoutes = new Hono()
     const lastSync = await db.select().from(schema.bankSyncLogs)
       .orderBy(desc(schema.bankSyncLogs.createdAt)).limit(1);
 
+    const conexaoAtiva = conn.length > 0 && conn[0].status === "active";
+    const precisaReconectar = conn.length > 0 && conn[0].status !== "active";
+
     return c.json({
       configured: isConfigured,
-      connected: conn.length > 0,
+      connected: conexaoAtiva,
+      needsReconnect: precisaReconectar,
       connection: conn[0] ?? null,
       lastSync: lastSync[0] ?? null,
     });
@@ -866,10 +870,18 @@ export const bankRoutes = new Hono()
       const accounts: any[] = data.accounts_data ?? data.accounts ?? [];
 
       // Store connection
+      // Nome real do ASPSP a que efetivamente se ligou, não um valor fixo —
+      // evita a app "pensar" que está no Santander quando na realidade caiu no Mock ASPSP
+      // (env ENABLE_BANKING_ASPSP_NAME não definida em produção).
+      const aspspLigado = process.env.ENABLE_BANKING_ASPSP_NAME ?? "Mock ASPSP";
+      if (aspspLigado === "Mock ASPSP") {
+        console.warn("[bank/callback] ⚠️ ENABLE_BANKING_ASPSP_NAME não definida — ligou ao Mock ASPSP (sandbox), NÃO ao Santander real!");
+      }
+
       await db.delete(schema.bankConnections); // only one connection at a time
       await db.insert(schema.bankConnections).values({
         sessionId,
-        bankName: "Santander Empresas PT",
+        bankName: aspspLigado,
         accounts: JSON.stringify(accounts),
         status: "active",
         connectedAt: new Date(),
@@ -1008,6 +1020,20 @@ export const bankRoutes = new Hono()
       importResults.errors.push(`[staged] ${e.message}`);
     }
 
+    // Falha total: TODAS as chamadas à Enable Banking falharam (0 transações + houve erros)
+    // → sessão provavelmente expirada/revogada. Isto TEM de ser visível na UI, não só nos logs.
+    const totalCalls = chunks.length * accounts.length;
+    const bancoTotalmenteFalhou = allTransactions.length === 0 && syncErrors.length >= totalCalls && totalCalls > 0;
+
+    // Marca a ligação como precisando de reautenticação quando detectamos erro de auth (401/403)
+    // vindo da própria Enable Banking, para o /status deixar de mentir "connected: true".
+    const erroDeAuth = syncErrors.some(e => /\b(401|403)\b/.test(e) || /invalid_grant|consent|expired|revoked/i.test(e));
+    if (bancoTotalmenteFalhou && erroDeAuth) {
+      await db.update(schema.bankConnections)
+        .set({ status: "expired" })
+        .where(eq(schema.bankConnections.id, connection.id));
+    }
+
     // Log the sync
     await db.insert(schema.bankSyncLogs).values({
       connectionId: connection.id,
@@ -1019,11 +1045,14 @@ export const bankRoutes = new Hono()
       quotasUpdated: importResults.quotasUpdated,
       skipped: importResults.despesasSkipped,
       errors: JSON.stringify([...syncErrors, ...importResults.errors]),
-      status: syncErrors.length > 0 || importResults.errors.length > 0 ? "partial" : "ok",
+      status: bancoTotalmenteFalhou ? "error" : (syncErrors.length > 0 || importResults.errors.length > 0 ? "partial" : "ok"),
     });
 
+    // Devolver HTTP não-200 quando a falha é total, para o frontend não assumir sucesso.
+    const httpStatus = bancoTotalmenteFalhou ? 502 : 200;
+
     return c.json({
-      ok: true,
+      ok: !bancoTotalmenteFalhou,
       period: { from: dateFrom.toISOString().slice(0, 10), to: dateTo.toISOString().slice(0, 10) },
       transactionsFound: allTransactions.length,
       ...importResults,
@@ -1033,7 +1062,8 @@ export const bankRoutes = new Hono()
         providers: llmProviderCountsHTTP,
       },
       syncErrors,
-    });
+      needsReconnect: bancoTotalmenteFalhou && erroDeAuth,
+    }, httpStatus as any);
   })
 
   // DELETE /api/bank/disconnect

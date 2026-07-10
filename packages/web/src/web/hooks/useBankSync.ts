@@ -12,9 +12,15 @@ async function callBankEndpoint(path: string): Promise<{ ok: boolean; error?: st
 
   try {
     const res = await fetch(path, { method: "POST", headers });
+    const body = await res.json().catch(() => ({} as any));
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
       return { ok: false, error: (body as any).error ?? `HTTP ${res.status}` };
+    }
+    // A rota pode devolver 200 com ok:false ou syncErrors preenchido (falha parcial/total
+    // da Enable Banking) — isto TEM de ser tratado como erro visível na UI.
+    if ((body as any).ok === false || ((body as any).syncErrors?.length ?? 0) > 0) {
+      const primeiroErro = (body as any).syncErrors?.[0] ?? "Erro desconhecido na sincronização";
+      return { ok: false, error: (body as any).needsReconnect ? `Ligação bancária expirada — reconecta em Importar. (${primeiroErro})` : primeiroErro };
     }
     return { ok: true };
   } catch (e: unknown) {
