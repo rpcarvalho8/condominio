@@ -1175,17 +1175,30 @@ export const dashboard = new Hono()
     let totalObrasAtraso: number;
 
     if (cartasMorosos.obras.length > 0) {
-      // Fonte cartas — usar dados da carta directamente
-      obrasEmAtraso = cartasMorosos.obras.map(m => ({
-        fracao: {
-          id: m.fracao,
-          numero: m.fracao,
-          proprietarioNome: m.proprietario,
-          andar: 0,
-        },
-        total: m.total,
-        quotas: [],
-      }));
+      // Fonte cartas — baseline do início do mês, MENOS pagamentos reais confirmados
+      // na BD desde a emissão (Opção A: dinâmico dentro do mês; a carta em si só
+      // é re-emitida no mês seguinte, mas o "em dívida" mostrado reflecte o banco).
+      const obrasPagasRows = await db
+        .select({ numero: schema.fracoes.numero, valor: schema.quotas.valor })
+        .from(schema.quotas)
+        .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
+        .where(and(eq(schema.quotas.tipo, "obras"), eq(schema.quotas.pago, true)));
+      const obrasPagoPorFracao = new Map<string, number>();
+      for (const r of obrasPagasRows) {
+        if (!r.numero) continue;
+        obrasPagoPorFracao.set(r.numero, (obrasPagoPorFracao.get(r.numero) ?? 0) + r.valor);
+      }
+      obrasEmAtraso = cartasMorosos.obras
+        .map(m => {
+          const pago = obrasPagoPorFracao.get(m.fracao) ?? 0;
+          return {
+            fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
+            total: Math.round(Math.max(m.total - pago, 0) * 100) / 100,
+            quotas: [],
+          };
+        })
+        .filter(m => m.total > 0)
+        .sort((a, b) => b.total - a.total);
       totalObrasAtraso = Math.round(obrasEmAtraso.reduce((s, m) => s + m.total, 0) * 100) / 100;
     } else {
       // Fallback: fracoes.obras_divida (seeded do Excel)
@@ -1458,11 +1471,32 @@ export const dashboard = new Hono()
     let motorAReceberDinamico: number;
 
     if (cartasMorosos.motor.length > 0) {
-      motorMorososDinamico = cartasMorosos.motor.map(m => ({
-        fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
-        total: m.total,
-        quotas: [],
-      }));
+      // Opção A: baseline da carta MENOS pagamentos "extra"/Motor confirmados na BD.
+      const motorPagasRows = await db
+        .select({ numero: schema.fracoes.numero, valor: schema.quotas.valor })
+        .from(schema.quotas)
+        .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
+        .where(and(
+          eq(schema.quotas.tipo, "extra"),
+          eq(schema.quotas.pago, true),
+          sql`(${schema.quotas.observacoes} LIKE '%MOTOR%' OR ${schema.quotas.observacoes} LIKE '%GARAGEM%' OR ${schema.quotas.observacoes} LIKE '%PORT%O%')`
+        ));
+      const motorPagoPorFracao = new Map<string, number>();
+      for (const r of motorPagasRows) {
+        if (!r.numero) continue;
+        motorPagoPorFracao.set(r.numero, (motorPagoPorFracao.get(r.numero) ?? 0) + r.valor);
+      }
+      motorMorososDinamico = cartasMorosos.motor
+        .map(m => {
+          const pago = motorPagoPorFracao.get(m.fracao) ?? 0;
+          return {
+            fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
+            total: Math.round(Math.max(m.total - pago, 0) * 100) / 100,
+            quotas: [],
+          };
+        })
+        .filter(d => d.total > 0)
+        .sort((a, b) => b.total - a.total);
       motorAReceberDinamico = Math.round(motorMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
     } else {
       const motorDividaBD = await db.select({
@@ -1486,11 +1520,32 @@ export const dashboard = new Hono()
     let incendioAReceberDinamico: number;
 
     if (cartasMorosos.incendio.length > 0) {
-      incendioMorososDinamico = cartasMorosos.incendio.map(m => ({
-        fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
-        total: m.total,
-        quotas: [],
-      }));
+      // Opção A: baseline da carta MENOS pagamentos "extra"/Incêndio confirmados na BD.
+      const incendioPagasRows = await db
+        .select({ numero: schema.fracoes.numero, valor: schema.quotas.valor })
+        .from(schema.quotas)
+        .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
+        .where(and(
+          eq(schema.quotas.tipo, "extra"),
+          eq(schema.quotas.quotaTipoId, INCENDIO_TIPO_ID),
+          eq(schema.quotas.pago, true),
+        ));
+      const incendioPagoPorFracao = new Map<string, number>();
+      for (const r of incendioPagasRows) {
+        if (!r.numero) continue;
+        incendioPagoPorFracao.set(r.numero, (incendioPagoPorFracao.get(r.numero) ?? 0) + r.valor);
+      }
+      incendioMorososDinamico = cartasMorosos.incendio
+        .map(m => {
+          const pago = incendioPagoPorFracao.get(m.fracao) ?? 0;
+          return {
+            fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
+            total: Math.round(Math.max(m.total - pago, 0) * 100) / 100,
+            quotas: [],
+          };
+        })
+        .filter(d => d.total > 0)
+        .sort((a, b) => b.total - a.total);
       incendioAReceberDinamico = Math.round(incendioMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
     } else {
       // Fallback: fracoes.incendio_divida (seeded do Excel — baseline Junho 2026)
