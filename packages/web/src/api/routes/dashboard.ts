@@ -70,8 +70,14 @@ const PAGAMENTOS_NAO_CATEGORIZADOS = [
       quota: "Outubro 2026 (~8.3 meses crédito a partir de Fev)",
       fundo: "Janeiro 2026 (parcial — restam ~2.79€)",
     },
-    disputaCondominio: "Condomínio alega que 563.76€ cobre Jan-Out 2026 ignorando dívida pre-2026 de 167.01€",
-    contasNaoCovertas: ["Obras (2110.97€)", "Quota Extra Elevadores (323.24€)", "Portão (29.53€)"],
+    // Nota de reconciliação contabilística (revista 22/07/2026 — linguagem neutra,
+    // substitui formulação anterior em tom de disputa não profissional):
+    notaReconciliacao: "563,76€ aplicados à quota corrente e histórico em atraso (Jan-Out 2026, considerando dívida pré-2026 de 167,01€ incluída no cálculo); 25,47€ aplicados ao fundo de reserva (parcial).",
+    contasNaoCovertas: ["Obras (2110.97€)", "Quota Extra Elevadores (323.24€)"],
+    // Quota Extra Motor (29,53€) — RECONCILIADA em 22/07/2026: pagamento bancário
+    // confirmado via Enable Banking + email do condómino a confirmar a finalidade
+    // da transferência. Quota reclassificada de "condominio" para "extra"/Motor.
+    // Removida desta lista de "não cobertas".
   },
 ];
 
@@ -556,17 +562,32 @@ export async function recalcularSaldos(): Promise<void> {
           amount:      schema.bankTransactions.amount,
           description: schema.bankTransactions.description,
           rawData:     schema.bankTransactions.rawData,
+          date:        schema.bankTransactions.date,
         })
         .from(schema.bankTransactions)
         .where(and(
           sql`${schema.bankTransactions.date} >= ${ANCORA_CC_TS}`,
           sql`${schema.bankTransactions.amount} > 0`,
+          // CRÍTICO: excluir transações já convertidas em quota/despesa (imported=1).
+          // Sem isto, o mesmo dinheiro era somado 2x: uma vez via receitasQuotasBD
+          // (quotas.pago=true) e outra vez aqui via soma directa de bank_transactions.
+          eq(schema.bankTransactions.imported, 0),
         ));
+
+      // Defesa adicional contra duplicados residuais em bank_transactions (mesma
+      // transação real inserida mais que uma vez por falta de transaction_id da
+      // Enable Banking) — deduplicar por impressão digital antes de somar.
+      const fingerprintsVistos = new Set<string>();
 
       for (const mov of movsBanco) {
         const valor   = mov.amount ?? 0;
         const desc    = (mov.description ?? "").trim();
         const absVal  = Math.abs(valor);
+
+        const dia = mov.date instanceof Date ? mov.date : new Date((mov.date as any) * 1000);
+        const fingerprint = `${desc}|${absVal.toFixed(2)}|${dia.getFullYear()}-${dia.getMonth()}-${dia.getDate()}`;
+        if (fingerprintsVistos.has(fingerprint)) continue;
+        fingerprintsVistos.add(fingerprint);
 
         // Ignorar teste
         if (Math.abs(absVal - VALOR_TESTE_EUR) < 0.005) continue;
@@ -1586,14 +1607,25 @@ export const dashboard = new Hono()
       const julhoPagosNums = new Set(julhoPagasRows.map(r => r.numero).filter(Boolean));
 
       // Frações com quotaJulho não paga (não constam nos pagos e têm quotaJulho > 0)
+      // LIMIAR DE DATA: só entra como "em atraso" depois do dia-limite de pagamento
+      // do mês corrente. Sem isto, qualquer fração sem quota reconciliada na BD
+      // aparecia como devedora mesmo dentro do prazo normal (ex: Fração AI, sem
+      // nenhum registo em `quotas`, era tratada como se estivesse atrasada logo
+      // no início do mês). Ajustável — 8 = dia 8 do mês.
+      const DIA_LIMITE_PAGAMENTO_QUOTA = 8;
+      const diaHoje = new Date().getDate();
+      const prazoQuotaMesCorrenteExpirado = diaHoje > DIA_LIMITE_PAGAMENTO_QUOTA;
+
       const historicNums = new Set(ccHistorico.map(m => m.fracao.toUpperCase()));
-      const julhoMorosos = CARTAS_JULHO_2026
-        .filter(c => c.quotaJulho > 0 && !julhoPagosNums.has(c.fracao) && !historicNums.has(c.fracao.toUpperCase()))
-        .map(c => ({
-          fracao: { id: c.fracao, numero: c.fracao, proprietarioNome: c.proprietario, andar: 0 },
-          total: Math.round((c.quotaJulho + c.fundoReservaJulho) * 100) / 100,
-          quotas: [],
-        }));
+      const julhoMorosos = prazoQuotaMesCorrenteExpirado
+        ? CARTAS_JULHO_2026
+            .filter(c => c.quotaJulho > 0 && !julhoPagosNums.has(c.fracao) && !historicNums.has(c.fracao.toUpperCase()))
+            .map(c => ({
+              fracao: { id: c.fracao, numero: c.fracao, proprietarioNome: c.proprietario, andar: 0 },
+              total: Math.round((c.quotaJulho + c.fundoReservaJulho) * 100) / 100,
+              quotas: [],
+            }))
+        : [];
 
       const ccHistoricoFormatado = ccHistorico.map(m => ({
         fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
