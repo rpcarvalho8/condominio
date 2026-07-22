@@ -173,6 +173,29 @@ async function stageTransactions(
         skipped++;
         continue;
       }
+    } else {
+      // Enable Banking nem sempre devolve transaction_id (confirmado: Santander Totta
+      // omite-o nalgumas transferências SEPA). Sem isto, cada sync re-inseria a mesma
+      // transação como nova linha, duplicando-a em bank_transactions e inflacionando
+      // saldos que somam bank_transactions diretamente (ex: creditosBancariosCC no
+      // dashboard). Fallback de dedup: mesma ligação + valor + dia + descrição.
+      const dayStart = new Date(date); dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(date); dayEnd.setHours(23, 59, 59, 999);
+      const existingByFingerprint = await db
+        .select({ id: schema.bankTransactions.id })
+        .from(schema.bankTransactions)
+        .where(and(
+          eq(schema.bankTransactions.connectionId, connectionId),
+          eq(schema.bankTransactions.amount, amount),
+          eq(schema.bankTransactions.description, description),
+          sql`${schema.bankTransactions.date} >= ${Math.floor(dayStart.getTime() / 1000)}`,
+          sql`${schema.bankTransactions.date} <= ${Math.floor(dayEnd.getTime() / 1000)}`,
+        ))
+        .limit(1);
+      if (existingByFingerprint.length > 0) {
+        skipped++;
+        continue;
+      }
     }
 
     await db.insert(schema.bankTransactions).values({

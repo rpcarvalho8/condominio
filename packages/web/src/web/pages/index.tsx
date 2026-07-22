@@ -515,7 +515,7 @@ function Overview({ d, setSecao, onRefresh }: any) {
             {/* Quota Extra Motor */}
             <ContaCard
               titulo="Quota Extra Motor"
-              banco="Quota extra motor — Excel col U"
+              banco="Conta geral"
               saldo={0}
               saldoLabel="sem conta dedicada"
               aReceber={d.motor?.aReceber ?? 0}
@@ -529,7 +529,6 @@ function Overview({ d, setSecao, onRefresh }: any) {
               titulo="Incendio"
               banco="Conta geral"
               saldo={d.incendio?.saldoConta ?? 0}
-              saldoLabel="Obra paga"
               aReceber={d.incendio?.aReceber ?? 0}
               aReceberLabel={`${d.incendio?.fracoesEmAtraso ?? 0} frações por receber`}
               color="red"
@@ -765,7 +764,7 @@ function SecaoContaCorrente({ data: d, onBack }: any) {
   const morosos = d.contaCorrente?.morosos ?? [];
   const total = d.contaCorrente?.totalEmAtraso ?? 0;
   const pagNaoReg = (d.pagamentosNaoRegistados ?? []) as Array<{
-    fracao: string; proprietario: string; pagamentos: Array<{data:string;montante:number;descricao:string;referencia:string}>; totalPago:number; cobreAte:{quota:string;fundo:string}; disputaCondominio:string; contasNaoCovertas:string[]
+    fracao: string; proprietario: string; pagamentos: Array<{data:string;montante:number;descricao:string;referencia:string}>; totalPago:number; cobreAte:{quota:string;fundo:string}; notaReconciliacao:string; contasNaoCovertas:string[]
   }>;
 
   return (
@@ -784,7 +783,7 @@ function SecaoContaCorrente({ data: d, onBack }: any) {
             <div className="flex items-center gap-2">
               <AlertCircle size={15} style={{ color: "var(--amber)", flexShrink: 0 }} />
               <p className="text-sm font-semibold" style={{ color: "var(--amber)" }}>
-                Pagamentos bancários não registados pelo condomínio
+                Pagamentos bancários por reconciliar
               </p>
             </div>
             {pagNaoReg.map((p) => (
@@ -805,11 +804,13 @@ function SecaoContaCorrente({ data: d, onBack }: any) {
                   <span className="font-medium">Quota cobre até:</span> {p.cobreAte.quota}
                 </p>
                 <p className="text-xs px-1" style={{ color: "var(--text-muted)" }}>
-                  <span className="font-medium text-amber-500">Posição do condomínio (contestada):</span> {p.disputaCondominio}
+                  <span className="font-medium">Reconciliação:</span> {p.notaReconciliacao}
                 </p>
-                <p className="text-xs px-1" style={{ color: "var(--text-muted)" }}>
-                  Contas NÃO cobertas por estes pagamentos: {p.contasNaoCovertas.join(" · ")}
-                </p>
+                {p.contasNaoCovertas.length > 0 && (
+                  <p className="text-xs px-1" style={{ color: "var(--text-muted)" }}>
+                    Contas ainda por cobrir: {p.contasNaoCovertas.join(" · ")}
+                  </p>
+                )}
               </div>
             ))}
           </div>
