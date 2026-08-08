@@ -1,0 +1,11 @@
+{
+  "name": "Gestão de Condomínio",
+  "install": "./.cursor/install.sh",
+  "terminals": [
+    {
+      "name": "web-dev",
+      "command": "bun run dev"
+    }
+  ],
+  "ports": [4200]
+}
