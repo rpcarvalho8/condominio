@@ -37,6 +37,7 @@ export default function MorososPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["quotas"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
+      qc.invalidateQueries({ queryKey: ["morosos-count"] });
     },
   });
 

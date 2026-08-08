@@ -195,7 +195,7 @@ export default function MovimentosBancariosPage() {
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       qc.invalidateQueries({ queryKey: ["fracoes"] });
       qc.invalidateQueries({ queryKey: ["quotas"] });
-      qc.invalidateQueries({ queryKey: ["morosos"] });
+      qc.invalidateQueries({ queryKey: ["morosos-count"] });
       // Toast + reload forçado para garantir que não há cache a mascarar os dados reais
       setToast("✨ Movimento reclassificado! A recarregar...");
       setTimeout(() => window.location.reload(), 1200);

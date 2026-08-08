@@ -33,3 +33,7 @@ packages/web/drizzle/
 packages/desktop/dist-electron/
 .git-credentials.env
 .env.push
+
+
+# Dados moradores
+identify-data.json

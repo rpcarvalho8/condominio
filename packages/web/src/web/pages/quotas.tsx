@@ -82,6 +82,7 @@ function QuotasPageInner() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["quotas"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
+      qc.invalidateQueries({ queryKey: ["morosos-count"] });
       setPagarModal(null);
     },
   });
@@ -92,6 +93,7 @@ function QuotasPageInner() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["quotas"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
+      qc.invalidateQueries({ queryKey: ["morosos-count"] });
     },
   });
 
@@ -290,6 +292,9 @@ function QuotasPageInner() {
             morosos={d?.obras?.morosos ?? []}
             loading={dashLoading}
             descricao="Derrama extraordinária para obras no edifício"
+            onPagar={(quotaId, metodo) => pagarMut.mutate({ id: quotaId, metodoPagamento: metodo })}
+            onDesmarcar={(quotaId) => desmarcarMut.mutate(quotaId)}
+            pagarLoading={pagarMut.isPending}
           />
         )}
 
@@ -326,6 +331,9 @@ function QuotasPageInner() {
             morosos={d?.fundoReserva?.morosos ?? []}
             loading={dashLoading}
             descricao="Fundo de reserva obrigatório (10% das quotas de condomínio)"
+            onPagar={(quotaId, metodo) => pagarMut.mutate({ id: quotaId, metodoPagamento: metodo })}
+            onDesmarcar={(quotaId) => desmarcarMut.mutate(quotaId)}
+            pagarLoading={pagarMut.isPending}
           />
         )}
       </div>
@@ -419,7 +427,8 @@ export default function QuotasPage() {
 
 // ─── Secção Morosos (Obras / Fundo Reserva) ──────────────────────────────────
 function SecaoMorosos({
-  titulo, icone, saldoConta, totalAtraso, totalTotal, morosos, loading, descricao
+  titulo, icone, saldoConta, totalAtraso, totalTotal, morosos, loading, descricao,
+  onPagar, onDesmarcar, pagarLoading,
 }: {
   titulo: string;
   icone: React.ReactNode;
@@ -429,7 +438,17 @@ function SecaoMorosos({
   morosos: any[];
   loading: boolean;
   descricao?: string;
+  onPagar: (quotaId: string, metodo: string) => void;
+  onDesmarcar: (quotaId: string) => void;
+  pagarLoading?: boolean;
 }) {
+  const [pagarModal, setPagarModal] = useState<{
+    fracao: any;
+    total: number;
+    quotaId: string;
+  } | null>(null);
+  const [metodo, setMetodo] = useState("transferência");
+
   if (loading) return <div className="text-sm" style={{ color: "var(--text-muted)" }}>A carregar...</div>;
 
   return (
@@ -483,7 +502,7 @@ function SecaoMorosos({
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["Fração", "Proprietário", "Valor em dívida"].map((h) => (
+                  {["Fração", "Proprietário", "Valor em dívida", "Acções"].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider"
@@ -495,33 +514,108 @@ function SecaoMorosos({
                 </tr>
               </thead>
               <tbody>
-                {morosos.map((m: any) => (
-                  <tr
-                    key={m.fracao.id}
-                    className="border-b hover:opacity-90 transition-opacity"
-                    style={{ borderColor: "var(--border)" }}
-                  >
-                    <td className="px-4 py-3">
-                      <span
-                        className="inline-flex items-center justify-center w-8 h-7 rounded text-xs font-bold"
-                        style={{ background: "var(--blue-subtle)", color: "var(--blue-bright)" }}
-                      >
-                        {m.fracao.numero}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3" style={{ color: "var(--text-primary)" }}>
-                      {m.fracao.proprietarioNome || "—"}
-                    </td>
-                    <td className="px-4 py-3 font-mono font-semibold" style={{ color: "var(--red)" }}>
-                      {formatEuro(m.total)}
-                    </td>
-                  </tr>
-                ))}
+                {morosos.map((m: any) => {
+                  const quotas: any[] = m.quotas ?? [];
+                  const quotaNaoPaga = quotas.find((q: any) => !q.pago);
+                  const quotaPaga = quotas.find((q: any) => q.pago);
+                  const quotaIdPagar = quotaNaoPaga?.id ?? null;
+                  const quotaIdDesmarcar = quotaPaga?.id ?? null;
+                  return (
+                    <tr
+                      key={m.fracao.id}
+                      className="border-b hover:opacity-90 transition-opacity"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      <td className="px-4 py-3">
+                        <span
+                          className="inline-flex items-center justify-center w-8 h-7 rounded text-xs font-bold"
+                          style={{ background: "var(--blue-subtle)", color: "var(--blue-bright)" }}
+                        >
+                          {m.fracao.numero}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3" style={{ color: "var(--text-primary)" }}>
+                        {m.fracao.proprietarioNome || "—"}
+                      </td>
+                      <td className="px-4 py-3 font-mono font-semibold" style={{ color: "var(--red)" }}>
+                        {formatEuro(m.total)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {quotaIdPagar && (
+                            <button
+                              className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
+                              style={{ background: "var(--green-subtle)", color: "var(--green)" }}
+                              onClick={() => {
+                                setMetodo("transferência");
+                                setPagarModal({ fracao: m.fracao, total: m.total, quotaId: quotaIdPagar });
+                              }}
+                            >
+                              <CheckCircle2 size={12} />
+                              Pagar
+                            </button>
+                          )}
+                          {quotaIdDesmarcar && (
+                            <button
+                              className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
+                              style={{ background: "var(--bg-elevated)", color: "var(--text-muted)" }}
+                              onClick={() => onDesmarcar(quotaIdDesmarcar)}
+                            >
+                              <XCircle size={12} />
+                              Desmarcar
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         </Card>
       )}
+
+      <Modal
+        open={!!pagarModal}
+        onClose={() => setPagarModal(null)}
+        title="Registar pagamento"
+        size="sm"
+      >
+        {pagarModal && (
+          <div className="space-y-4">
+            <div className="rounded-lg p-3" style={{ background: "var(--bg-elevated)" }}>
+              <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                Fração {pagarModal.fracao?.numero} — {pagarModal.fracao?.proprietarioNome}
+              </p>
+              <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                Valor em dívida · {formatEuro(pagarModal.total)}
+              </p>
+            </div>
+            <Select
+              label="Método de pagamento"
+              options={METODOS_PAGAMENTO.filter((m) =>
+                ["transferência", "mbway", "numerário", "cheque"].includes(m.value)
+              )}
+              value={metodo}
+              onChange={(e) => setMetodo(e.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPagarModal(null)}>Cancelar</Button>
+              <Button
+                onClick={() => {
+                  onPagar(pagarModal.quotaId, metodo);
+                  setPagarModal(null);
+                }}
+                loading={pagarLoading}
+              >
+                <CheckCircle2 size={14} />
+                Confirmar Pagamento
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

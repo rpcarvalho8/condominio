@@ -28,6 +28,67 @@ import {
   morososPorRubrica,
 } from "../lib/cartas-julho-2026";
 
+const ANCORA_CHAVES = [
+  "ancora_saldo_cc",
+  "ancora_saldo_fr",
+  "ancora_saldo_elevadores",
+  "ancora_saldo_obras",
+  "ancora_data_cc",
+  "ancora_data_movimentos",
+] as const;
+
+async function getAncoras(): Promise<{
+  ANCORA_SALDO_CC: number;
+  ANCORA_SALDO_FR: number;
+  ANCORA_SALDO_ELEVADORES: number;
+  ANCORA_SALDO_OBRAS: number;
+  ANCORA_DATA_CC: Date;
+  ANCORA_DATA_MOVIMENTOS: Date;
+}> {
+  const fallback = {
+    ANCORA_SALDO_CC,
+    ANCORA_SALDO_FR,
+    ANCORA_SALDO_ELEVADORES,
+    ANCORA_SALDO_OBRAS,
+    ANCORA_DATA_CC,
+    ANCORA_DATA_MOVIMENTOS,
+  };
+
+  try {
+    const rows = await db
+      .select()
+      .from(schema.configuracoes)
+      .where(inArray(schema.configuracoes.chave, [...ANCORA_CHAVES]));
+
+    const valores = new Map(rows.map((r) => [r.chave, r.valor]));
+
+    const parseNum = (chave: string, def: number) => {
+      const raw = valores.get(chave);
+      if (raw == null) return def;
+      const n = parseFloat(raw);
+      return isNaN(n) ? def : n;
+    };
+
+    const parseDate = (chave: string, def: Date) => {
+      const raw = valores.get(chave);
+      if (raw == null) return def;
+      const d = new Date(raw.includes("T") ? raw : `${raw}T00:00:00.000Z`);
+      return isNaN(d.getTime()) ? def : d;
+    };
+
+    return {
+      ANCORA_SALDO_CC: parseNum("ancora_saldo_cc", fallback.ANCORA_SALDO_CC),
+      ANCORA_SALDO_FR: parseNum("ancora_saldo_fr", fallback.ANCORA_SALDO_FR),
+      ANCORA_SALDO_ELEVADORES: parseNum("ancora_saldo_elevadores", fallback.ANCORA_SALDO_ELEVADORES),
+      ANCORA_SALDO_OBRAS: parseNum("ancora_saldo_obras", fallback.ANCORA_SALDO_OBRAS),
+      ANCORA_DATA_CC: parseDate("ancora_data_cc", fallback.ANCORA_DATA_CC),
+      ANCORA_DATA_MOVIMENTOS: parseDate("ancora_data_movimentos", fallback.ANCORA_DATA_MOVIMENTOS),
+    };
+  } catch {
+    return { ...fallback };
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // DADOS REAIS DO EXCEL — devedores por conta
 // Fonte: Contas_2026.xlsx (verdade até importação completa)
@@ -205,9 +266,12 @@ const FUNDO_RESERVA_DEVEDORES_EXCEL = [
 //   Excel diz L deve 213.99€ (quota+fundo Jan) mas ele pagou 589.23€ → em crédito para quotas futuras
 //   O totalEmAtraso real de quotas = Excel total - 213.99 (L já liquidou quota corrente)
 //   atraso_fundo_reserva: 28.41 Excel → corrigido: 28.41 - 23.99 (L pré-2026 fundo) + 2.79 (L Jan fundo resto) = 7.21
+// @deprecated Agosto 2026 — valores migrados para a tabela `configuracoes` via seed-ancora.ts.
+// SALDO_DEFAULTS mantém-se apenas como fallback de segurança em first boot: getSaldos() usa
+// estes valores só quando a BD não tiver o registo correspondente. Após recalcularSaldos()
+// (ou seed), a BD é a fonte de verdade e estes hardcodes são irrelevantes.
 // ─── SALDOS ANCORADOS A 15 DE JUNHO DE 2026 ─────────────────────────────────
-// Fonte: Extratos físicos Santander confirmados em 15/06/2026.
-// Estes valores são o ponto de partida (t=0) para o algoritmo de triagem.
+// Fonte original: Extratos físicos Santander confirmados em 15/06/2026.
 // Movimentos processados a partir de 02/06/2026 (ANCORA_MOVIMENTOS).
 const SALDO_DEFAULTS: Record<string, number> = {
   saldo_conta_corrente: ANCORA_SALDO_CC,         // Conta à Ordem — âncora 15/06/2026
@@ -235,8 +299,7 @@ const SALDO_DEFAULTS: Record<string, number> = {
   saldo_operacional_disponivel: ANCORA_SALDO_CC,
   // ── Dívida global por cota extraordinária ────────────────────────────────────
   // DEFAULTS SEGUROS: totais das listas Excel (fracoes.* seeded), NÃO o orçamento completo.
-  // recalcularSaldos() persiste valores correctos na tabela configuracoes;
-  // estes defaults só são usados se recalcularSaldos() ainda não correu (first boot).
+  // @deprecated — migrados para `configuracoes` (seed-ancora.ts); fallback first boot apenas.
   // Fonte: OBRAS_DEVEDORES_EXCEL, MOTOR_DEVEDORES_EXCEL, INCENDIO_DEVEDORES_EXCEL, INDAQUA_DEVEDORES_EXCEL
   divida_total_motor:      98.48,    // SUM(fracoes.motor_divida)
   divida_total_incendio:   110.12,   // SUM(fracoes.incendio_divida)
@@ -377,6 +440,21 @@ async function upsertSaldo(chave: string, valor: number): Promise<void> {
     });
 }
 
+const RECALCULAR_SALDOS_CACHE_MS = 5 * 60 * 1000;
+let ultimoRecalculoSaldos = 0;
+let recalcularSaldosEmCurso: Promise<void> | null = null;
+
+async function recalcularSaldosSeNecessario(): Promise<void> {
+  if (Date.now() - ultimoRecalculoSaldos < RECALCULAR_SALDOS_CACHE_MS) return;
+
+  if (!recalcularSaldosEmCurso) {
+    recalcularSaldosEmCurso = recalcularSaldos().finally(() => {
+      recalcularSaldosEmCurso = null;
+    });
+  }
+  await recalcularSaldosEmCurso;
+}
+
 /**
  * Recalcula saldos dinâmicos a partir da DB e persiste em `configuracoes`.
  * Deve ser chamado após cada bank sync para que o dashboard reflicta os dados actuais.
@@ -414,6 +492,17 @@ async function upsertSaldo(chave: string, valor: number): Promise<void> {
  *   a_receber_quota_extra     = Excel fallback − pagos na DB
  */
 export async function recalcularSaldos(): Promise<void> {
+  const {
+    ANCORA_SALDO_CC,
+    ANCORA_SALDO_FR,
+    ANCORA_SALDO_ELEVADORES,
+    ANCORA_SALDO_OBRAS,
+    ANCORA_DATA_CC,
+    ANCORA_DATA_MOVIMENTOS,
+  } = await getAncoras();
+  const ANCORA_MOVIMENTOS = ANCORA_DATA_MOVIMENTOS;
+  const ANCORA_TS = Math.floor(ANCORA_DATA_MOVIMENTOS.getTime() / 1000);
+  const ANCORA_CC_TS = Math.floor(ANCORA_DATA_CC.getTime() / 1000);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // 0. TRIAGEM DE MOVIMENTOS BANCÁRIOS DESDE 02/06/2026
@@ -534,7 +623,7 @@ export async function recalcularSaldos(): Promise<void> {
   //    Nota: fundoReserva NÃO entra aqui. Obras e FR já foram para gavetas próprias.
   //          Motor e Incêndio são cativos — permanecem na CC mas visualmente isolados.
   // ─────────────────────────────────────────────────────────────────────────────
-  let saldoContaCorrente = SALDO_DEFAULTS.saldo_conta_corrente;
+  let saldoContaCorrente = ANCORA_SALDO_CC;
 
   try {
     // ── 1a. Receitas de condomínio desde âncora (quotas pagas na DB) ──────────
@@ -617,11 +706,11 @@ export async function recalcularSaldos(): Promise<void> {
     const totalDespesasDesdeAnc = despesasDesdeAnc.reduce((s, d) => s + d.valor, 0);
 
     saldoContaCorrente = Math.round(
-      (SALDO_DEFAULTS.saldo_conta_corrente! + receitasQuotasBD + creditosBancariosCC - totalDespesasDesdeAnc) * 100
+      (ANCORA_SALDO_CC + receitasQuotasBD + creditosBancariosCC - totalDespesasDesdeAnc) * 100
     ) / 100;
 
     console.log(
-      `[recalcularSaldos] CC: base=${SALDO_DEFAULTS.saldo_conta_corrente}€ ` +
+      `[recalcularSaldos] CC: base=${ANCORA_SALDO_CC}€ ` +
       `+quotasBD=${receitasQuotasBD.toFixed(2)}€ +bancarioCC=${creditosBancariosCC.toFixed(2)}€ ` +
       `-despesas=${totalDespesasDesdeAnc.toFixed(2)}€ = ${saldoContaCorrente}€`
     );
@@ -702,7 +791,7 @@ export async function recalcularSaldos(): Promise<void> {
 
     // Saldo FR = base + receitas classificadas desde âncora + cativos FR ainda na conta
     const saldoFRVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_fundo_reserva! + acumFR + cativos.fundo_reserva) * 100
+      (ANCORA_SALDO_FR + acumFR + cativos.fundo_reserva) * 100
     ) / 100;
     await upsertSaldo("saldo_fundo_reserva", saldoFRVirtual);
   } catch (e) {
@@ -731,7 +820,7 @@ export async function recalcularSaldos(): Promise<void> {
 
     // Saldo obras = base + receitas classificadas desde âncora (já no prazo físico)
     const saldoObrasVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_obras! + acumObras) * 100
+      (ANCORA_SALDO_OBRAS + acumObras) * 100
     ) / 100;
     await upsertSaldo("saldo_obras", saldoObrasVirtual);
   } catch (e) {
@@ -758,7 +847,7 @@ export async function recalcularSaldos(): Promise<void> {
     await upsertSaldo("a_receber_indaqua", Math.round(aReceberIndaqua * 100) / 100);
 
     const saldoIndaquaVirtual = Math.round(
-      (SALDO_DEFAULTS.saldo_quota_extra! + cativos.indaqua) * 100
+      (ANCORA_SALDO_ELEVADORES + cativos.indaqua) * 100
     ) / 100;
     await upsertSaldo("saldo_quota_extra", saldoIndaquaVirtual);
   } catch (e) {
@@ -930,6 +1019,8 @@ export async function recalcularSaldos(): Promise<void> {
   } catch (e) {
     console.error("[recalcularSaldos] morosidade global:", e);
   }
+
+  ultimoRecalculoSaldos = Date.now();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1085,6 +1176,8 @@ export function faturacaoMesVisivel(mes: number, ano: number): boolean {
 
 export const dashboard = new Hono()
   .get("/", async (c) => {
+    await recalcularSaldosSeNecessario();
+
     const agora = new Date();
     const mesAtual = agora.getMonth() + 1;
     const anoAtual = agora.getFullYear();
@@ -1232,6 +1325,67 @@ export const dashboard = new Hono()
         quotas: [],
       })).sort((a, b) => b.total - a.total);
       totalObrasAtraso = Math.round(obrasEmAtraso.reduce((s, m) => s + m.total, 0) * 100) / 100;
+    }
+
+    // Anexar quotas de obras em dívida (batch — evita N queries)
+    {
+      const fracoesAll = await db
+        .select({ id: schema.fracoes.id, numero: schema.fracoes.numero })
+        .from(schema.fracoes);
+      const uuidByNumero = new Map(
+        fracoesAll.filter((f) => f.numero).map((f) => [f.numero!, f.id]),
+      );
+      const knownIds = new Set(fracoesAll.map((f) => f.id));
+      const resolveUuid = (f: { id: string; numero?: string }) =>
+        knownIds.has(f.id) ? f.id : (uuidByNumero.get(f.numero ?? f.id) ?? null);
+
+      const obrasFracaoIds = [
+        ...new Set(
+          obrasEmAtraso
+            .map((m) => resolveUuid(m.fracao))
+            .filter((id): id is string => id != null),
+        ),
+      ];
+
+      const quotasByFracaoId = new Map<string, Array<{
+        id: string; valor: number; mes: number; ano: number; tipo: string | null; pago: boolean | null;
+      }>>();
+
+      if (obrasFracaoIds.length > 0) {
+        const obrasQuotasRows = await db
+          .select({
+            id: schema.quotas.id,
+            fracaoId: schema.quotas.fracaoId,
+            valor: schema.quotas.valor,
+            mes: schema.quotas.mes,
+            ano: schema.quotas.ano,
+            tipo: schema.quotas.tipo,
+            pago: schema.quotas.pago,
+          })
+          .from(schema.quotas)
+          .where(and(
+            inArray(schema.quotas.fracaoId, obrasFracaoIds),
+            eq(schema.quotas.tipo, "obras"),
+            eq(schema.quotas.pago, false),
+          ));
+
+        for (const q of obrasQuotasRows) {
+          if (!quotasByFracaoId.has(q.fracaoId)) quotasByFracaoId.set(q.fracaoId, []);
+          quotasByFracaoId.get(q.fracaoId)!.push({
+            id: q.id,
+            valor: q.valor,
+            mes: q.mes,
+            ano: q.ano,
+            tipo: q.tipo,
+            pago: q.pago,
+          });
+        }
+      }
+
+      obrasEmAtraso = obrasEmAtraso.map((m) => {
+        const uuid = resolveUuid(m.fracao);
+        return { ...m, quotas: uuid ? (quotasByFracaoId.get(uuid) ?? []) : [] };
+      });
     }
 
     // Obras pagas (banco confirmado)
@@ -1720,6 +1874,76 @@ export const dashboard = new Hono()
 
       frTotalEmAtraso = Math.round(frMorososDinamico.reduce((s, m) => s + m.total, 0) * 100) / 100;
       frFracoesEmAtraso = frMorososDinamico.length;
+    }
+
+    // Anexar quotas de fundo de reserva em dívida (batch — evita N queries)
+    {
+      const fracoesAll = await db
+        .select({ id: schema.fracoes.id, numero: schema.fracoes.numero })
+        .from(schema.fracoes);
+      const uuidByNumero = new Map(
+        fracoesAll.filter((f) => f.numero).map((f) => [f.numero!, f.id]),
+      );
+      const knownIds = new Set(fracoesAll.map((f) => f.id));
+      const resolveUuid = (f: { id: string; numero?: string }) =>
+        knownIds.has(f.id) ? f.id : (uuidByNumero.get(f.numero ?? f.id) ?? null);
+
+      const frFracaoIds = [
+        ...new Set(
+          frMorososDinamico
+            .map((m) => resolveUuid(m.fracao))
+            .filter((id): id is string => id != null),
+        ),
+      ];
+
+      const quotasByFracaoId = new Map<string, Array<{
+        id: string;
+        valor: number;
+        fundoReserva: number | null;
+        mes: number;
+        ano: number;
+        tipo: string | null;
+        pago: boolean | null;
+      }>>();
+
+      if (frFracaoIds.length > 0) {
+        const frQuotasRows = await db
+          .select({
+            id: schema.quotas.id,
+            fracaoId: schema.quotas.fracaoId,
+            valor: schema.quotas.valor,
+            fundoReserva: schema.quotas.fundoReserva,
+            mes: schema.quotas.mes,
+            ano: schema.quotas.ano,
+            tipo: schema.quotas.tipo,
+            pago: schema.quotas.pago,
+          })
+          .from(schema.quotas)
+          .where(and(
+            inArray(schema.quotas.fracaoId, frFracaoIds),
+            eq(schema.quotas.tipo, "condominio"),
+            eq(schema.quotas.pago, false),
+            sql`${schema.quotas.fundoReserva} > 0`,
+          ));
+
+        for (const q of frQuotasRows) {
+          if (!quotasByFracaoId.has(q.fracaoId)) quotasByFracaoId.set(q.fracaoId, []);
+          quotasByFracaoId.get(q.fracaoId)!.push({
+            id: q.id,
+            valor: q.valor,
+            fundoReserva: q.fundoReserva,
+            mes: q.mes,
+            ano: q.ano,
+            tipo: q.tipo,
+            pago: q.pago,
+          });
+        }
+      }
+
+      frMorososDinamico = frMorososDinamico.map((m) => {
+        const uuid = resolveUuid(m.fracao);
+        return { ...m, quotas: uuid ? (quotasByFracaoId.get(uuid) ?? []) : [] };
+      });
     }
 
     return c.json({

@@ -15,7 +15,8 @@
     "db:push": "bun --env-file=../../.env drizzle-kit push",
     "db:studio": "bun --env-file=../../.env drizzle-kit studio",
     "import:excel-2026": "bun run scripts/import-excel-2026.ts",
-    "db:setup-local": "bun run scripts/setup-local-db.ts"
+    "db:setup-local": "bun run scripts/setup-local-db.ts",
+    "seed:quotas-extras": "bun --env-file=../../.env run src/api/database/seed-quotas-extras.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.2",
