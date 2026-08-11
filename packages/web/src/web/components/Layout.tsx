@@ -18,9 +18,8 @@ import {
   Landmark,
 } from "lucide-react";
 import { cn } from "../lib/utils";
-import { authClient, clearToken } from "../lib/auth";
+import { authClient, clearToken, getToken } from "../lib/auth";
 import { useQuery } from "@tanstack/react-query";
-// useEffect and useState no longer needed for morosos-count (migrated to useQuery)
 
 const NAV_ITEMS = [
   { href: "/", label: "Visão Geral", icon: LayoutDashboard },
@@ -49,9 +48,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
     queryKey: ["morosos-count"],
     queryFn: () =>
       fetch("/api/dashboard/morosos-count", {
-        headers: { Authorization: `Bearer ${localStorage.getItem("bm_token") ?? ""}` },
-      }).then(r => r.json()),
-    staleTime: 30_000,
+        credentials: "include",
+        headers: (() => {
+          const token = getToken();
+          return token ? { Authorization: `Bearer ${token}` } : {};
+        })(),
+      }).then((r) => r.json()),
+    staleTime: 0, // badge deve reflectir pagamentos imediatamente após invalidate
   });
   const morososCount = morososData?.count ?? null;
 

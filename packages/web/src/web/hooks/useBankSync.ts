@@ -75,8 +75,9 @@ export function useBankSync(): BankSyncState {
         })(),
       }).catch(() => {/* best-effort */});
 
-      // 4. Invalidar cache do dashboard
+      // 4. Invalidar cache do dashboard e badge de morosos
       await qc.invalidateQueries({ queryKey: ["dashboard"] });
+      await qc.invalidateQueries({ queryKey: ["morosos-count"] });
 
       // 5. Guardar timestamp para debounce
       localStorage.setItem(LS_KEY, String(Date.now()));

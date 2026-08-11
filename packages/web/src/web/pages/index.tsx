@@ -156,6 +156,7 @@ export default function DashboardPage() {
           await Promise.race([postPromise, timeoutPromise]);
         } catch (_) { /* ignora erros de rede e timeouts — o GET mostra estado actual */ }
         await qc.invalidateQueries({ queryKey: ["dashboard"] });
+        await qc.invalidateQueries({ queryKey: ["morosos-count"] });
       }} />
     </>
   );
@@ -477,6 +478,7 @@ function Overview({ d, setSecao, onRefresh }: any) {
             {(() => {
               const ccFromMorosos = (d.contaCorrente?.morosos ?? []).reduce((s: number, m: any) => s + (m.total ?? 0), 0);
               const ccAReceber = Math.max(d.contaCorrente?.totalEmAtraso ?? 0, ccFromMorosos);
+              const hasPagNaoCat = (d.pagamentosNaoRegistados ?? []).length > 0;
               return (
                 <ContaCard
                   titulo="Conta Corrente"
@@ -487,6 +489,7 @@ function Overview({ d, setSecao, onRefresh }: any) {
                   color="blue"
                   icon={<Euro size={20} />}
                   onClick={() => setSecao("contaCorrente")}
+                  pagamentoNaoCategorizado={hasPagNaoCat}
                 />
               );
             })()}
@@ -653,13 +656,16 @@ function Overview({ d, setSecao, onRefresh }: any) {
 // CONTA CARD — bloco principal por conta
 // ══════════════════════════════════════════════
 function ContaCard({
-  titulo, banco, saldo, saldoLabel, aReceber, aReceberLabel, color, icon, onClick, semDetalhe
+  titulo, banco, saldo, saldoLabel, aReceber, aReceberLabel, color, icon, onClick, semDetalhe,
+  pagamentoNaoCategorizado,
 }: {
   titulo: string; banco: string;
   saldo: number; saldoLabel?: string;
   aReceber: number; aReceberLabel: string;
   color: "blue" | "amber" | "green" | "red" | "purple" | "orange" | "slate";
   icon: React.ReactNode; onClick?: () => void; semDetalhe?: boolean;
+  /** Pagamento recebido no banco mas ainda sem categorização correcta */
+  pagamentoNaoCategorizado?: boolean;
 }) {
   const palette = {
     blue:   { bg: "var(--blue-subtle)",   fg: "var(--blue-bright)",   pill: "rgba(59,130,246,0.12)" },
@@ -670,6 +676,33 @@ function ContaCard({
     orange: { bg: "rgba(249,115,22,0.1)", fg: "rgb(249,115,22)",      pill: "rgba(249,115,22,0.12)" },
     slate:  { bg: "rgba(100,116,139,0.1)", fg: "rgb(100,116,139)",   pill: "rgba(100,116,139,0.12)" },
   }[color];
+
+  // Tarja de estado:
+  //   amber    — pagamento recebido mas não categorizado (prioritário p/ alerta)
+  //   vermelho — em atraso
+  //   verde    — confirmado e categorizado / em dia
+  const estadoTarja: "red" | "amber" | "green" =
+    pagamentoNaoCategorizado ? "amber" : aReceber > 0 ? "red" : "green";
+  const tarjaStyles = {
+    red: {
+      bg: "var(--red-subtle)",
+      fg: "var(--red)",
+      label: aReceberLabel,
+      showValor: true,
+    },
+    amber: {
+      bg: "var(--amber-subtle)",
+      fg: "var(--amber)",
+      label: aReceber > 0 ? aReceberLabel : "Pagamento por categorizar",
+      showValor: aReceber > 0,
+    },
+    green: {
+      bg: "var(--green-subtle)",
+      fg: "var(--green)",
+      label: "Tudo em dia",
+      showValor: false,
+    },
+  }[estadoTarja];
 
   return (
     <button
@@ -709,20 +742,21 @@ function ContaCard({
           </p>
         </div>
 
-        {/* A receber */}
+        {/* Tarja de estado */}
         <div
           className="rounded-lg px-3 py-2 flex items-center justify-between"
-          style={{ background: aReceber > 0 ? "var(--red-subtle)" : "var(--green-subtle)" }}
+          style={{ background: tarjaStyles.bg }}
         >
-          <span className="text-xs" style={{ color: aReceber > 0 ? "var(--red)" : "var(--green)" }}>
-            {aReceber > 0 ? aReceberLabel : "Tudo em dia"}
+          <span className="text-xs" style={{ color: tarjaStyles.fg }}>
+            {tarjaStyles.label}
           </span>
-          {aReceber > 0 && (
-            <span className="text-xs font-mono font-semibold" style={{ color: "var(--red)" }}>
+          {tarjaStyles.showValor && (
+            <span className="text-xs font-mono font-semibold" style={{ color: tarjaStyles.fg }}>
               {formatEuro(aReceber)}
             </span>
           )}
-          {aReceber === 0 && <CheckCircle2 size={13} style={{ color: "var(--green)" }} />}
+          {estadoTarja === "green" && <CheckCircle2 size={13} style={{ color: "var(--green)" }} />}
+          {estadoTarja === "amber" && <AlertCircle size={13} style={{ color: "var(--amber)" }} />}
         </div>
       </div>
     </button>
@@ -783,7 +817,7 @@ function SecaoContaCorrente({ data: d, onBack }: any) {
             <div className="flex items-center gap-2">
               <AlertCircle size={15} style={{ color: "var(--amber)", flexShrink: 0 }} />
               <p className="text-sm font-semibold" style={{ color: "var(--amber)" }}>
-                Pagamentos bancários por reconciliar
+                Pagamentos efectuados — ainda não categorizados pelo condomínio
               </p>
             </div>
             {pagNaoReg.map((p) => (
@@ -822,10 +856,25 @@ function SecaoContaCorrente({ data: d, onBack }: any) {
           <KpiCard label="Frações em dia" value={String(d.totalFracoes - morosos.length)} sub={`de ${d.totalFracoes}`} icon={<CheckCircle2 size={16} />} iconColor="var(--green)" />
         </div>
         {morosos.length === 0 ? (
-          <Card><CardContent className="flex flex-col items-center justify-center py-16 gap-3">
-            <CheckCircle2 size={40} style={{ color: "var(--green)" }} />
-            <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>Sem morosos!</p>
-          </CardContent></Card>
+          pagNaoReg.length > 0 ? (
+            <Card>
+              <CardContent className="flex flex-col items-center justify-center py-12 gap-2">
+                <AlertCircle size={36} style={{ color: "var(--amber)" }} />
+                <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                  Sem quotas em atraso na Conta Corrente
+                </p>
+                <p className="text-xs text-center max-w-md" style={{ color: "var(--text-muted)" }}>
+                  Há pagamentos bancários já efectuados por reconciliar (ver alerta acima) —
+                  não são créditos livres nem dívidas de CC.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card><CardContent className="flex flex-col items-center justify-center py-16 gap-3">
+              <CheckCircle2 size={40} style={{ color: "var(--green)" }} />
+              <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>Sem morosos!</p>
+            </CardContent></Card>
+          )
         ) : (
           <div className="space-y-3">{morosos.map((m: any) => <MorososCard key={m.fracao.id} m={m} />)}</div>
         )}

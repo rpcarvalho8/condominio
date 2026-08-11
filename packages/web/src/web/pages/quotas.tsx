@@ -79,10 +79,12 @@ function QuotasPageInner() {
   const pagarMut = useMutation({
     mutationFn: async ({ id, metodoPagamento }: any) =>
       (await api.quotas[":id"].pagar.$patch({ param: { id }, json: { metodoPagamento } })).json(),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["quotas"] });
-      qc.invalidateQueries({ queryKey: ["dashboard"] });
-      qc.invalidateQueries({ queryKey: ["morosos-count"] });
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["quotas"] }),
+        qc.invalidateQueries({ queryKey: ["dashboard"] }),
+        qc.invalidateQueries({ queryKey: ["morosos-count"] }),
+      ]);
       setPagarModal(null);
     },
   });
@@ -90,10 +92,12 @@ function QuotasPageInner() {
   const desmarcarMut = useMutation({
     mutationFn: async (id: string) =>
       (await api.quotas[":id"].desmarcar.$patch({ param: { id }, json: {} })).json(),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["quotas"] });
-      qc.invalidateQueries({ queryKey: ["dashboard"] });
-      qc.invalidateQueries({ queryKey: ["morosos-count"] });
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["quotas"] }),
+        qc.invalidateQueries({ queryKey: ["dashboard"] }),
+        qc.invalidateQueries({ queryKey: ["morosos-count"] }),
+      ]);
     },
   });
 
@@ -276,6 +280,9 @@ function QuotasPageInner() {
                 onPagar={(q) => { setPagarModal(q); setMetodo("transferência"); }}
                 onDesmarcar={(id) => desmarcarMut.mutate(id)}
                 onReassign={(q) => setReassignModal(q)}
+                fracoesNaoCategorizadas={new Set(
+                  ((d?.pagamentosNaoRegistados ?? []) as Array<{ fracao: string }>).map((p) => p.fracao)
+                )}
               />
             )}
           </>
@@ -900,7 +907,18 @@ function SecaoExtras({
 }
 
 // ─── Tabela de quotas (reutilizável) ─────────────────────────────────────────
-function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas, onPagar, onDesmarcar, onReassign }: any) {
+function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas, onPagar, onDesmarcar, onReassign, fracoesNaoCategorizadas }: any) {
+  const naoCat: Set<string> = fracoesNaoCategorizadas ?? new Set();
+
+  const estadoQuota = (q: any): { variant: "green" | "amber" | "red"; label: string } => {
+    const fracaoNum = q.fracao?.numero as string | undefined;
+    const porCategorizar = !!(fracaoNum && naoCat.has(fracaoNum));
+    // Verde: pago e categorizado | Amber: recebido mas não categorizado | Vermelho: em atraso
+    if (porCategorizar) return { variant: "amber", label: "Por categorizar" };
+    if (q.quota.pago) return { variant: "green", label: "Pago" };
+    return { variant: "red", label: "Por pagar" };
+  };
+
   return (
     <Card>
       {extraTipoFiltro && extraTipoFiltro !== "__none" && (
@@ -926,7 +944,9 @@ function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas
             </tr>
           </thead>
           <tbody>
-            {quotas.map((q: any) => (
+            {quotas.map((q: any) => {
+              const estado = estadoQuota(q);
+              return (
               <tr
                 key={q.quota.id}
                 className="border-b hover:opacity-90 transition-opacity"
@@ -950,8 +970,8 @@ function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas
                   {formatEuro(q.quota.valor)}
                 </td>
                 <td className="px-4 py-3">
-                  <Badge variant={q.quota.pago ? "green" : "red"}>
-                    {q.quota.pago ? "Pago" : "Por pagar"}
+                  <Badge variant={estado.variant}>
+                    {estado.label}
                   </Badge>
                 </td>
                 <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>
@@ -997,7 +1017,8 @@ function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

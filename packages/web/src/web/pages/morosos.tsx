@@ -34,10 +34,12 @@ export default function MorososPage() {
   const pagarMut = useMutation({
     mutationFn: async (id: string) =>
       (await api.quotas[":id"].pagar.$patch({ param: { id }, json: { metodoPagamento: "transferência" } })).json(),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["quotas"] });
-      qc.invalidateQueries({ queryKey: ["dashboard"] });
-      qc.invalidateQueries({ queryKey: ["morosos-count"] });
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["quotas"] }),
+        qc.invalidateQueries({ queryKey: ["dashboard"] }),
+        qc.invalidateQueries({ queryKey: ["morosos-count"] }),
+      ]);
     },
   });
 

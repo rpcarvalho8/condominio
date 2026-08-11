@@ -7,9 +7,9 @@ Ecrã "detalhe" Fração L na SecaoContaCorrente:
 - Fração L tem dívidas reais (Obras 2110,97€, etc.) mas não aparece como morosa
 
 ## Root Cause Analysis
-1. **pagNaoReg tarja**: valores de pagamento aparecem com cor `var(--green)` e prefixo "+" — visualmente parecem créditos positivos mas são simplesmente pagamentos bancários não categorizados pelo condomínio (disputa). 
+1. **pagNaoReg tarja**: valores de pagamento aparecem com cor `var(--green)` e prefixo "+" — visualmente parecem créditos positivos mas são simplesmente pagamentos bancários não categorizados pelo condomínio (disputa).
    - FIX: mudar cor para `var(--amber)` (neutro/aviso), não verde
-   
+
 2. **"Sem morosos!"**: A Fração L pagou a quota CC de Jun 2026 na BD? Ou não está no ccMorososDinamico?
    - faturacaoVisivel=false → ccMorososDinamico = morosos (BD, mes>=6, pago=false)
    - Se Fração L não tem quota CC de Jun 2026 não paga, não aparece → CORRETO para CC
@@ -19,7 +19,7 @@ Ecrã "detalhe" Fração L na SecaoContaCorrente:
    - Quando faturacaoVisivel=false, esta função NÃO é chamada → resultado vazio → `dividasIndividuais={}` → OK
    - Mas os morosos de CC mostram 0 → problema no ccMorososDinamico
 
-4. **Fração L na contaCorrente**: 
+4. **Fração L na contaCorrente**:
    - faturacaoVisivel=false → ccMorosos usa fallback `morosos` (DB quotas tipo=condominio, mes>=6, pago=false)
    - Se Fração L pagou Jun 2026 → não está nos morosos → correto
    - Mas a tarja diz que há +553,76€ "quotas mensais atrasadas" de Jan 2026 → esses são pré-âncora → filtrados!
@@ -37,9 +37,13 @@ O utilizador vê a tarja com "+553,76€" e "+25,47€" em verde e interpreta qu
 4. **Garantir que morosos CC usa dados correctos** — confirmar query
 
 ## Status
-- [ ] Verificar query CC morosos para fração L
-- [ ] Fix cor tarja verde → amber
-- [ ] Fix wording tarja 
-- [ ] Verificar calcularDividasIndividuais sinal
-- [ ] tsc --noEmit
-- [ ] git push main
+- [x] Verificar query CC morosos para fração L — L não deve estar nos morosos CC (pagamentos cobrem até Out 2026)
+- [x] Fix cor tarja verde → amber (`ContaCard` + alerta `pagNaoReg`)
+- [x] Fix wording tarja — "Pagamentos efectuados — ainda não categorizados"
+- [x] ContaCard: amber / vermelho / verde com `pagamentoNaoCategorizado`
+- [x] Quotas: badge "Por categorizar" (amber) para frações em `pagamentosNaoRegistados`
+- [x] BUG 4: badge morosos (`staleTime: 0` + invalidação em mutations / bank sync / recalcular)
+- [x] Empty state CC: não celebrar "Sem morosos!" quando há pagamentos por categorizar
+- [x] Verificar calcularDividasIndividuais sinal — N/A com `faturacaoVisivel=false` (função não chamada)
+- [x] tsc --noEmit
+- [ ] git commit / push (quando pedido)

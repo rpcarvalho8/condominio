@@ -266,10 +266,10 @@ const FUNDO_RESERVA_DEVEDORES_EXCEL = [
 //   Excel diz L deve 213.99€ (quota+fundo Jan) mas ele pagou 589.23€ → em crédito para quotas futuras
 //   O totalEmAtraso real de quotas = Excel total - 213.99 (L já liquidou quota corrente)
 //   atraso_fundo_reserva: 28.41 Excel → corrigido: 28.41 - 23.99 (L pré-2026 fundo) + 2.79 (L Jan fundo resto) = 7.21
-// @deprecated Agosto 2026 — valores migrados para a tabela `configuracoes` via seed-ancora.ts.
-// SALDO_DEFAULTS mantém-se apenas como fallback de segurança em first boot: getSaldos() usa
-// estes valores só quando a BD não tiver o registo correspondente. Após recalcularSaldos()
-// (ou seed), a BD é a fonte de verdade e estes hardcodes são irrelevantes.
+// @deprecated Agosto 2026
+// - Estes valores só são usados como fallback de first boot (quando a BD não tem o registo).
+// - A fonte de verdade é agora a tabela `configuracoes` na BD.
+// - Migrados via seed-ancora.ts em Agosto 2026.
 // ─── SALDOS ANCORADOS A 15 DE JUNHO DE 2026 ─────────────────────────────────
 // Fonte original: Extratos físicos Santander confirmados em 15/06/2026.
 // Movimentos processados a partir de 02/06/2026 (ANCORA_MOVIMENTOS).
@@ -2108,7 +2108,7 @@ export const dashboard = new Hono()
       ok: true,
       mensagem: "Saldos recalculados com sucesso",
       timestamp: Date.now(),
-      invalidateKeys: ["dashboard", "morosos"],
+      invalidateKeys: ["dashboard", "morosos-count"],
       dividasIndividuais,
       saldos: {
         saldo_conta_corrente:         saldos.saldo_conta_corrente,
