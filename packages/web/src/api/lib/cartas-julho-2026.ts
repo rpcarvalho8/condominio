@@ -1,9 +1,8 @@
 /**
  * ╔══════════════════════════════════════════════════════════════════╗
  * ║        CARTAS DE COBRANÇA — JULHO 2026                          ║
- * ║  Fonte de verdade para dívidas individuais por fração.          ║
- * ║  Extraído das cartas de cobrança emitidas em junho/julho 2026.  ║
- * ║  Substituí cálculo teórico permilagem × orçamento.              ║
+ * ║  Fonte: BD (`configuracoes.cartas_julho_2026`) ou ficheiro local ║
+ * ║  gitignored `cartas-julho-data.json`. Sem PII no código-fonte.  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  *
  * REGRA DE AMORTIZAÇÃO (cascade):
@@ -12,11 +11,11 @@
  *     1.º Quota Condomínio Geral
  *     2.º Fundo de Reserva
  *     3.º Cotas Extras (Obras → Elevadores → Motor → Incêndio)
- *
- * Frações sem carta emitida (julho) = em dia em todas as rubricas:
- *   A, B, C, D, H, I, K, W
- * Fração L: carta de junho já emitida (2478.69€) — incluída com flag isCartaJunho=true
  */
+
+import { readFileSync, existsSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 
 export interface CartaFracao {
   /** Número/letra da fração (ex: "AA", "G", "L") */
@@ -43,268 +42,37 @@ export interface CartaFracao {
   isCartaJunho?: boolean;
 }
 
+function loadCartasFromLocalFile(): CartaFracao[] {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    // lib → api → src → web → packages → repo root
+    const candidates = [
+      resolve(here, "../../../../../cartas-julho-data.json"),
+      resolve(process.cwd(), "cartas-julho-data.json"),
+      resolve(process.cwd(), "../../cartas-julho-data.json"),
+    ];
+    for (const p of candidates) {
+      if (!existsSync(p)) continue;
+      const raw = JSON.parse(readFileSync(p, "utf8"));
+      const list = Array.isArray(raw) ? raw : raw.cartas;
+      if (Array.isArray(list) && list.length > 0) return list as CartaFracao[];
+    }
+  } catch (e) {
+    console.warn("[cartas] falha ao ler cartas-julho-data.json:", e);
+  }
+  return [];
+}
+
 /**
- * CARTAS_JULHO_2026
- * Tabela completa extraída das cartas de cobrança emitidas.
- * Frações não listadas estão em dia (sem carta emitida).
+ * Cache mutável — arranca do ficheiro local (gitignored) se existir.
+ * Preferir `setCartasFromDB()` / seed-gdpr-config após boot.
  */
-export const CARTAS_JULHO_2026: CartaFracao[] = [
-  // ── Fracções sem dívida extra — apenas quota corrente julho ──────────────
-  {
-    fracao: "AA",
-    proprietario: "Olívia Lima",
-    quotaJulho: 38.02,
-    fundoReservaJulho: 3.80,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 41.82,
-  },
-  {
-    fracao: "AB",
-    proprietario: "Ilídio Marinho",
-    quotaJulho: 37.95,
-    fundoReservaJulho: 3.80,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 41.75,
-  },
-  {
-    fracao: "AE",
-    proprietario: "Germano Machado",
-    quotaJulho: 40.12,
-    fundoReservaJulho: 4.01,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 44.13,
-  },
-  {
-    fracao: "AF",
-    proprietario: "Rui Torres",
-    quotaJulho: 38.18,
-    fundoReservaJulho: 3.82,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 42.00,
-  },
-  {
-    fracao: "AH",
-    proprietario: "Mª Madalena Ramos",
-    quotaJulho: 44.41,
-    fundoReservaJulho: 4.44,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 48.85,
-  },
-  {
-    fracao: "AI",
-    proprietario: "Rui Carvalho",
-    quotaJulho: 38.87,
-    fundoReservaJulho: 3.89,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 42.76,
-  },
-  {
-    fracao: "AJ",
-    proprietario: "Mariana Reis",
-    quotaJulho: 37.49,
-    fundoReservaJulho: 3.75,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 41.24,
-  },
-  {
-    fracao: "J",
-    proprietario: "Mª Conceição Moreira",
-    quotaJulho: 42.07,
-    fundoReservaJulho: 4.21,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 46.28,
-  },
-  {
-    fracao: "O",
-    proprietario: "Pedro Santos",
-    quotaJulho: 45.28,
-    fundoReservaJulho: 4.53,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 49.81,
-  },
-  {
-    fracao: "P",
-    proprietario: "Nuno Ribeiro",
-    quotaJulho: 46.95,
-    fundoReservaJulho: 4.70,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 51.65,
-  },
-  {
-    fracao: "Q",
-    proprietario: "João Barros",
-    quotaJulho: 40.27,
-    fundoReservaJulho: 4.03,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 44.30,
-  },
-  {
-    fracao: "R",
-    proprietario: "Vanessa Silva",
-    quotaJulho: 61.54,
-    fundoReservaJulho: 6.15,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 67.69,
-  },
-  {
-    fracao: "S",
-    proprietario: "Célia Sá",
-    quotaJulho: 35.07,
-    fundoReservaJulho: 3.51,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 38.58,
-  },
-  {
-    fracao: "T",
-    proprietario: "Susana Silva",
-    quotaJulho: 41.75,
-    fundoReservaJulho: 4.17,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 45.92,
-  },
-  {
-    fracao: "U",
-    proprietario: "Catarina Silva",
-    quotaJulho: 62.04,
-    fundoReservaJulho: 6.20,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 68.24,
-  },
-  {
-    fracao: "V",
-    proprietario: "Sérgio Monteiro",
-    quotaJulho: 36.92,
-    fundoReservaJulho: 3.69,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 40.61,
-  },
-  {
-    fracao: "Z",
-    proprietario: "Ana Costa",
-    quotaJulho: 59.80,
-    fundoReservaJulho: 5.98,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 65.78,
-  },
-  // ── Frações E+F — Tiago Correia (carta conjunta, split proporcional) ─────
-  // Total E+F = 4.19€ (E=1.83+0.18=2.01; F=1.98+0.20=2.18; soma=4.19)
-  {
-    fracao: "E",
-    proprietario: "Tiago Correia",
-    quotaJulho: 1.83,
-    fundoReservaJulho: 0.18,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 2.01,
-  },
-  {
-    fracao: "F",
-    proprietario: "Tiago Correia",
-    quotaJulho: 1.98,
-    fundoReservaJulho: 0.20,
-    obras: 0, incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 2.18,
-  },
-  // ── Fracções com dívida de obras ─────────────────────────────────────────
-  {
-    fracao: "AC",
-    proprietario: "Mª Fátima Ascenção",
-    quotaJulho: 11.02,
-    fundoReservaJulho: 1.10,
-    obras: 607.35,
-    incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 619.47,
-  },
-  {
-    fracao: "AD",
-    proprietario: "Escutoglamour",
-    quotaJulho: 11.37,
-    fundoReservaJulho: 1.14,
-    obras: 629.51,
-    incendio: 49.40,
-    motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 691.42,
-  },
-  {
-    fracao: "M",
-    proprietario: "Jannara Santos",
-    quotaJulho: 42.83,
-    fundoReservaJulho: 4.28,
-    obras: 108.85,
-    incendio: 0, motor: 0, quotasCC_atraso: 0, multas: 0,
-    totalCarta: 155.96,
-  },
-  {
-    fracao: "N",
-    proprietario: "Filipe Teixeira",
-    quotaJulho: 42.09,
-    fundoReservaJulho: 4.21,
-    obras: 178.71,
-    incendio: 0,
-    motor: 33.78,
-    quotasCC_atraso: 0, multas: 0,
-    totalCarta: 258.79,
-  },
-  // ── AG — atraso CC + motor + multas ──────────────────────────────────────
-  // Quotas CC atraso: 76.80€ (2 meses) + 7.68€ fundo = 84.48€ → arredondado 84.48
-  {
-    fracao: "AG",
-    proprietario: "João Amorim Dias",
-    quotaJulho: 38.40,
-    fundoReservaJulho: 3.84,
-    obras: 284.27,
-    incendio: 0,
-    motor: 25.04,
-    quotasCC_atraso: 84.48,   // 76.80 quota + 7.68 fundo (2 meses em atraso)
-    multas: 4.22,
-    totalCarta: 440.25,
-  },
-  // ── X — atraso CC + motor + multas ───────────────────────────────────────
-  // Quotas CC atraso: 84.84€ (Mai+Jun) → documentado na carta
-  {
-    fracao: "X",
-    proprietario: "Alexandre Maia",
-    quotaJulho: 42.42,
-    fundoReservaJulho: 4.24,
-    obras: 278.30,
-    incendio: 0,
-    motor: 27.67,
-    quotasCC_atraso: 84.84,   // Mai+Jun em atraso
-    multas: 4.67,
-    totalCarta: 450.62,
-  },
-  // ── G — maior devedor — obras + incêndio + motor + atraso CC + multas ───
-  // Quotas CC atraso: 95.86€ (Dez25–Jun26, 7 meses)
-  {
-    fracao: "G",
-    proprietario: "Marma Concept",
-    quotaJulho: 13.98,
-    fundoReservaJulho: 1.40,
-    obras: 1160.63,
-    incendio: 60.72,
-    motor: 16.24,
-    quotasCC_atraso: 95.86,   // Dez25–Jun26 (7 meses)
-    multas: 9.78,
-    totalCarta: 1388.99,
-  },
-  // ── L — carta de JUNHO 2026 (não julho) ──────────────────────────────────
-  // Rubrica: obras 2110.97 + portão 29.53 + quota extra 6×41.76 + FR 73.06 + multas
-  // Total carta junho: 2478.69€
-  // NOTA: quotaJulho e fundoReservaJulho = 0 (carta de junho, não julho)
-  {
-    fracao: "L",
-    proprietario: "João Coutinho",
-    quotaJulho: 0,
-    fundoReservaJulho: 0,
-    obras: 2110.97,
-    incendio: 0,
-    motor: 29.53,             // portão garagem
-    // quota extra (6 × 41.76 = 250.56) + FR junho (73.06) incluídos no total
-    quotasCC_atraso: 0,
-    multas: 0,
-    totalCarta: 2478.69,
-    isCartaJunho: true,
-  },
-];
+export let CARTAS_JULHO_2026: CartaFracao[] = loadCartasFromLocalFile();
+
+/** Substitui o cache (ex.: após ler `configuracoes`). */
+export function setCartasFromDB(cartas: CartaFracao[]): void {
+  CARTAS_JULHO_2026 = Array.isArray(cartas) ? cartas : [];
+}
 
 /**
  * Lookup por número de fração (case-insensitive).

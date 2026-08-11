@@ -1,63 +1,50 @@
-# Ficheiros com dados pessoais a limpar
+# Limpeza RGPD — dados pessoais no código
 
-- identity-matrix.ts → contém nomes, IBANs, fracções reais
-- seed.ts → contém dados do Condomínio 7663
-- llm-fallback.ts
-- bank.ts
-- recibos.ts
-- relatorio.ts
-- dashboard.ts
-- identity.ts
-- avisos.ts
-- cativo-rules.ts
-- schema.ts
-- test-desempate-af.ts
-- test-sync-simulation.ts
-- inject-qa-v2-turso.ts
+Actualizado: 2026-08-11 (branch `dev`)
 
-### Ficheiros em node_modules (verificar/ignorar):
-- Constants.server.ts
-- Constants.ts
-- ExponentConstants.web.ts
-- decode-data-html.ts
-- defaults.d.ts
-- lib.dom.d.ts
-- lib.webworker.d.ts
-- function-module.d.ts
+## Objectivo
+Remover nomes, IBANs, NIFs, moradas e valores individuais de dívida do código versionado.
+Dados sensíveis vivem só na BD + ficheiros locais ignorados pelo Git.
 
-## Lista completa de Caminhos:
-- `./packages/web/src/api/lib/llm-fallback.ts`
-- `./packages/web/src/api/lib/identity-matrix.ts`
-- `./packages/web/src/api/routes/bank.ts`
-- `./packages/web/src/api/routes/recibos.ts`
-- `./packages/web/src/api/routes/relatorio.ts`
-- `./packages/web/src/api/routes/dashboard.ts`
-- `./packages/web/src/api/routes/identity.ts`
-- `./packages/web/src/api/routes/avisos.ts`
-- `./packages/web/src/api/routes/cativo-rules.ts`
-- `./packages/web/src/api/database/schema.ts`
-- `./packages/web/scripts/test-desempate-af.ts`
-- `./packages/web/scripts/test-sync-simulation.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+01e30e4ce267adc8/node_modules/expo-constants/src/Constants.server.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+01e30e4ce267adc8/node_modules/expo-constants/src/Constants.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+01e30e4ce267adc8/node_modules/expo-constants/src/ExponentConstants.web.ts`
-- `./node_modules/.bun/entities@8.0.0/node_modules/entities/src/generated/decode-data-html.ts`
-- `./node_modules/.bun/metro-config@0.83.5/node_modules/metro-config/src/defaults/defaults.d.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+6b7ef1165bf48b92/node_modules/expo-constants/src/Constants.server.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+6b7ef1165bf48b92/node_modules/expo-constants/src/Constants.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+6b7ef1165bf48b92/node_modules/expo-constants/src/ExponentConstants.web.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+e4fd16ac8ffee978/node_modules/expo-constants/src/Constants.server.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+e4fd16ac8ffee978/node_modules/expo-constants/src/Constants.ts`
-- `./node_modules/.bun/expo-constants@18.0.13+e4fd16ac8ffee978/node_modules/expo-constants/src/ExponentConstants.web.ts`
-- `./node_modules/.bun/typescript@5.9.3/node_modules/typescript/lib/lib.dom.d.ts`
-- `./node_modules/.bun/typescript@5.9.3/node_modules/typescript/lib/lib.webworker.d.ts`
-- `./node_modules/.bun/metro-config@0.83.3/node_modules/metro-config/src/defaults/defaults.d.ts`
-- `./node_modules/.bun/kysely@0.28.16/node_modules/kysely/dist/cjs/query-builder/function-module.d.ts`
-- `./node_modules/.bun/kysely@0.28.16/node_modules/kysely/dist/esm/query-builder/function-module.d.ts`
-- `./node_modules/.bun/@expo+metro@54.2.0/node_modules/@expo/metro/metro-config/defaults/defaults.d.ts`
-- `./inject-qa-v2-turso.ts`
+## Backups locais (gitignored)
+| Ficheiro | Conteúdo |
+|----------|----------|
+| `identify-data.json` | 33 frações + pagamentos não categorizados + listas slim de devedores |
+| `cartas-julho-data.json` | Cartas de cobrança julho 2026 |
+| `bank-identity-map.json` | `FRACOES_INFO` + `NAME_FRACAO_MAP` (matching bancário) |
 
-## A fazer na Quarta:
-- Mover dados para identity-data.json (fora do Git)
-- Criar seed que lê da BD
-- Apagar dados hardcoded
+## Seed
+```bash
+cd packages/web
+bun run seed:fracoes      # identify-data.json → fracoes
+bun run seed:gdpr-config  # identify-data + cartas → configuracoes
+bun run seed:ancora       # se aplicável
+```
+
+## Estado por ficheiro
+
+### Limpo (PII removido do código)
+- [x] `identity-matrix.ts` — cache vazia + `loadMatrizFromDB()`
+- [x] `dashboard.ts` — Excel/PAGAMENTOS → `configuracoes` / `fracoes`
+- [x] `cartas-julho-2026.ts` — loader ficheiro/BD
+- [x] `avisos.ts` — listas Excel → `configuracoes` (NIF/IBAN da **entidade** condomínio mantidos para PDF)
+- [x] `csv-bank-parser.ts` — mapa nomes → `bank-identity-map.json`
+- [x] `seed.ts` — nomes fictícios
+- [x] `cativo-rules.ts` — exemplo anonimizado
+- [x] `test-desempate-af.ts`, `test-sync-simulation.ts`, `inject-qa-v2-turso.ts`
+- [x] `setup-local-db.ts` / `seed-dividas.ts` — nomes anonimizados
+
+### OK / sem PII pessoal hardcoded
+- [x] `llm-fallback.ts`, `bank.ts`, `identity.ts` — runtime / sem roster
+- [x] `schema.ts` — só estrutura
+
+### Pendente / aceite consciente
+- [ ] `recibos.ts` / `relatorio.ts` / `avisos.ts` — NIF + IBAN + morada da **entidade** condomínio (cabeçalho legal PDF). Preferível: env/`configuracoes` (`condominio_nif`, `condominio_iban`).
+- [ ] Confirmar que `node_modules` continua ignorado (não limpar).
+- [ ] Após clone novo: restaurar os 3 JSON locais + correr seeds antes de usar matching bancário / dashboard cartas.
+
+## Riscos
+1. Sem `seed:gdpr-config`, `pagamentosNaoRegistados` e morosos portão/indaqua ficam vazios.
+2. Sem `cartas-julho-data.json` / seed cartas, rubricas baseadas em cartas caem para BD.
+3. Sem `bank-identity-map.json`, matching por nome no CSV bancário fica desactivado.
+4. Re-correr `seed:fracoes` pode sobrescrever dívidas corrigidas na BD (ex. L obras 2118.97 vs 2110.97 no JSON).

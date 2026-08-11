@@ -3,50 +3,50 @@ import { db } from "../database";
 import * as schema from "../database/schema";
 
 // ===================================================================
-// DADOS REAIS — Condomínio do Prédio Sito na Urbanização da Fonte
-// Frações, permilagens e proprietários extraídos do Mapa de Pagamentos 2026
+// DADOS DEMO — Condomínio (seed fictício para desenvolvimento)
+// Frações, permilagens e proprietários fictícios (estrutura preservada)
 // Total permilagem: 1000‰
 // ===================================================================
 
 const FRACOES_SEED = [
   // APARTAMENTOS — Entrada 21
-  { numero: "J",  tipo: "apartamento", proprietarioNome: "Mª da Conceição S. Moreira",        permilagem: 38.80, quotaMensal: 39.68 },
-  { numero: "L",  tipo: "apartamento", proprietarioNome: "João Marco Coutinho S Moreira",      permilagem: 41.76, quotaMensal: 42.71 },
-  { numero: "M",  tipo: "apartamento", proprietarioNome: "Jannara Maria dos Santos",           permilagem: 39.50, quotaMensal: 40.40 },
-  { numero: "N",  tipo: "apartamento", proprietarioNome: "Filipe Daniel F. Teixeira",          permilagem: 38.82, quotaMensal: 39.70 },
-  { numero: "O",  tipo: "apartamento", proprietarioNome: "Pedro Miguel R. Santos",             permilagem: 41.76, quotaMensal: 42.71 },
-  { numero: "P",  tipo: "apartamento", proprietarioNome: "Nuno Ricardo de Sá Ribeiro",         permilagem: 43.30, quotaMensal: 44.28 },
-  { numero: "Q",  tipo: "apartamento", proprietarioNome: "João Carlos Sousa Barros",           permilagem: 37.14, quotaMensal: 37.98 },
-  { numero: "R",  tipo: "apartamento", proprietarioNome: "Vanessa Cristina Araújo Silva",      permilagem: 56.75, quotaMensal: 58.04 },
-  { numero: "S",  tipo: "apartamento", proprietarioNome: "Célia Beatriz Sá",                  permilagem: 32.34, quotaMensal: 33.07 },
-  { numero: "T",  tipo: "apartamento", proprietarioNome: "Susana Daniela Oliveira e Silva",   permilagem: 38.50, quotaMensal: 39.37 },
-  { numero: "U",  tipo: "apartamento", proprietarioNome: "Catarina Reis Azevedo da Silva",    permilagem: 57.21, quotaMensal: 58.51 },
-  { numero: "V",  tipo: "apartamento", proprietarioNome: "Sérgio Miguel da S. Monteiro",      permilagem: 34.05, quotaMensal: 34.82 },
-  { numero: "X",  tipo: "apartamento", proprietarioNome: "Alexandre Ribeiro Maia",            permilagem: 39.12, quotaMensal: 40.01 },
+  { numero: "J",  tipo: "apartamento", proprietarioNome: "João Silva",                        permilagem: 38.80, quotaMensal: 39.68 },
+  { numero: "L",  tipo: "apartamento", proprietarioNome: "Maria Santos",                      permilagem: 41.76, quotaMensal: 42.71 },
+  { numero: "M",  tipo: "apartamento", proprietarioNome: "Ana Costa",                         permilagem: 39.50, quotaMensal: 40.40 },
+  { numero: "N",  tipo: "apartamento", proprietarioNome: "Pedro Oliveira",                    permilagem: 38.82, quotaMensal: 39.70 },
+  { numero: "O",  tipo: "apartamento", proprietarioNome: "Carlos Ferreira",                   permilagem: 41.76, quotaMensal: 42.71 },
+  { numero: "P",  tipo: "apartamento", proprietarioNome: "Sofia Rodrigues",                   permilagem: 43.30, quotaMensal: 44.28 },
+  { numero: "Q",  tipo: "apartamento", proprietarioNome: "Miguel Almeida",                    permilagem: 37.14, quotaMensal: 37.98 },
+  { numero: "R",  tipo: "apartamento", proprietarioNome: "Beatriz Pereira",                   permilagem: 56.75, quotaMensal: 58.04 },
+  { numero: "S",  tipo: "apartamento", proprietarioNome: "Inês Carvalho",                     permilagem: 32.34, quotaMensal: 33.07 },
+  { numero: "T",  tipo: "apartamento", proprietarioNome: "Tiago Martins",                     permilagem: 38.50, quotaMensal: 39.37 },
+  { numero: "U",  tipo: "apartamento", proprietarioNome: "Catarina Lopes",                    permilagem: 57.21, quotaMensal: 58.51 },
+  { numero: "V",  tipo: "apartamento", proprietarioNome: "Admin Demo",                        permilagem: 34.05, quotaMensal: 34.82 },
+  { numero: "X",  tipo: "apartamento", proprietarioNome: "Ricardo Nunes",                     permilagem: 39.12, quotaMensal: 40.01 },
   // APARTAMENTOS — Entrada 37
-  { numero: "Z",  tipo: "apartamento", proprietarioNome: "Ana Isabel Dias Costa",             permilagem: 55.15, quotaMensal: 56.40 },
-  { numero: "AA", tipo: "apartamento", proprietarioNome: "Olivia Cândida Ferreira Lima",      permilagem: 35.06, quotaMensal: 35.86 },
-  { numero: "AB", tipo: "apartamento", proprietarioNome: "Ilídio António Morais Marinho",     permilagem: 35.00, quotaMensal: 35.79 },
-  { numero: "AE", tipo: "apartamento", proprietarioNome: "Germano A M Machado",               permilagem: 37.00, quotaMensal: 37.84 },
-  { numero: "AF", tipo: "apartamento", proprietarioNome: "Rui Alexandre Silva Torres",        permilagem: 35.21, quotaMensal: 36.01 },
-  { numero: "AG", tipo: "apartamento", proprietarioNome: "João Pedro Amorim Dias",            permilagem: 35.41, quotaMensal: 36.21 },
-  { numero: "AH", tipo: "apartamento", proprietarioNome: "Mª Madalena Costa F. Ramos",       permilagem: 40.96, quotaMensal: 41.89 },
+  { numero: "Z",  tipo: "apartamento", proprietarioNome: "Helena Dias",                       permilagem: 55.15, quotaMensal: 56.40 },
+  { numero: "AA", tipo: "apartamento", proprietarioNome: "Olivia Mendes",                     permilagem: 35.06, quotaMensal: 35.86 },
+  { numero: "AB", tipo: "apartamento", proprietarioNome: "António Rocha",                    permilagem: 35.00, quotaMensal: 35.79 },
+  { numero: "AE", tipo: "apartamento", proprietarioNome: "Luís Barbosa",                      permilagem: 37.00, quotaMensal: 37.84 },
+  { numero: "AF", tipo: "apartamento", proprietarioNome: "Rui Fernandes",                     permilagem: 35.21, quotaMensal: 36.01 },
+  { numero: "AG", tipo: "apartamento", proprietarioNome: "João Dias",                         permilagem: 35.41, quotaMensal: 36.21 },
+  { numero: "AH", tipo: "apartamento", proprietarioNome: "Madalena Ramos",                    permilagem: 40.96, quotaMensal: 41.89 },
   // APARTAMENTOS — Entrada 39
-  { numero: "AI", tipo: "apartamento", proprietarioNome: "Rui Carvalho",                      permilagem: 35.85, quotaMensal: 36.66 },
-  { numero: "AJ", tipo: "apartamento", proprietarioNome: "Mariana da Silva Reis",             permilagem: 34.57, quotaMensal: 35.35 },
+  { numero: "AI", tipo: "apartamento", proprietarioNome: "André Sousa",                       permilagem: 35.85, quotaMensal: 36.66 },
+  { numero: "AJ", tipo: "apartamento", proprietarioNome: "Mariana Reis",                      permilagem: 34.57, quotaMensal: 35.35 },
   // LOJAS
-  { numero: "G",  tipo: "loja",        proprietarioNome: "Marma Concept, Unipessoal Lda",    permilagem: 22.96, quotaMensal: 23.49 },
-  { numero: "H",  tipo: "loja",        proprietarioNome: "Joana Andreia Azevedo Dias",        permilagem: 16.96, quotaMensal: 9.08 },
-  { numero: "I",  tipo: "loja",        proprietarioNome: "Joana Andreia Azevedo Dias",        permilagem: 22.00, quotaMensal: 11.51 },
-  { numero: "AC", tipo: "loja",        proprietarioNome: "Maria de Fátima Martins Ascenção",  permilagem: 18.10, quotaMensal: 9.47 },
-  { numero: "AD", tipo: "loja",        proprietarioNome: "Escutoglamour Unipessoal, Lda",     permilagem: 18.68, quotaMensal: 9.78 },
+  { numero: "G",  tipo: "loja",        proprietarioNome: "Loja Demo Unipessoal Lda",          permilagem: 22.96, quotaMensal: 23.49 },
+  { numero: "H",  tipo: "loja",        proprietarioNome: "Paula Mendes",                      permilagem: 16.96, quotaMensal: 9.08 },
+  { numero: "I",  tipo: "loja",        proprietarioNome: "Paula Mendes",                      permilagem: 22.00, quotaMensal: 11.51 },
+  { numero: "AC", tipo: "loja",        proprietarioNome: "Fátima Gomes",                      permilagem: 18.10, quotaMensal: 9.47 },
+  { numero: "AD", tipo: "loja",        proprietarioNome: "Comércio Demo Unipessoal Lda",      permilagem: 18.68, quotaMensal: 9.78 },
   // GARAGEM
-  { numero: "A",  tipo: "garagem",     proprietarioNome: "Universe Sustainable-SA",           permilagem: 2.89,  quotaMensal: 1.51 },
-  { numero: "B",  tipo: "garagem",     proprietarioNome: "Germano A M Machado",               permilagem: 2.86,  quotaMensal: 1.50 },
-  { numero: "C",  tipo: "garagem",     proprietarioNome: "Universe Sustainable-SA",           permilagem: 2.89,  quotaMensal: 1.51 },
-  { numero: "D",  tipo: "garagem",     proprietarioNome: "Susana Daniela Oliveira e Silva",  permilagem: 3.15,  quotaMensal: 1.65 },
-  { numero: "E",  tipo: "garagem",     proprietarioNome: "Tiago Pinheiro Correia",            permilagem: 3.00,  quotaMensal: 1.57 },
-  { numero: "F",  tipo: "garagem",     proprietarioNome: "Tiago Pinheiro Correia",            permilagem: 3.25,  quotaMensal: 1.70 },
+  { numero: "A",  tipo: "garagem",     proprietarioNome: "Garagem Demo SA",                   permilagem: 2.89,  quotaMensal: 1.51 },
+  { numero: "B",  tipo: "garagem",     proprietarioNome: "Luís Barbosa",                      permilagem: 2.86,  quotaMensal: 1.50 },
+  { numero: "C",  tipo: "garagem",     proprietarioNome: "Garagem Demo SA",                   permilagem: 2.89,  quotaMensal: 1.51 },
+  { numero: "D",  tipo: "garagem",     proprietarioNome: "Tiago Martins",                     permilagem: 3.15,  quotaMensal: 1.65 },
+  { numero: "E",  tipo: "garagem",     proprietarioNome: "Bruno Vieira",                      permilagem: 3.00,  quotaMensal: 1.57 },
+  { numero: "F",  tipo: "garagem",     proprietarioNome: "Bruno Vieira",                      permilagem: 3.25,  quotaMensal: 1.70 },
 ];
 
 const FORNECEDORES_SEED = [
@@ -56,9 +56,9 @@ const FORNECEDORES_SEED = [
   { nome: "Limpeza Urbaniz. Fonte",     categoria: "limpeza",        nif: null, email: null, telefone: null, avaliacao: 4.0 },
   { nome: "Jardinagem",                 categoria: "jardim",         nif: null, email: null, telefone: null, avaliacao: 4.0 },
   { nome: "Manutenção Elevadores",      categoria: "elevadores",     nif: null, email: null, telefone: null, avaliacao: 3.8 },
-  { nome: "Sergio Miguel Monteiro",     categoria: "administracao",  nif: null, email: null, telefone: null, avaliacao: 4.5 },
-  { nome: "Rui Carvalho",               categoria: "administracao",  nif: null, email: null, telefone: null, avaliacao: 4.5 },
-  { nome: "Catarina Reis Azevedo",      categoria: "administracao",  nif: null, email: null, telefone: null, avaliacao: 4.5 },
+  { nome: "Admin Demo",                 categoria: "administracao",  nif: null, email: null, telefone: null, avaliacao: 4.5 },
+  { nome: "Admin Demo B",               categoria: "administracao",  nif: null, email: null, telefone: null, avaliacao: 4.5 },
+  { nome: "Admin Demo C",               categoria: "administracao",  nif: null, email: null, telefone: null, avaliacao: 4.5 },
 ];
 
 // Despesas reais dos movimentos 2025-2026 (saídas categorizadas)

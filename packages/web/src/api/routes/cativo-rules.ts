@@ -160,7 +160,7 @@ export interface ResultadoIdentificacao {
  * @example
  *   const r = identificarDestinoCativo(
  *     "Transferencia - Fundo de Reserva Jan 2026",
- *     "João Marco Coutinho",
+ *     "João Silva",
  *   );
  *   // → { gaveta: "fundo_reserva", label: "Fundo de Reserva", ... }
  */

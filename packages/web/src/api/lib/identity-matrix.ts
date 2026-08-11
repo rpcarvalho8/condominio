@@ -1,21 +1,25 @@
 /**
  * ╔══════════════════════════════════════════════════════════════════╗
  * ║           MATRIZ DE IDENTIDADE — Condomínio 7663                ║
- * ║  Fonte de verdade para todas as frações, proprietários e IBANs. ║
- * ║  Gerado a partir de: Valores_Condomínio.xlsx (Jun 2026)         ║
+ * ║  Fonte de verdade: tabela `fracoes` (BD).                       ║
+ * ║  MATRIZ_PROPRIEDADES é cache em memória — arranca vazia e é     ║
+ * ║  preenchida via loadMatrizFromDB() / rehydrate no boot.         ║
+ * ║  Sem PII hardcoded (GDPR). Seed: identify-data.json + seed-fracoes.║
  * ╚══════════════════════════════════════════════════════════════════╝
  *
  * Exports principais:
- *   MATRIZ_PROPRIEDADES   — array completo com todas as frações
- *   getFracaoById()       — lookup rápido por idFracao
- *   getFracaoByIBAN()     — lookup por IBAN (incluindo aprendidos)
+ *   MATRIZ_PROPRIEDADES   — cache mutável (vazia até loadMatrizFromDB)
+ *   loadMatrizFromDB()    — SELECT fracoes → cache + índices
+ *   getFracaoById()       — lookup por idFracao (cache)
+ *   getFracaoByIBAN()     — lookup por IBAN (cache + BD aprendidos)
  *   learnIBAN()           — persiste novo IBAN aprendido (Auto-Learning)
- *   identifyByMultiMatch()— identifica fração via ≥2 critérios, dispara learnIBAN se novo
+ *   identifyByMultiMatch()— identifica fração via ≥2 critérios
+ *   rehydrateDividasFromDB / rehydrateMatrizFromDB — alias → loadMatrizFromDB
  */
 
 import { db } from "../database";
 import { fracoes } from "../database/schema";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 // ─── Tipos de Cascata ─────────────────────────────────────────────────────────
 
@@ -73,13 +77,6 @@ export interface FracaoIdentidade {
   tipo: "habitacao" | "loja" | "garagem";
 }
 
-// ─── MATRIZ COMPLETA ──────────────────────────────────────────────────────────
-// Fonte: Contas_2026.xlsx — Aba 8 "Orçamento Anual" (versão activa Jun 2026)
-// Alinhada com import-excel-2026.ts › ORCAMENTO_FRACOES (fonte de verdade BD).
-// Colunas: FR | ENT | Descrição Fração | ‰ | NOME | IBAN |
-//          Condomínio | Fundo Reserva | [4x Quota Extra: total | em dívida]
-// NOTA: quota_mensal BD = condominio + fundoReserva (valor total combinado).
-
 // ─── ORÇAMENTOS APROVADOS EM ASSEMBLEIA ──────────────────────────────────────
 // Fonte: Atas de Assembleia — valores com IVA, para o condomínio completo.
 // Single source of truth — importar daqui em dashboard.ts e no motor LLM.
@@ -107,401 +104,119 @@ export const ANCORA_DATA_MOVIMENTOS = new Date("2026-06-02T00:00:00.000Z");
 export const TOTAL_FRACOES = 33;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Cache em memória — vazia até loadMatrizFromDB(). Sem PII no código-fonte.
 
-export const MATRIZ_PROPRIEDADES: FracaoIdentidade[] = [
-  // ── ENTRADA 21 ────────────────────────────────────────────────────────────
-  {
-    idFracao: "J",
-    entrada: "ENTRADA 21",
-    descricao: "1A + GAR 36",
-    permilagem: 38.8,
-    nomeProprietario: "Mª DA CONCEIÇÃO S. MOREIRA",
-    ibansConhecidos: ["PT50000700000035112419023"],
-    valoresFixos: { condominio: 42.07, fundoReserva: 4.21 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "L",
-    entrada: "ENTRADA 21",
-    descricao: "1B + GAR 37",
-    permilagem: 41.76,
-    nomeProprietario: "JOÃO MARCO COUTINHO S MOREIRA",
-    ibansConhecidos: ["PT50026903300020179024227"],
-    valoresFixos: { condominio: 45.28, fundoReserva: 4.53 },
-    dividasAtuais: { obras: 2110.97, incendio: 0, indaqua: 250.56, motor: 29.53 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "M",
-    entrada: "ENTRADA 21",
-    descricao: "1C + GAR 38",
-    permilagem: 39.5,
-    nomeProprietario: "JANNARA MARIA DOS SANTOS",
-    ibansConhecidos: ["PT50003300004538693622405"],
-    valoresFixos: { condominio: 42.83, fundoReserva: 4.28 },
-    dividasAtuais: { obras: 108.85, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "N",
-    entrada: "ENTRADA 21",
-    descricao: "2A + GAR 35",
-    permilagem: 38.82,
-    nomeProprietario: "FILIPE DANIEL F. TEIXEIRA",
-    ibansConhecidos: ["PT50003508260001938493063"],
-    valoresFixos: { condominio: 42.09, fundoReserva: 4.21 },
-    dividasAtuais: { obras: 178.63, incendio: 0, indaqua: 33.78, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "O",
-    entrada: "ENTRADA 21",
-    descricao: "2B + GAR 34",
-    permilagem: 41.76,
-    nomeProprietario: "PEDRO MIGUEL R. SANTOS",
-    ibansConhecidos: ["PT50001000003568183000147"],
-    valoresFixos: { condominio: 45.28, fundoReserva: 4.53 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "P",
-    entrada: "ENTRADA 21",
-    descricao: "2C + GAR 32 E 33",
-    permilagem: 43.3,
-    nomeProprietario: "NUNO RICARDO DE SÁ RIBEIRO",
-    ibansConhecidos: ["PT50003508260001217750083"],
-    valoresFixos: { condominio: 46.95, fundoReserva: 4.70 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  // ── ENTRADA 37 ────────────────────────────────────────────────────────────
-  {
-    idFracao: "Q",
-    entrada: "ENTRADA 37",
-    descricao: "R/C A + GAR 19",
-    permilagem: 37.14,
-    nomeProprietario: "JOÃO CARLOS SOUSA BARROS / JOANA SANTOS CAVADAS",
-    ibansConhecidos: ["PT50003508260002176173036"],
-    valoresFixos: { condominio: 40.27, fundoReserva: 4.03 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "R",
-    entrada: "ENTRADA 37",
-    descricao: "R/C B + GAR 4 E 5",
-    permilagem: 56.75,
-    nomeProprietario: "VANESSA CRISTINA ARAÚJO SILVA",
-    ibansConhecidos: ["PT50000700000027906250223"],
-    valoresFixos: { condominio: 61.54, fundoReserva: 6.15 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "S",
-    entrada: "ENTRADA 37",
-    descricao: "R/C C + GAR 21",
-    permilagem: 32.34,
-    nomeProprietario: "CÉLIA BEATRIZ SÁ",
-    ibansConhecidos: ["PT50001800034307157002049"],
-    valoresFixos: { condominio: 35.07, fundoReserva: 3.51 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "T",
-    entrada: "ENTRADA 37",
-    descricao: "1A + GAR 16",
-    permilagem: 38.5,
-    nomeProprietario: "SUSANA DANIELA OLIVEIRA E SILVA",
-    ibansConhecidos: ["PT50001800035142286302013"],
-    valoresFixos: { condominio: 41.75, fundoReserva: 4.17 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "U",
-    entrada: "ENTRADA 37",
-    descricao: "1B + GAR 17 E 18",
-    permilagem: 57.21,
-    nomeProprietario: "CATARINA REIS AZEVEDO DA SILVA",
-    ibansConhecidos: ["PT50001800036098770802066"],
-    valoresFixos: { condominio: 62.04, fundoReserva: 6.20 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "V",
-    entrada: "ENTRADA 37",
-    descricao: "1C + GAR 6",
-    permilagem: 34.05,
-    nomeProprietario: "SÉRGIO MIGUEL DA S. MONTEIRO",
-    ibansConhecidos: ["PT50003300004541014298905"],
-    valoresFixos: { condominio: 36.92, fundoReserva: 3.69 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "X",
-    entrada: "ENTRADA 37",
-    descricao: "2A + GAR 1",
-    permilagem: 39.12,
-    nomeProprietario: "ALEXANDRE RIBEIRO MAIA",
-    ibansConhecidos: ["PT50017038900304003236435"],
-    valoresFixos: { condominio: 42.42, fundoReserva: 4.24 },
-    dividasAtuais: { obras: 278.30, incendio: 0, indaqua: 0, motor: 27.67 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "Z",
-    entrada: "ENTRADA 37",
-    descricao: "2B + GAR 2",
-    permilagem: 55.15,
-    nomeProprietario: "ANA ISABEL DIAS COSTA",
-    ibansConhecidos: ["PT50004514414031555122136"],
-    valoresFixos: { condominio: 59.80, fundoReserva: 5.98 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "AA",
-    entrada: "ENTRADA 37",
-    descricao: "2C + GAR 15",
-    permilagem: 35.06,
-    nomeProprietario: "OLIVIA CANDIDA FERREIRA LIMA",
-    ibansConhecidos: ["PT50003507630000212480082"],
-    valoresFixos: { condominio: 38.02, fundoReserva: 3.80 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  // ── ENTRADA 39 ────────────────────────────────────────────────────────────
-  {
-    idFracao: "AB",
-    entrada: "ENTRADA 39",
-    descricao: "R/C A + GAR 8",
-    permilagem: 35,
-    nomeProprietario: "ILIDIO ANTONIO MORAIS MARINHO",
-    ibansConhecidos: ["PT50001800036001413102053"],
-    valoresFixos: { condominio: 37.95, fundoReserva: 3.80 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "AE",
-    entrada: "ENTRADA 39",
-    descricao: "1A + GAR 13",
-    permilagem: 37,
-    nomeProprietario: "GERMANO A M MACHADO",
-    ibansConhecidos: ["PT50001800036323629302068"],
-    valoresFixos: { condominio: 40.12, fundoReserva: 4.01 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "AF",
-    entrada: "ENTRADA 39",
-    descricao: "2B + GAR 12",
-    permilagem: 35.21,
-    nomeProprietario: "RUI ALEXANDRE SILVA TORRES",
-    // Nota: Excel tem PT50003508260001938493063 (mesmo IBAN que fração N — possível erro Excel)
-    // Mantido para não perder dado; será resolvido via auto-learning quando primeira tx real chegar
-    ibansConhecidos: ["PT50003508260001938493063"],
-    valoresFixos: { condominio: 38.18, fundoReserva: 3.82 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "AG",
-    entrada: "ENTRADA 39",
-    descricao: "1C + GAR 22",
-    permilagem: 35.41,
-    nomeProprietario: "JOÃO PEDRO AMORIM DIAS / MAGGY DA YESKI TORRES GUEVARA",
-    ibansConhecidos: ["PT50000700000042681513323"],
-    valoresFixos: { condominio: 38.40, fundoReserva: 3.84 },
-    dividasAtuais: { obras: 284.27, incendio: 0, indaqua: 0, motor: 25.04 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "AH",
-    entrada: "ENTRADA 39",
-    descricao: "2A + GAR 24 E 25",
-    permilagem: 40.96,
-    nomeProprietario: "Mª MADALENA COSTA F. RAMOS",
-    ibansConhecidos: ["PT50017030430304001852534"],
-    valoresFixos: { condominio: 44.41, fundoReserva: 4.44 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "AI",
-    entrada: "ENTRADA 39",
-    descricao: "2B + GAR 9",
-    permilagem: 35.85,
-    nomeProprietario: "RUI CARVALHO",
-    // Nota: Excel tem mesmo IBAN que AH (PT50017030430304001852534) — provável erro Excel.
-    // Sistema vai usar auto-learning para separar quando primeira tx real chegar.
-    ibansConhecidos: ["PT50017030430304001852534"],
-    valoresFixos: { condominio: 38.87, fundoReserva: 3.89 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  {
-    idFracao: "AJ",
-    entrada: "ENTRADA 39",
-    descricao: "2C + GAR 2",
-    permilagem: 34.57,
-    nomeProprietario: "MARIANA DA SILVA REIS",
-    ibansConhecidos: ["PT50003502060001475003092"],
-    valoresFixos: { condominio: 37.49, fundoReserva: 3.75 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "habitacao",
-  },
-  // ── LOJAS ─────────────────────────────────────────────────────────────────
-  {
-    idFracao: "G",
-    entrada: "LOJAS",
-    descricao: "LOJA 1 + GAR 31",
-    permilagem: 22.96,
-    nomeProprietario: "MARMA CONCEPT, UNIPESSOAL LDA",
-    ibansConhecidos: ["PT50003300004562915046205"],
-    valoresFixos: { condominio: 13.98, fundoReserva: 1.40 },
-    dividasAtuais: { obras: 1160.63, incendio: 60.72, indaqua: 23.87, motor: 16.24 },
-    tipo: "loja",
-  },
-  {
-    idFracao: "H",
-    entrada: "LOJAS",
-    descricao: "LOJA 2 + GAR 30",
-    permilagem: 16.96,
-    nomeProprietario: "FAMALIPET",
-    ibansConhecidos: ["PT50003300004560757203605"],
-    valoresFixos: { condominio: 10.33, fundoReserva: 1.03 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "loja",
-  },
-  {
-    idFracao: "I",
-    entrada: "LOJAS",
-    descricao: "LOJA 3 + GAR 29",
-    permilagem: 22,
-    nomeProprietario: "FAMALIPET",
-    ibansConhecidos: ["PT50003300004560757203605"],
-    valoresFixos: { condominio: 13.39, fundoReserva: 1.34 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "loja",
-  },
-  {
-    idFracao: "AC",
-    entrada: "LOJAS",
-    descricao: "LOJA 34 + GAR 10",
-    permilagem: 18.1,
-    nomeProprietario: "MARIA DE FÁTIMA MARTINS ASCENÇÃO / LIA RUTE ASCENSAO ALMEIDA",
-    ibansConhecidos: ["PT50000700000035112419023"],
-    valoresFixos: { condominio: 11.02, fundoReserva: 1.10 },
-    dividasAtuais: { obras: 607.35, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "loja",
-  },
-  {
-    idFracao: "AD",
-    entrada: "LOJAS",
-    descricao: "LOJA 5 + GAR 14",
-    permilagem: 18.68,
-    nomeProprietario: "ESCUTOGLAMOUR UNIPESSOAL, LDA",
-    ibansConhecidos: ["PT50001000006288458000152"],
-    valoresFixos: { condominio: 11.37, fundoReserva: 1.14 },
-    dividasAtuais: { obras: 629.51, incendio: 49.40, indaqua: 0, motor: 0 },
-    tipo: "loja",
-  },
-  // ── GARAGEM (lugares avulso) ───────────────────────────────────────────────
-  {
-    idFracao: "A",
-    entrada: "GARAGEM",
-    descricao: "LUGAR GAR. 7",
-    permilagem: 2.89,
-    nomeProprietario: "UNIVERSE SUSTAINABLE-SA / ELSA RENATA ASCENSAO ALMEIDA / JULIANO PEREIRA DE CASTRO",
-    ibansConhecidos: ["PT50003604909910339810645", "LT833250093155739292"],
-    valoresFixos: { condominio: 1.76, fundoReserva: 0.18 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "garagem",
-  },
-  {
-    idFracao: "B",
-    entrada: "GARAGEM",
-    descricao: "LUGAR GAR. 11",
-    permilagem: 2.86,
-    nomeProprietario: "GERMANO A M MACHADO",
-    ibansConhecidos: ["PT50001800036323629302068"], // mesmo que AE — deliberado (garagem associada)
-    valoresFixos: { condominio: 1.74, fundoReserva: 0.17 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "garagem",
-  },
-  {
-    idFracao: "C",
-    entrada: "GARAGEM",
-    descricao: "LUGAR GAR. 20",
-    permilagem: 2.89,
-    nomeProprietario: "UNIVERSE SUSTAINABLE-SA / ELSA RENATA ASCENSAO ALMEIDA / JULIANO PEREIRA DE CASTRO",
-    ibansConhecidos: ["PT50003604909910339810645", "LT833250093155739292"],
-    valoresFixos: { condominio: 1.76, fundoReserva: 0.18 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "garagem",
-  },
-  {
-    idFracao: "D",
-    entrada: "GARAGEM",
-    descricao: "LUGAR GAR. 26",
-    permilagem: 3.15,
-    nomeProprietario: "SUSANA DANIELA OLIVEIRA E SILVA",
-    ibansConhecidos: ["PT50001800035142286302013"], // mesmo que T — garagem associada
-    valoresFixos: { condominio: 1.92, fundoReserva: 0.19 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "garagem",
-  },
-  {
-    idFracao: "E",
-    entrada: "GARAGEM",
-    descricao: "LUGAR GAR. 27",
-    permilagem: 3,
-    nomeProprietario: "TIAGO PINHEIRO CORREIA / JOANA PATRICIA OLIVEIRA AZEVEDO",
-    ibansConhecidos: ["PT50003300004559330052305"],
-    valoresFixos: { condominio: 1.83, fundoReserva: 0.18 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "garagem",
-  },
-  {
-    idFracao: "F",
-    entrada: "GARAGEM",
-    descricao: "LUGAR GAR. 28",
-    permilagem: 3.25,
-    nomeProprietario: "TIAGO PINHEIRO CORREIA / JOANA PATRICIA OLIVEIRA AZEVEDO",
-    ibansConhecidos: ["PT50003300004559330052305"], // mesmo que E — casal, 2 garagens
-    valoresFixos: { condominio: 1.98, fundoReserva: 0.20 },
-    dividasAtuais: { obras: 0, incendio: 0, indaqua: 0, motor: 0 },
-    tipo: "garagem",
-  },
-];
+export let MATRIZ_PROPRIEDADES: FracaoIdentidade[] = [];
 
 // ─── Índices de acesso rápido ─────────────────────────────────────────────────
 
-const _byId = new Map<string, FracaoIdentidade>(
-  MATRIZ_PROPRIEDADES.map((f) => [f.idFracao.toUpperCase(), f])
-);
-
+const _byId = new Map<string, FracaoIdentidade>();
 /** Mapa IBAN → array de frações que o partilham (garagem associada, etc.) */
 const _byIban = new Map<string, FracaoIdentidade[]>();
-for (const fracao of MATRIZ_PROPRIEDADES) {
-  for (const iban of fracao.ibansConhecidos) {
-    const norm = normalizeIBAN(iban);
-    if (!_byIban.has(norm)) _byIban.set(norm, []);
-    _byIban.get(norm)!.push(fracao);
-  }
-}
 
 /** Remove espaços, uppercase */
 function normalizeIBAN(iban: string): string {
   return iban.replace(/\s+/g, "").toUpperCase();
+}
+
+/** Reconstrói índices a partir de MATRIZ_PROPRIEDADES. */
+function rebuildIndexes(): void {
+  _byId.clear();
+  _byIban.clear();
+  for (const fracao of MATRIZ_PROPRIEDADES) {
+    _byId.set(fracao.idFracao.toUpperCase(), fracao);
+    for (const iban of fracao.ibansConhecidos) {
+      const norm = normalizeIBAN(iban);
+      if (!_byIban.has(norm)) _byIban.set(norm, []);
+      _byIban.get(norm)!.push(fracao);
+    }
+  }
+}
+
+type FracaoRow = typeof fracoes.$inferSelect;
+
+const ENTRADA_LABELS = new Set<string>([
+  "ENTRADA 21",
+  "ENTRADA 37",
+  "ENTRADA 39",
+  "GARAGEM",
+  "LOJAS",
+]);
+
+function parseEntradaDescricao(
+  notas: string | null | undefined,
+  numero: string,
+): { entrada: EntradaLabel; descricao: string } {
+  // Formato seed: "ENTRADA 21 · 1A + GAR 36"
+  if (notas) {
+    const sep = notas.indexOf(" · ");
+    if (sep > 0) {
+      const rawEntrada = notas.slice(0, sep).trim();
+      const descricao = notas.slice(sep + 3).trim() || numero;
+      const entrada = (ENTRADA_LABELS.has(rawEntrada)
+        ? rawEntrada
+        : "ENTRADA 21") as EntradaLabel;
+      return { entrada, descricao };
+    }
+  }
+  return { entrada: "ENTRADA 21", descricao: numero };
+}
+
+function mapTipoFromDb(tipo: string | null | undefined): FracaoIdentidade["tipo"] {
+  if (tipo === "loja" || tipo === "garagem") return tipo;
+  return "habitacao"; // apartamento → habitacao
+}
+
+/** Mapeia uma linha drizzle `fracoes` para FracaoIdentidade. */
+export function rowToFracao(row: FracaoRow): FracaoIdentidade {
+  const idFracao = row.numero;
+  const { entrada, descricao } = parseEntradaDescricao(row.notas, idFracao);
+
+  let ibansConhecidos: string[] = [];
+  try {
+    const parsed = JSON.parse(row.ibansConhecidos ?? "[]");
+    ibansConhecidos = Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    ibansConhecidos = [];
+  }
+
+  const total = Number(row.quotaMensal ?? 0);
+  const condominio = Math.round((total / 1.1) * 100) / 100;
+  const fundoReserva = Math.round((total - condominio) * 100) / 100;
+
+  return {
+    idFracao,
+    entrada,
+    descricao,
+    permilagem: Number(row.permilagem ?? 0),
+    nomeProprietario: row.proprietarioNome ?? "",
+    ibansConhecidos,
+    valoresFixos: { condominio, fundoReserva },
+    dividasAtuais: {
+      obras: Number(row.obrasDivida ?? 0),
+      incendio: Number(row.incendioDivida ?? 0),
+      indaqua: Number(row.indaquaDivida ?? 0),
+      motor: Number(row.motorDivida ?? 0),
+    },
+    tipo: mapTipoFromDb(row.tipo),
+  };
+}
+
+/**
+ * Carrega todas as frações da BD para a cache em memória e reconstrói índices.
+ * Fonte de verdade: tabela `fracoes`.
+ */
+export async function loadMatrizFromDB(): Promise<void> {
+  try {
+    const rows = await db.select().from(fracoes);
+    MATRIZ_PROPRIEDADES = rows.map(rowToFracao);
+    rebuildIndexes();
+    console.log(
+      `[identity-matrix] loadMatrizFromDB: ${MATRIZ_PROPRIEDADES.length} frações carregadas`,
+    );
+  } catch (e) {
+    console.warn("[identity-matrix] loadMatrizFromDB falhou (BD indisponível?):", e);
+  }
 }
 
 // ─── Lookups públicos ─────────────────────────────────────────────────────────
@@ -512,13 +227,13 @@ export function getFracaoById(id: string): FracaoIdentidade | undefined {
 
 /**
  * Devolve frações associadas a um IBAN.
- * Procura primeiro nos IBANs estáticos da matriz; se não encontrar,
+ * Procura primeiro nos IBANs da cache; se não encontrar,
  * consulta a tabela `fracoes` para IBANs aprendidos em runtime.
  */
 export async function getFracaoByIBAN(iban: string): Promise<FracaoIdentidade[]> {
   const norm = normalizeIBAN(iban);
 
-  // 1. índice estático (instantâneo)
+  // 1. índice em memória (instantâneo)
   const static_ = _byIban.get(norm);
   if (static_?.length) return static_;
 
@@ -672,7 +387,7 @@ function descricaoMencaonaFracao(descricao: string, idFracao: string): boolean {
   if (new RegExp(`(FRACAO|FRACCAO|FRAC[AÃ]O|FRA[CÇ][AÃ]O)\\s+${id}\\b`).test(d)) return true;
   // "AB HAB" ou "AB RC" (lojas/hab + id no início)
   if (new RegExp(`^${id}\\s+(HAB|RC|LOJA|GAR)`).test(d)) return true;
-  // "ENTRADA NN XY" onde XY == idFracao (ex: ENTRADA 21 1A... mas 1A != J)
+  // "ENTRADA NN XY" onde XY == idFracao (ex: ENTRADA 21 1A... but 1A != J)
   // Usamos a descricao da fração para este match
   return false;
 }
@@ -947,42 +662,18 @@ export async function identifyByMultiMatch(
 
 // ─── Helpers exportados ───────────────────────────────────────────────────────
 
-/** Devolve todas as frações com dívidas activas */
 /**
- * Rehydrata dividasAtuais de todas as frações a partir da BD.
- * Deve ser chamada no arranque do servidor para evitar cold-start corruption.
- * Falha silenciosamente se a BD não estiver disponível (instalação fresca).
+ * Rehydrata a cache em memória a partir da tabela `fracoes` (reload completo).
+ * Deve ser chamada no arranque do servidor antes de qualquer operação matricial.
  */
 export async function rehydrateDividasFromDB(): Promise<void> {
-  try {
-    const rows = await db
-      .select({
-        numero: fracoes.numero,
-        obrasDivida: fracoes.obrasDivida,
-        incendioDivida: fracoes.incendioDivida,
-        indaquaDivida: fracoes.indaquaDivida,
-        motorDivida: fracoes.motorDivida,
-      })
-      .from(fracoes);
-
-    let updated = 0;
-    for (const row of rows) {
-      const fracaoId = row.numero?.toUpperCase();
-      if (!fracaoId) continue;
-      const fracao = MATRIZ_PROPRIEDADES.find(f => f.idFracao.toUpperCase() === fracaoId);
-      if (!fracao) continue;
-      fracao.dividasAtuais.obras    = Number(row.obrasDivida    ?? 0);
-      fracao.dividasAtuais.incendio = Number(row.incendioDivida ?? 0);
-      fracao.dividasAtuais.indaqua  = Number(row.indaquaDivida  ?? 0);
-      fracao.dividasAtuais.motor    = Number(row.motorDivida    ?? 0);
-      updated++;
-    }
-    console.log(`[matriz-rehydrate] ${updated} frações actualizadas a partir da BD`);
-  } catch (e) {
-    console.warn("[matriz-rehydrate] Falha ao rehydratar dívidas (BD indisponível?):", e);
-  }
+  await loadMatrizFromDB();
 }
 
+/** Alias explícito — mesma implementação; preferir este nome em código novo. */
+export const rehydrateMatrizFromDB = rehydrateDividasFromDB;
+
+/** Devolve todas as frações com dívidas activas */
 export function getFracoesComDividas(): FracaoIdentidade[] {
   return MATRIZ_PROPRIEDADES.filter((f) => {
     const { obras, incendio, indaqua, motor } = f.dividasAtuais;

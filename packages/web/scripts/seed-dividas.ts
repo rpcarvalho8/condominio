@@ -10,7 +10,7 @@
  *   Col R  (idx 17) → indaqua_divida  ("Valores em dívida Quota extra Indaqua + elevadores")
  *   Col U  (idx 20) → motor_divida    ("Valores em dívida Quota extra motor")
  *
- * Caso de teste obrigatório (Fração L — João Marco Coutinho):
+ * Caso de teste obrigatório (Fração L — Maria Santos):
  *   obras_divida  = 2110.97  (arredondado de 2110.96604166667)
  *   indaqua_divida = 250.56  (arredondado de 250.56119828816)
  *

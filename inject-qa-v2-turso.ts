@@ -32,9 +32,9 @@ await db.run(sql`INSERT INTO bank_transactions
     NULL, 'QA-V2-OBRAS-L-001',
     300.00, 'EUR', ${dateVal},
     'Quota Extra Obras L',
-    NULL, 'JOÃO MARCO COUTINHO S MOREIRA',
+    NULL, 'MARIA SANTOS',
     'CRDT', 'pending', 0,
-    '{"iban_sender":"PT50026903300020179024227","amount":300.00,"description":"Quota Extra Obras L"}',
+    '{"iban_sender":"PT50000000000000000000003","amount":300.00,"description":"Quota Extra Obras L"}',
     ${now}
   )`);
 console.log("✅ TXN 1: Quota Extra Obras L — 300€  [gaveta: obras]");
@@ -50,7 +50,7 @@ await db.run(sql`INSERT INTO bank_transactions
     'Condominio',
     NULL, 'NOME DA FRAÇÃO AF NO EXCEL',
     'CRDT', 'pending', 0,
-    '{"iban_sender":"PT50003508260001938493063","amount":50.00,"description":"Condominio"}',
+    '{"iban_sender":"PT50000000000000000000002","amount":50.00,"description":"Condominio"}',
     ${now}
   )`);
 console.log("✅ TXN 2: Condominio IBAN AF/N — 50€  [quota corrente, sem gaveta]");

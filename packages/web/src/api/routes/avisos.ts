@@ -20,74 +20,28 @@ import path from "node:path";
 import { exec } from "node:child_process";
 import puppeteer from "puppeteer-core";
 
-// ─── Devedores Extra (fonte: Excel) — espelha dashboard.ts ───────────────────
-// Estes valores não estão na DB como quotas não pagas; derivamos Excel − pago na DB.
+// ─── Devedores Extra — fonte BD (`configuracoes`); seed: seed-gdpr-config.ts ─
 
 const PORTAO_TIPO_ID   = "06d6dd01-04ac-4ea3-8359-ec705f78de7c";
 const ELEV_TIPO_ID     = "4696eef9-bd1f-46ff-a368-47cfd455eeca";
 const INCENDIO_TIPO_ID = "dd16bd50-a2ab-4387-9d70-95822b1a61d7";
 
-const QUOTA_EXTRA_DEVEDORES_EXCEL: { numero: string; total: number }[] = [
-  { numero: "L",  total: 323.24 },
-  { numero: "R",  total: 98.77 },
-  { numero: "U",  total: 99.57 },
-  { numero: "P",  total: 75.36 },
-  { numero: "O",  total: 72.69 },
-  { numero: "AH", total: 42.32 },
-  { numero: "J",  total: 67.53 },
-  { numero: "M",  total: 68.75 },
-  { numero: "T",  total: 67.01 },
-  { numero: "AI", total: 37.05 },
-  { numero: "AG", total: 61.63 },
-  { numero: "AF", total: 61.28 },
-  { numero: "AA", total: 61.02 },
-  { numero: "AB", total: 60.92 },
-  { numero: "AJ", total: 60.17 },
-  { numero: "AE", total: 64.40 },
-  { numero: "Z",  total: 95.99 },
-  { numero: "X",  total: 68.09 },
-  { numero: "Q",  total: 64.64 },
-  { numero: "S",  total: 56.29 },
-  { numero: "V",  total: 59.26 },
-  { numero: "N",  total: 33.78 },
-  { numero: "G",  total: 23.87 },
-];
+type DevedorSlim = { numero: string; total: number };
 
-const PORTAO_DEVEDORES_EXCEL: { numero: string; total: number }[] = [
-  { numero: "U",  total: 40.46 },
-  { numero: "R",  total: 40.14 },
-  { numero: "Z",  total: 39.00 },
-  { numero: "P",  total: 30.62 },
-  { numero: "L",  total: 29.53 },
-  { numero: "O",  total: 29.53 },
-  { numero: "M",  total: 27.94 },
-  { numero: "X",  total: 27.67 },
-  { numero: "N",  total: 27.46 },
-  { numero: "J",  total: 27.44 },
-  { numero: "T",  total: 27.23 },
-  { numero: "Q",  total: 26.27 },
-  { numero: "AE", total: 26.17 },
-  { numero: "AG", total: 25.04 },
-  { numero: "AF", total: 24.90 },
-  { numero: "AA", total: 24.80 },
-  { numero: "AB", total: 24.75 },
-  { numero: "AJ", total: 24.45 },
-  { numero: "V",  total: 24.08 },
-  { numero: "S",  total: 22.87 },
-  { numero: "G",  total: 16.24 },
-];
-
-const INCENDIO_DEVEDORES_EXCEL: { numero: string; total: number }[] = [
-  { numero: "G",  total: 60.72 },
-  { numero: "AC", total: 47.87 },
-  { numero: "AD", total: 49.40 },
-];
-
-const FUNDO_RESERVA_DEVEDORES_EXCEL: { numero: string; total: number }[] = [
-  { numero: "L",  total: 2.79 },
-  { numero: "G",  total: 2.64 },
-  { numero: "N",  total: 4.37 },
-];
+async function getConfigDevedores(chave: string): Promise<DevedorSlim[]> {
+  try {
+    const rows = await db
+      .select()
+      .from(schema.configuracoes)
+      .where(eq(schema.configuracoes.chave, chave))
+      .limit(1);
+    if (!rows[0]?.valor) return [];
+    const parsed = JSON.parse(rows[0].valor);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 // Retorna os devedores do Excel que ainda não pagaram na DB (para um dado quotaTipoId)
 async function getExtraDevedoresPorPagar(
@@ -434,14 +388,24 @@ export async function gerarAvisosCobranca(mes: number, ano: number, opts: {
   const dataVencimento = new Date(ano, mes - 1, 10);
   const dataEmissaoStr = `1 de ${MESES[mes]} de ${ano}`;
 
-  // Pré-carregar devedores extra (Excel − pago na DB) para todo o loop
-  const [elevDevedores, portaoDevedores, incendioDevedores] = await Promise.all([
-    getExtraDevedoresPorPagar(QUOTA_EXTRA_DEVEDORES_EXCEL, ELEV_TIPO_ID),
-    getExtraDevedoresPorPagar(PORTAO_DEVEDORES_EXCEL, PORTAO_TIPO_ID),
-    getExtraDevedoresPorPagar(INCENDIO_DEVEDORES_EXCEL, INCENDIO_TIPO_ID),
+  // Pré-carregar devedores extra (configuracoes − pago na DB)
+  const [
+    quotaExtraList,
+    portaoList,
+    incendioList,
+    fundoList,
+  ] = await Promise.all([
+    getConfigDevedores("quota_extra_devedores"),
+    getConfigDevedores("portao_devedores"),
+    getConfigDevedores("incendio_devedores"),
+    getConfigDevedores("fundo_reserva_devedores"),
   ]);
-  // Fundo de reserva: usar lista estática (não tem quotaTipo na DB)
-  const fundoDevedoresMap = new Map(FUNDO_RESERVA_DEVEDORES_EXCEL.map(d => [d.numero, d.total]));
+  const [elevDevedores, portaoDevedores, incendioDevedores] = await Promise.all([
+    getExtraDevedoresPorPagar(quotaExtraList, ELEV_TIPO_ID),
+    getExtraDevedoresPorPagar(portaoList, PORTAO_TIPO_ID),
+    getExtraDevedoresPorPagar(incendioList, INCENDIO_TIPO_ID),
+  ]);
+  const fundoDevedoresMap = new Map(fundoList.map(d => [d.numero, d.total]));
 
   for (const fracao of fracoesList) {
     try {

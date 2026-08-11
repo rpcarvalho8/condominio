@@ -10,108 +10,42 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { fullReconcile, matchSpecialCases } from "./reconciliation-engine";
 
-// ─── Owner / Fração map ────────────────────────────────────────────────────────
-export const FRACOES_INFO: Record<string, { nome: string; tipo: string; permilage: number }> = {
-  J:  { nome: "Mª da Conceição S. Moreira",           tipo: "habitacao", permilage: 38.80 },
-  L:  { nome: "João Marco Coutinho S. Moreira",        tipo: "habitacao", permilage: 41.76 },
-  M:  { nome: "Jannara Maria dos Santos",              tipo: "habitacao", permilage: 39.50 },
-  N:  { nome: "Filipe Daniel F. Teixeira",             tipo: "habitacao", permilage: 38.82 },
-  O:  { nome: "Pedro Miguel R. Santos",                tipo: "habitacao", permilage: 41.76 },
-  P:  { nome: "Nuno Ricardo de Sá Ribeiro",            tipo: "habitacao", permilage: 43.30 },
-  Q:  { nome: "João Carlos Sousa Barros",              tipo: "habitacao", permilage: 37.14 },
-  R:  { nome: "Vanessa Cristina Araújo Silva",         tipo: "habitacao", permilage: 56.75 },
-  S:  { nome: "Célia Beatriz Sá",                     tipo: "habitacao", permilage: 32.34 },
-  T:  { nome: "Susana Daniela Oliveira e Silva",       tipo: "habitacao", permilage: 38.50 },
-  U:  { nome: "Catarina Reis Azevedo da Silva",        tipo: "habitacao", permilage: 57.21 },
-  V:  { nome: "Sérgio Miguel da S. Monteiro",          tipo: "habitacao", permilage: 34.05 },
-  X:  { nome: "Alexandre Ribeiro Maia",                tipo: "habitacao", permilage: 39.12 },
-  Z:  { nome: "Ana Isabel Dias Costa",                 tipo: "habitacao", permilage: 55.15 },
-  AA: { nome: "Olivia Cândida Ferreira Lima",          tipo: "habitacao", permilage: 35.06 },
-  AB: { nome: "Ilídio António Morais Marinho",         tipo: "habitacao", permilage: 35.00 },
-  AE: { nome: "Germano A. M. Machado",                 tipo: "habitacao", permilage: 37.00 },
-  AF: { nome: "Rui Alexandre Silva Torres",            tipo: "habitacao", permilage: 35.21 },
-  AG: { nome: "João Pedro Amorim Dias",                tipo: "habitacao", permilage: 35.41 },
-  AH: { nome: "Mª Madalena Costa F. Ramos",           tipo: "habitacao", permilage: 40.96 },
-  AI: { nome: "Rui Carvalho",                         tipo: "habitacao", permilage: 35.85 },
-  AJ: { nome: "Mariana da Silva Reis",                 tipo: "habitacao", permilage: 34.57 },
-  G:  { nome: "Marma Concept, Unipessoal Lda",         tipo: "loja",      permilage: 22.96 },
-  H:  { nome: "Joana Andreia Azevedo Dias",            tipo: "loja",      permilage: 16.96 },
-  I:  { nome: "Joana Andreia Azevedo Dias",            tipo: "loja",      permilage: 22.00 },
-  AC: { nome: "Maria de Fátima Martins Ascenção",      tipo: "loja",      permilage: 18.10 },
-  AD: { nome: "Escutoglamour Unipessoal, Lda",         tipo: "loja",      permilage: 18.68 },
-  A:  { nome: "Universe Sustainable, SA",             tipo: "garagem",   permilage: 2.89 },
-  B:  { nome: "Germano A. M. Machado",                 tipo: "garagem",   permilage: 2.86 },
-  C:  { nome: "Universe Sustainable, SA",             tipo: "garagem",   permilage: 2.89 },
-  D:  { nome: "Susana Daniela Oliveira e Silva",       tipo: "garagem",   permilage: 3.15 },
-  E:  { nome: "Tiago Pinheiro Correia",                tipo: "garagem",   permilage: 3.00 },
-  F:  { nome: "Tiago Pinheiro Correia",                tipo: "garagem",   permilage: 3.25 },
-};
+// ─── Owner / Fração map — fonte: bank-identity-map.json (gitignored) ─────────
 
-// ─── Name → Fração map (from bank descritivos, incl. past tenants) ─────────────
-// Normalised uppercase, diacritic-free fragments → fração ID
-const NAME_FRACAO_MAP: Array<[string, string | null]> = [
-  // === CONFIRMED (amount-matched) ===
-  ["JOAO MARCO COUTINHO",         "L"],
-  ["MARCO COUTINHO",              "L"],
-  ["FILIPE DANIEL FERREIRA",      "N"],
-  ["FILIPE DANIEL F TEIXEIRA",    "N"],
-  ["NUNO RICARDO SA RIBEIRO",     "P"],
-  ["NUNO RIBEIRO",                "P"],   // TRF.A CRED.SEPA+ short name
-  ["PEDRO MIGUEL R SANTOS",       "O"],
-  ["PEDRO MIGUEL RODRIGUES",      "O"],   // same person diff bank name
-  ["VANESSA CRISTINA ARAUJO",     "R"],
-  ["VANESSA CRISTINA",            "R"],
-  ["DRA VANESSA CRISTINA",        "R"],
-  ["CELIA BEATRIZ SA",            "S"],
-  ["CELIA BEATRIZ AZEVE",         "S"],   // truncated intrabanc
-  ["CATARINA REIS AZEVEDO",       "U"],
-  ["SERGIO MIGUEL SILVA MONTEIRO","V"],
-  ["SERGIO MIGUEL DA S MONTEIRO", "V"],
-  ["ALEXANDRE RIBEIRO MAIA",      "X"],
-  ["ANA ISABEL DIAS COSTA",       "Z"],
-  ["OLIVIA CANDIDA FERREIRA LIMA","AA"],
-  ["OLIVIA LIMA",                 "AA"],  // TRF.A short
-  ["ILIDIO ANTONIO MORAIS",       "AB"],
-  ["ILIDIO MARINHO",              "AB"],
-  ["GERMANO AUGUSTO MAR",         "AE"],  // INTRABANC truncated
-  ["GERMANO MACH",                "AE"],  // "Germano Macahdo" typo in CSV
-  ["JOAO PEDRO AMORIM DIAS",      "AG"],
-  ["RUI PEDRO MAIA OLIVEIRA",     "AI"],  // current owner (Rui Carvalho)
-  ["RUI CARVALHO",                "AI"],
-  ["JANNARA MARIA SANTOS",        "M"],
-  ["JANNARA MARIA DOS SANTOS",    "M"],
-  // === PREVIOUS TENANTS (amount-verified) ===
-  ["TIAGO FILIPE MOREIRA GOMES",  "AF"],  // 30.84€ = AF in 2023
-  ["TIAGO FILIPE MOREIRA G",      "AF"],
-  ["JOANA SANTOS CAVADAS",        "Q"],   // 32.53€ = Q in 2023
-  ["MAGGY DA YESKI TORRES",       "AG"],  // 31€ ≈ AG in 2023
-  ["GUSTAVO ADOLFO PIMENTA",      "AJ"],  // Pays ~40€, likely prev AJ tenant
-  ["GUSTAVO ADOLFO P COUTO",      "AJ"],
-  ["GUSTAVO HARDMAN",             "AJ"],  // TRF.A short name
-  ["CAMILO AUGUSTO SOARES SILVA", "AH"],  // 46.08€, 87.04€ → AH
-  ["JOANA PATRICIA OLIVEIRA",     "H"],   // Joana Andreia Azevedo = current H/I owner
-  ["JOANA PATRICIA OLIVEIR",      "H"],   // truncated
-  ["JOANA ANDREIA AZEVEDO",       "H"],
-  ["EURICA CAMARA SILVA",         "X"],   // 33.50€ ≈ X 2023 (39.12 × 0.8759 = 34.26... close)
-  ["PEDRO MIGUEL DA SILVA",       "G"],   // 33.50€ → G loja prev tenant
-  ["MARMA CONCEPT",               "G"],   // current G loja owner
-  ["UNIVERSE SUSTAINABLE",        "A"],   // garagem A (also has C but both same company)
-  ["SUSANA SILVA",                "T"],   // Susana pays for T and D (combined)
-  ["SUSANA DANIELA",              "T"],
-  // Truncated names that miss the suffix match
-  ["SERGIO MIGUEL SILVA MO",      "V"],   // truncated at 22 chars
-  ["SERGIO MIGUEL DA S MONTE",    "V"],
-  ["RUI PEDRO MAIA OLIVEIR",      "AI"],  // truncated (= Rui Carvalho)
-  ["RUI PEDRO MAIA OLIVEI",       "AI"],
-  // === NOT RESIDENTS / UNKNOWN ===
-  ["FAMALIPET CLINICA",           null],  // vet clinic, prev loja tenant (external)
-  ["COND RUA CIMO DE VILA",       null],  // another building / shared cost
-  ["ENG JOAO MOREIRA",            null],  // unknown
-  ["JOAQUIM JORGE PEREIRA",       null],  // unknown lump sum
-  ["CAMARA",                      null],
-];
+type FracaoInfo = { nome: string; tipo: string; permilage: number };
+
+function loadBankIdentityMap(): {
+  fracoesInfo: Record<string, FracaoInfo>;
+  nameFracaoMap: Array<[string, string | null]>;
+} {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, "../../../../../bank-identity-map.json"),
+    path.resolve(process.cwd(), "bank-identity-map.json"),
+    path.resolve(process.cwd(), "../../bank-identity-map.json"),
+  ];
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+      return {
+        fracoesInfo: (raw.fracoesInfo ?? {}) as Record<string, FracaoInfo>,
+        nameFracaoMap: (raw.nameFracaoMap ?? []) as Array<[string, string | null]>,
+      };
+    } catch (e) {
+      console.warn("[csv-bank-parser] falha a ler bank-identity-map.json:", e);
+    }
+  }
+  console.warn("[csv-bank-parser] bank-identity-map.json em falta — matching por nome desactivado");
+  return { fracoesInfo: {}, nameFracaoMap: [] };
+}
+
+const _bankId = loadBankIdentityMap();
+export const FRACOES_INFO: Record<string, FracaoInfo> = _bankId.fracoesInfo;
+const NAME_FRACAO_MAP: Array<[string, string | null]> = _bankId.nameFracaoMap;
 
 function normalise(s: string): string {
   return s.toUpperCase()

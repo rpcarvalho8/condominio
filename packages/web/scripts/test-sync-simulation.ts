@@ -207,8 +207,8 @@ async function testarCenarioA(): Promise<TestResult> {
   const txData = buildTx({
     amount: 46.28,
     description: "Transferência Condominio",
-    ibanSender: "PT50000700000035112419023",
-    debtorName: "CONCEICAO MOREIRA",
+    ibanSender: "PT50000000000000000000001",
+    debtorName: "JOAO SILVA",
   });
 
   // Step 1: Inserir na staging
@@ -310,13 +310,13 @@ async function testarCenarioA(): Promise<TestResult> {
   subheader("Step A.5 — Auto-Learning IBAN");
   const fracaoJBD = await db.run(sql`SELECT ibans_conhecidos FROM fracoes WHERE numero = 'J' LIMIT 1`);
   const ibansBD: string[] = JSON.parse((fracaoJBD as any).rows?.[0]?.ibans_conhecidos ?? "[]");
-  if (ibansBD.includes("PT50000700000035112419023")) {
-    ok("IBAN PT50000700000035112419023 persistido em BD para fração J ✓");
+  if (ibansBD.includes("PT50000000000000000000001")) {
+    ok("IBAN PT50000000000000000000001 persistido em BD para fração J ✓");
     r.passed++;
   } else {
     // Pode não ter sido aprendido se já estava na matriz estática — verificar
     const fracaoJ = getFracaoById("J")!;
-    if (fracaoJ.ibansConhecidos.includes("PT50000700000035112419023")) {
+    if (fracaoJ.ibansConhecidos.includes("PT50000000000000000000001")) {
       ok("IBAN já estava na MATRIZ estática — auto-learning não necessário (correcto)");
       r.passed++;
     } else {
@@ -345,8 +345,8 @@ async function testarCenarioB(): Promise<TestResult> {
   const txData = buildTx({
     amount: 300.00,
     description: "Pagamento Fração L",
-    ibanSender: "PT50009999999999999999999", // IBAN fictício → deve accionar auto-learning
-    debtorName: "JOÃO MARCO COUTINHO S MOREIRA",
+    ibanSender: "PT50000000000000000000099", // IBAN fictício → deve accionar auto-learning
+    debtorName: "MARIA SANTOS",
   });
 
   // Step 1: Inserir staging
@@ -356,7 +356,7 @@ async function testarCenarioB(): Promise<TestResult> {
     stagedId = await inserirTransacaoStaging(txData);
     txIdsParaLimpar.push(txData.transaction_id);
     ok(`Transação inserida — id: ${stagedId}`);
-    info(`Cenário: IBAN fictício + nome real → auto-learning + cascata`);
+    info(`Cenário: IBAN fictício + nome demo → auto-learning + cascata`);
     info(`Quota Matriz Fração L: €${fracaoL.valoresFixos.condominio} + €${fracaoL.valoresFixos.fundoReserva} = €${quotaLiquidaMatriz.toFixed(2)}`);
     info(`Resto esperado para cascata: €${restoEsperadoMatriz.toFixed(2)}`);
     r.passed++;
@@ -390,7 +390,7 @@ async function testarCenarioB(): Promise<TestResult> {
     fail("identifyByMultiMatch() retornou null — fração NÃO identificada");
     r.failed++; r.issues.push("Motor matricial falhou com IBAN fictício + nome");
     // Diagnóstico adicional
-    warn("DIAGNÓSTICO: Verificar se 'JOÃO MARCO COUTINHO S MOREIRA' passa nomeCoincide()");
+    warn("DIAGNÓSTICO: Verificar se 'MARIA SANTOS' passa nomeCoincide()");
     warn("→ A descrição 'Pagamento Fração L' pode accionar descricaoMencaonaFracao() → verifcar");
   } else {
     if (matrixResult.fracao.idFracao === "L") {
@@ -424,12 +424,12 @@ async function testarCenarioB(): Promise<TestResult> {
     // Step 4: Auto-learning IBAN fictício
     subheader("Step B.4 — Auto-Learning IBAN fictício");
     if (matrixResult.ibanNovoAprendido) {
-      ok("IBAN PT50009999999999999999999 aprendido e associado à fração L ✓");
+      ok("IBAN PT50000000000000000000099 aprendido e associado à fração L ✓");
       r.passed++;
       // Verificar na BD
       const lBD = await db.run(sql`SELECT ibans_conhecidos FROM fracoes WHERE numero = 'L' LIMIT 1`);
       const ibansL = JSON.parse((lBD as any).rows?.[0]?.ibans_conhecidos ?? "[]");
-      if (ibansL.includes("PT50009999999999999999999")) {
+      if (ibansL.includes("PT50000000000000000000099")) {
         ok("IBAN fictício persistido em BD ✓");
         r.passed++;
       } else {
@@ -529,7 +529,7 @@ async function testarCenarioC(): Promise<TestResult> {
   const txData = buildTx({
     amount: 20.00,
     description: "Condominio Garagem",
-    ibanSender: "PT50001111111111111111111",
+    ibanSender: "PT50000000000000000000011",
     debtorName: "ALGUEM DESCONHECIDO",
   });
 
@@ -585,7 +585,7 @@ async function testarCenarioC(): Promise<TestResult> {
   // Step 4: Verificar que IBAN fictício NÃO foi aprendido
   subheader("Step C.4 — IBAN fictício NÃO deve ser aprendido");
   if (!matrixResult || !matrixResult.ibanNovoAprendido) {
-    ok("IBAN PT50001111111111111111111 NÃO foi aprendido ✓ (correcto — identificação rejeitada)");
+    ok("IBAN PT50000000000000000000011 NÃO foi aprendido ✓ (correcto — identificação rejeitada)");
     r.passed++;
   } else {
     fail("IBAN fictício foi aprendido indevidamente — risco de contaminação do índice!");
@@ -673,7 +673,7 @@ async function cleanup() {
   try {
     const lBD = await db.run(sql`SELECT ibans_conhecidos FROM fracoes WHERE numero = 'L' LIMIT 1`);
     const ibansL: string[] = JSON.parse((lBD as any).rows?.[0]?.ibans_conhecidos ?? "[]");
-    const ibansLimpos = ibansL.filter(i => i !== "PT50009999999999999999999");
+    const ibansLimpos = ibansL.filter(i => i !== "PT50000000000000000000099");
     if (ibansLimpos.length !== ibansL.length) {
       await db.run(sql`UPDATE fracoes SET ibans_conhecidos = ${JSON.stringify(ibansLimpos)} WHERE numero = 'L'`);
       console.log(`  ${C.grey}→ IBAN fictício removido da fração L${C.reset}`);

@@ -26,6 +26,8 @@ import {
   getCartaFracao,
   totalGeralCartas,
   morososPorRubrica,
+  setCartasFromDB,
+  type CartaFracao,
 } from "../lib/cartas-julho-2026";
 
 const ANCORA_CHAVES = [
@@ -90,221 +92,165 @@ async function getAncoras(): Promise<{
 }
 
 // ─────────────────────────────────────────────────────────
-// DADOS REAIS DO EXCEL — devedores por conta
-// Fonte: Contas_2026.xlsx (verdade até importação completa)
+// Devedores / pagamentos — fonte BD (`configuracoes` + `fracoes`)
+// PII e listas Excel: identify-data.json + seed-gdpr-config.ts
 // ─────────────────────────────────────────────────────────
 
-// ─── PAGAMENTOS BANCÁRIOS NÃO CATEGORIZADOS NO EXCEL ────
-// Estes pagamentos existem no extracto bancário (Sheet 10 / CSV)
-// mas o condomínio NÃO os categorizou, gerando discrepância.
-//
-// FRAÇÃO L — João Marco Coutinho (Jan 2026):
-//   28/01/2026: 563.76€ — "quotas mensais atrasadas"
-//   30/01/2026:  25.47€ — "fundo de reserva atrasado"
-//   Total pago: 589.23€
-//
-// CÁLCULO CORRECTO (base: Sheet 3):
-//   Dívida quota a 31.12.2025:  167.01€ (pre-2026 arrears)
-//   Janeiro 2026 quota:          42.71€
-//   Subtotal quota:             209.72€  → 563.76 cobre tudo + crédito 354.04€
-//   Crédito quota (354.04/42.71): 8.29 meses → quota paga até ~Out 2026
-//
-//   Dívida fundo a 31.12.2025:   23.99€ (pre-2026 fundo arrears, Sheet 3/FUNDO_RESERVA)
-//   Janeiro 2026 fundo:           4.27€  → parcialmente coberto (25.47 - 23.99 = 1.48€ crédito)
-//   Fundo pago até: ~Jan 2026 (restam ~2.79€ de Jan fundo)
-//
-// POSIÇÃO DO CONDOMÍNIO (alegada, incorrecta):
-//   Alega que 563.76€ cobre apenas Jan–Out 2026 sem considerar dívida pre-2026 (167.01€)
-//
-// NOTA: Obras (2110.97€), Quota Extra (323.24€), Portão (29.53€) são contas SEPARADAS
-//       e NÃO são abrangidas por estes pagamentos.
-const PAGAMENTOS_NAO_CATEGORIZADOS = [
-  {
-    fracao: "L",
-    proprietario: "João Marco Coutinho S. Moreira",
-    pagamentos: [
-      { data: "28/01/2026", montante: 563.76, descricao: "Quotas mensais atrasadas", referencia: "DA-284854486" },
-      { data: "30/01/2026", montante: 25.47,  descricao: "Fundo de reserva atrasado", referencia: "DA-285074316" },
-    ],
-    totalPago: 589.23,
-    cobreAte: {
-      quota: "Outubro 2026 (~8.3 meses crédito a partir de Fev)",
-      fundo: "Janeiro 2026 (parcial — restam ~2.79€)",
-    },
-    // Nota de reconciliação contabilística (revista 22/07/2026 — linguagem neutra,
-    // substitui formulação anterior em tom de disputa não profissional):
-    notaReconciliacao: "563,76€ aplicados à quota corrente e histórico em atraso (Jan-Out 2026, considerando dívida pré-2026 de 167,01€ incluída no cálculo); 25,47€ aplicados ao fundo de reserva (parcial).",
-    contasNaoCovertas: ["Obras (2110.97€)", "Quota Extra Elevadores (323.24€)"],
-    // Quota Extra Motor (29,53€) — RECONCILIADA em 22/07/2026: pagamento bancário
-    // confirmado via Enable Banking + email do condómino a confirmar a finalidade
-    // da transferência. Quota reclassificada de "condominio" para "extra"/Motor.
-    // Removida desta lista de "não cobertas".
-  },
-];
-
-// Sheet 4 — Obras em divida (coluna "VALOR EM DÍVIDA" > 0)
 const PORTAO_TIPO_ID   = "06d6dd01-04ac-4ea3-8359-ec705f78de7c";
 const ELEV_TIPO_ID     = "4696eef9-bd1f-46ff-a368-47cfd455eeca";
 const INCENDIO_TIPO_ID = "dd16bd50-a2ab-4387-9d70-95822b1a61d7";
 
-// ─── ORÇAMENTOS TOTAIS APROVADOS EM ASSEMBLEIA ───────────────────────────────
-// Importados de identity-matrix.ts (single source of truth).
-// ORCAMENTO_MOTOR, ORCAMENTO_INCENDIO, ORCAMENTO_ELEVADORES, ORCAMENTO_OBRAS
+type DevedorSlim = { numero: string; total: number };
+type DevedorMoroso = {
+  fracao: { id: string; numero: string; proprietarioNome: string; andar: number };
+  total: number;
+  quotas: never[];
+};
 
-// ─── IBANs DAS POUPANÇAS FÍSICAS (Depósitos a Prazo Santander) ──────────────
-// Saídas DBIT da Conta à Ordem para estes IBANs = transferências internas.
-// NÃO devem ser registadas como despesas nem reduzir o saldo operacional.
-// Fonte: Extratos Santander — contas dos depósitos a prazo do condomínio.
-const IBANS_POUPANCA_FISICA = new Set<string>([
-  // Depósito a Prazo — Fundo de Reserva
-  // Depósito a Prazo — Elevadores / Quota Extra
-  // Depósito a Prazo — Obras
-  // (adicionar IBANs reais quando disponíveis; usar formato sem espaços)
-  // Exemplo: "PT50003300004520936620005"
-]);
+async function getConfigJson<T>(chave: string, fallback: T): Promise<T> {
+  try {
+    const rows = await db
+      .select()
+      .from(schema.configuracoes)
+      .where(eq(schema.configuracoes.chave, chave))
+      .limit(1);
+    if (!rows[0]?.valor) return fallback;
+    return JSON.parse(rows[0].valor) as T;
+  } catch {
+    return fallback;
+  }
+}
 
-// ─── ÂNCORAS — importadas de identity-matrix.ts (single source of truth) ────
-// ANCORA_DATA_MOVIMENTOS  → 02/06/2026 (início triagem bancária)
-// ANCORA_DATA_CC          → 15/06/2026 (saldo CC canónico: 1806.74€)
-// NUNCA usar saldo_base_valor/saldo_base_data da DB — valores Enable Banking errados.
-const ANCORA_MOVIMENTOS = ANCORA_DATA_MOVIMENTOS;  // alias local para legibilidade
+async function ensureCartasLoaded(): Promise<void> {
+  if (CARTAS_JULHO_2026.length > 0) return;
+  const fromDb = await getConfigJson<CartaFracao[]>("cartas_julho_2026", []);
+  if (fromDb.length > 0) setCartasFromDB(fromDb);
+}
+
+async function getPagamentosNaoCategorizados(): Promise<unknown[]> {
+  return getConfigJson("pagamentos_nao_categorizados", []);
+}
+
+/** Lista slim `{numero,total}` → formato morosos do dashboard (nome da BD). */
+async function enrichDevedoresSlim(list: DevedorSlim[]): Promise<DevedorMoroso[]> {
+  if (list.length === 0) return [];
+  const nums = list.map((d) => d.numero);
+  const rows = await db
+    .select({
+      numero: schema.fracoes.numero,
+      proprietarioNome: schema.fracoes.proprietarioNome,
+      andar: schema.fracoes.andar,
+    })
+    .from(schema.fracoes)
+    .where(inArray(schema.fracoes.numero, nums));
+  const byNum = new Map(rows.map((r) => [r.numero!, r]));
+  return list
+    .map((d) => {
+      const r = byNum.get(d.numero);
+      return {
+        fracao: {
+          id: d.numero,
+          numero: d.numero,
+          proprietarioNome: r?.proprietarioNome ?? "",
+          andar: r?.andar ?? 0,
+        },
+        total: d.total,
+        quotas: [] as never[],
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+}
+
+async function getPortaoDevedores(): Promise<DevedorMoroso[]> {
+  const slim = await getConfigJson<DevedorSlim[]>("portao_devedores", []);
+  return enrichDevedoresSlim(slim);
+}
+
+async function getIndaquaDevedores(): Promise<DevedorMoroso[]> {
+  const slim = await getConfigJson<DevedorSlim[]>("indaqua_devedores", []);
+  if (slim.length > 0) return enrichDevedoresSlim(slim);
+  const rows = await db
+    .select({
+      numero: schema.fracoes.numero,
+      proprietarioNome: schema.fracoes.proprietarioNome,
+      andar: schema.fracoes.andar,
+      total: schema.fracoes.indaquaDivida,
+    })
+    .from(schema.fracoes)
+    .where(gt(schema.fracoes.indaquaDivida, 0));
+  return rows
+    .filter((r) => r.numero != null)
+    .map((r) => ({
+      fracao: {
+        id: r.numero!,
+        numero: r.numero!,
+        proprietarioNome: r.proprietarioNome ?? "",
+        andar: r.andar ?? 0,
+      },
+      total: Math.round((r.total ?? 0) * 100) / 100,
+      quotas: [] as never[],
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+async function getMotorDevedoresFallback(): Promise<DevedorMoroso[]> {
+  const rows = await db
+    .select({
+      numero: schema.fracoes.numero,
+      proprietarioNome: schema.fracoes.proprietarioNome,
+      andar: schema.fracoes.andar,
+      motor: schema.fracoes.motorDivida,
+    })
+    .from(schema.fracoes)
+    .where(gt(schema.fracoes.motorDivida, 0));
+  return rows
+    .filter((r) => r.numero != null)
+    .map((r) => ({
+      fracao: {
+        id: r.numero!,
+        numero: r.numero!,
+        proprietarioNome: r.proprietarioNome ?? "",
+        andar: r.andar ?? 0,
+      },
+      total: Math.round((r.motor ?? 0) * 100) / 100,
+      quotas: [] as never[],
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+const IBANS_POUPANCA_FISICA = new Set<string>();
+
+const ANCORA_MOVIMENTOS = ANCORA_DATA_MOVIMENTOS;
 const ANCORA_TS = Math.floor(ANCORA_DATA_MOVIMENTOS.getTime() / 1000);
-const ANCORA_CC = ANCORA_DATA_CC;                  // alias local para legibilidade
+const ANCORA_CC = ANCORA_DATA_CC;
 const ANCORA_CC_TS = Math.floor(ANCORA_DATA_CC.getTime() / 1000);
 
-// ─── MOVIMENTO TESTE (a ignorar sempre) ─────────────────────────────────────
-// Transferência de teste de 15,00€ — eliminar do processamento.
 const VALOR_TESTE_EUR = 15.00;
 
-// Fonte da verdade: Valores_Condomínio.xlsx col L ("Valores em dívida Quota Extra Obras")
-// Actualizado: 2026-06-15 — total real = 5358.51€
-const OBRAS_DEVEDORES_EXCEL = [
-  { fracao: { id: "L",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",              andar: 1 }, total: 2110.97, quotas: [] },
-  { fracao: { id: "G",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",               andar: 0 }, total: 1160.63, quotas: [] },
-  { fracao: { id: "AD", numero: "AD", proprietarioNome: "Escutoglamour Unipessoal, Lda",               andar: 0 }, total:  629.51, quotas: [] },
-  { fracao: { id: "AC", numero: "AC", proprietarioNome: "Maria de Fátima Martins Ascenção",            andar: 0 }, total:  607.35, quotas: [] },
-  { fracao: { id: "AG", numero: "AG", proprietarioNome: "João Pedro Amorim Dias / Maggy Torres Guevara", andar: 2 }, total: 284.27, quotas: [] },
-  { fracao: { id: "X",  numero: "X",  proprietarioNome: "Alexandre Ribeiro Maia",                     andar: 1 }, total:  278.30, quotas: [] },
-  { fracao: { id: "N",  numero: "N",  proprietarioNome: "Filipe Daniel F. Teixeira",                   andar: 1 }, total:  178.63, quotas: [] },
-  { fracao: { id: "M",  numero: "M",  proprietarioNome: "Jannara Maria dos Santos",                    andar: 1 }, total:  108.85, quotas: [] },
-].sort((a, b) => b.total - a.total);
-
-// Fonte da verdade: Valores_Condomínio.xlsx col O ("Valores em dívida Quota Extra Incêndio")
-// Actualizado: 2026-06-15 — total real = 110.12€
-const INCENDIO_DEVEDORES_EXCEL = [
-  { fracao: { id: "G3", numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",    andar: 0 }, total: 60.72, quotas: [] },
-  { fracao: { id: "AD2",numero: "AD", proprietarioNome: "Escutoglamour Unipessoal, Lda",    andar: 0 }, total: 49.40, quotas: [] },
-].sort((a, b) => b.total - a.total);
-
-// Fonte da verdade: Valores_Condomínio.xlsx col R ("Valores em dívida Quota extra Indaqua + elevadores")
-// Actualizado: 2026-06-15 — total real = 308.21€
-// NOTA: esta coluna substitui QUOTA_EXTRA_DEVEDORES_EXCEL para a gaveta Indaqua+Elevadores
-const INDAQUA_DEVEDORES_EXCEL = [
-  { fracao: { id: "L_iq",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",              andar: 1 }, total: 250.56, quotas: [] },
-  { fracao: { id: "N_iq",  numero: "N",  proprietarioNome: "Filipe Daniel F. Teixeira",                   andar: 1 }, total:  33.78, quotas: [] },
-  { fracao: { id: "G_iq",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",               andar: 0 }, total:  23.87, quotas: [] },
-].sort((a, b) => b.total - a.total);
-
-// Fonte da verdade: Valores_Condomínio.xlsx col U ("Valores em dívida Quota extra motor")
-// Actualizado: 2026-06-15 — total real = 98.48€
-const MOTOR_DEVEDORES_EXCEL = [
-  { fracao: { id: "L_m",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",              andar: 1 }, total: 29.53, quotas: [] },
-  { fracao: { id: "X_m",  numero: "X",  proprietarioNome: "Alexandre Ribeiro Maia",                     andar: 1 }, total: 27.67, quotas: [] },
-  { fracao: { id: "AG_m", numero: "AG", proprietarioNome: "João Pedro Amorim Dias / Maggy Torres Guevara", andar: 2 }, total: 25.04, quotas: [] },
-  { fracao: { id: "G_m",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",               andar: 0 }, total: 16.24, quotas: [] },
-].sort((a, b) => b.total - a.total);
-
-// Sheet 7 — Portão da Garagem — valores por fração (Orçamento OR M/123, 707,25€ com IVA)
-// Fonte: Orçamento_Portao_e_Cota_extra_por_fraçao.pdf
-// Sheet 5 — Portão da Garagem: valor exacto em dívida por fração
-// Cálculo: total_qe_fração = elevadores + portão; portão_pago = max(0, pago - elevadores); portão_divida = portão - portão_pago
-// Fonte: Sheet5 Quota Extra (inclui elevadores + portão) + Orçamento portão PDF
-// Total portão: 707.25€ | Pago: 59.66€ base + pagamentos posteriores
-// Pagamentos confirmados após 31.12.2025:
-//   H(11.99) + I(15.56) + AC(12.80) + AD(13.21) + A(2.04) + B(2.02) + C(2.04) = 59.66€
-//   AI (Rui Carvalho) pagou 25.35€ em 07/05/2026 — portão AI liquidado
-//   AH (Mª Madalena) pagou 28.97€ em 07/05/2026 via transferência de Rui Carvalho (ref: "AH cota extra motor garagem") — portão AH liquidado
-//   Total pago: 59.66 + 25.35 + 28.97 = 113.98€ | Em dívida: 707.25 - 113.98 = 593.27€
-const PORTAO_DEVEDORES_EXCEL = [
-  { fracao: { id: "U_p",  numero: "U",  proprietarioNome: "Catarina Reis Azevedo da Silva",     andar: 2 }, total: 40.46, quotas: [] },
-  { fracao: { id: "R_p",  numero: "R",  proprietarioNome: "Vanessa Cristina Araújo Silva",      andar: 2 }, total: 40.14, quotas: [] },
-  { fracao: { id: "Z_p",  numero: "Z",  proprietarioNome: "Ana Isabel Dias Costa",              andar: 3 }, total: 39.00, quotas: [] },
-  { fracao: { id: "P_p",  numero: "P",  proprietarioNome: "Nuno Ricardo de Sá Ribeiro",         andar: 1 }, total: 30.62, quotas: [] },
-  { fracao: { id: "L_p",  numero: "L",  proprietarioNome: "João Marco Coutinho S. Moreira",     andar: 1 }, total: 29.53, quotas: [] },
-  { fracao: { id: "O_p",  numero: "O",  proprietarioNome: "Pedro Miguel R. Santos",             andar: 1 }, total: 29.53, quotas: [] },
-  // AH (Mª Madalena Costa F. Ramos) — portão PAGO em 07/05/2026 (28.97€ via transf. Rui Carvalho, ref: "AH cota extra motor garagem")
-  { fracao: { id: "M_p",  numero: "M",  proprietarioNome: "Jannara Maria dos Santos",           andar: 1 }, total: 27.94, quotas: [] },
-  { fracao: { id: "X_p",  numero: "X",  proprietarioNome: "Alexandre Ribeiro Maia",             andar: 1 }, total: 27.67, quotas: [] },
-  { fracao: { id: "N_p",  numero: "N",  proprietarioNome: "Filipe Daniel F. Teixeira",          andar: 1 }, total: 27.46, quotas: [] },
-  { fracao: { id: "J_p",  numero: "J",  proprietarioNome: "Mª da Conceição S. Moreira",        andar: 0 }, total: 27.44, quotas: [] },
-  { fracao: { id: "T_p",  numero: "T",  proprietarioNome: "Susana Daniela Oliveira e Silva",   andar: 2 }, total: 27.23, quotas: [] },
-  { fracao: { id: "Q_p",  numero: "Q",  proprietarioNome: "João Carlos Sousa Barros",           andar: 1 }, total: 26.27, quotas: [] },
-  { fracao: { id: "AE_p", numero: "AE", proprietarioNome: "Germano A. M. Machado",              andar: 2 }, total: 26.17, quotas: [] },
-  // AI (Rui Carvalho) pagou 25.35€ em 07/05/2026 — portão AI liquidado
-  { fracao: { id: "AG_p", numero: "AG", proprietarioNome: "João Pedro Amorim Dias",             andar: 2 }, total: 25.04, quotas: [] },
-  { fracao: { id: "AF_p", numero: "AF", proprietarioNome: "Rui Alexandre Silva Torres",         andar: 2 }, total: 24.90, quotas: [] },
-  { fracao: { id: "AA_p", numero: "AA", proprietarioNome: "Olivia Cândida Ferreira Lima",       andar: 3 }, total: 24.80, quotas: [] },
-  { fracao: { id: "AB_p", numero: "AB", proprietarioNome: "Ilídio António Morais Marinho",      andar: 3 }, total: 24.75, quotas: [] },
-  { fracao: { id: "AJ_p", numero: "AJ", proprietarioNome: "Mariana da Silva Reis",              andar: 3 }, total: 24.45, quotas: [] },
-  { fracao: { id: "V_p",  numero: "V",  proprietarioNome: "Sérgio Miguel da S. Monteiro",       andar: 2 }, total: 24.08, quotas: [] },
-  { fracao: { id: "S_p",  numero: "S",  proprietarioNome: "Célia Beatriz Sá",                  andar: 1 }, total: 22.87, quotas: [] },
-  { fracao: { id: "G_p",  numero: "G",  proprietarioNome: "Marma Concept, Unipessoal Lda",      andar: 0 }, total: 16.24, quotas: [] },
-].sort((a, b) => b.total - a.total);
-
-// Fundo de Reserva — devedores (mesmos da conta corrente morosos)
-// NOTA L: 25.47€ pago em 30/01/2026 cobre 23.99€ pre-2026 + 1.48€ crédito Jan
-//         Fundo Jan 2026 = 4.27€ → ainda owe 2.79€ de Janeiro
-//         O Excel não registou este pagamento → mostramos valor corrigido
-const FUNDO_RESERVA_DEVEDORES_EXCEL = [
-  { fracao: { id: "L3", numero: "L", proprietarioNome: "João Marco Coutinho S. Moreira",    andar: 1 }, total: 2.79, quotas: [], nota: "Pagou 25.47€ em 30/01 (não registado). Cobre pre-2026 (23.99€) + parcial Jan. Resta 2.79€ de Jan." },
-  { fracao: { id: "G4", numero: "G", proprietarioNome: "Marma Concept, Unipessoal Lda",     andar: 0 }, total: 2.64,  quotas: [] },
-  { fracao: { id: "N2", numero: "N", proprietarioNome: "Filipe Daniel F. Teixeira",          andar: 1 }, total: 4.37,  quotas: [] },
-].sort((a, b) => b.total - a.total);
-
-// Saldos reais a 31.01.2026 (fonte: Contas_2026.xlsx)
-// NOTA: contaCorrente inclui ajuste L — 563.76€ pago em 28/01 (não categorizado no Excel)
-//   Excel diz L deve 213.99€ (quota+fundo Jan) mas ele pagou 589.23€ → em crédito para quotas futuras
-//   O totalEmAtraso real de quotas = Excel total - 213.99 (L já liquidou quota corrente)
-//   atraso_fundo_reserva: 28.41 Excel → corrigido: 28.41 - 23.99 (L pré-2026 fundo) + 2.79 (L Jan fundo resto) = 7.21
-// @deprecated Agosto 2026
-// - Estes valores só são usados como fallback de first boot (quando a BD não tem o registo).
-// - A fonte de verdade é agora a tabela `configuracoes` na BD.
-// - Migrados via seed-ancora.ts em Agosto 2026.
-// ─── SALDOS ANCORADOS A 15 DE JUNHO DE 2026 ─────────────────────────────────
-// Fonte original: Extratos físicos Santander confirmados em 15/06/2026.
-// Movimentos processados a partir de 02/06/2026 (ANCORA_MOVIMENTOS).
+// @deprecated Agosto 2026 — fallback first boot; fonte: configuracoes / seed-ancora.ts
 const SALDO_DEFAULTS: Record<string, number> = {
-  saldo_conta_corrente: ANCORA_SALDO_CC,         // Conta à Ordem — âncora 15/06/2026
-  saldo_fundo_reserva:  ANCORA_SALDO_FR,         // Dep. a Prazo FR — âncora 15/06/2026
-  atraso_fundo_reserva: 7.21,    // corrigido: L pagou 25.47 (23.99 pre-2026 fundo + parcial Jan)
-  saldo_obras:          ANCORA_SALDO_OBRAS,      // Dep. a Prazo Obras — âncora 15/06/2026
-  saldo_quota_extra:    ANCORA_SALDO_ELEVADORES, // Dep. a Prazo Elevadores — âncora 15/06/2026
+  saldo_conta_corrente: ANCORA_SALDO_CC,
+  saldo_fundo_reserva: ANCORA_SALDO_FR,
+  atraso_fundo_reserva: 7.21,
+  saldo_obras: ANCORA_SALDO_OBRAS,
+  saldo_quota_extra: ANCORA_SALDO_ELEVADORES,
   saldo_incendio: 0,
   a_receber_incendio: 157.98,
   a_receber_obras: 6006.05,
-  a_receber_quota_extra: 1723.56,  // 1777.88 - 28.97(AH portão pago 07/05) - 25.35(AI portão pago 07/05)
+  a_receber_quota_extra: 1723.56,
   saldo_portao: 0,
-  a_receber_portao: 593.27,  // 707.25 - 59.66(base) - 25.35(AI 07/05) - 28.97(AH 07/05) = 593.27
-  portao_pago: 113.98,       // 59.66 + 25.35(AI 07/05) + 28.97(AH 07/05)
-  // ── Valores cativos (dinheiro na Conta à Ordem ainda não transferido) ──────
-  // Motor e Incêndio ficam retidos como cativos virtuais na Conta à Ordem.
-  // FR e Obras são somados imediatamente às gavetas respectivas (não ficam cativos).
-  // Recalculados dinamicamente a partir de bank_transactions desde ANCORA_MOVIMENTOS.
+  a_receber_portao: 593.27,
+  portao_pago: 113.98,
   cativo_fundo_reserva: 0,
   cativo_indaqua: 0,
   cativo_incendio: 0,
   cativo_portao: 0,
   cativo_obras: 0,
-  // saldo_operacional_disponivel = saldo_conta_corrente − soma de todos os cativos
   saldo_operacional_disponivel: ANCORA_SALDO_CC,
-  // ── Dívida global por cota extraordinária ────────────────────────────────────
-  // DEFAULTS SEGUROS: totais das listas Excel (fracoes.* seeded), NÃO o orçamento completo.
-  // @deprecated — migrados para `configuracoes` (seed-ancora.ts); fallback first boot apenas.
-  // Fonte: OBRAS_DEVEDORES_EXCEL, MOTOR_DEVEDORES_EXCEL, INCENDIO_DEVEDORES_EXCEL, INDAQUA_DEVEDORES_EXCEL
-  divida_total_motor:      98.48,    // SUM(fracoes.motor_divida)
-  divida_total_incendio:   110.12,   // SUM(fracoes.incendio_divida)
-  divida_total_elevadores: 308.21,   // SUM(fracoes.indaqua_divida)
-  divida_total_obras:      4357.75,  // SUM(fracoes.obras_divida) — seeded do Excel Junho 2026
+  divida_total_motor: 98.48,
+  divida_total_incendio: 110.12,
+  divida_total_elevadores: 308.21,
+  divida_total_obras: 4357.75,
 };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -895,7 +841,8 @@ export async function recalcularSaldos(): Promise<void> {
         eq(schema.quotas.pago, true),
       ));
     const portaoPagosNums = new Set(portaoPagosRows.map(r => r.numero).filter(Boolean));
-    const portaoMorosos = PORTAO_DEVEDORES_EXCEL.filter(d => !portaoPagosNums.has(d.fracao.numero));
+    const portaoBase = await getPortaoDevedores();
+    const portaoMorosos = portaoBase.filter(d => !portaoPagosNums.has(d.fracao.numero));
     const aReceberPortao = Math.round(portaoMorosos.reduce((s, d) => s + d.total, 0) * 100) / 100;
 
     const portaoPagosValor = await db
@@ -935,7 +882,8 @@ export async function recalcularSaldos(): Promise<void> {
         eq(schema.quotas.pago, true),
       ));
     const elevPagosNums = new Set(elevPagosRows.map(r => r.numero).filter(Boolean));
-    const elevMorosos = INDAQUA_DEVEDORES_EXCEL.filter(d => !elevPagosNums.has(d.fracao.numero));
+    const elevBase = await getIndaquaDevedores();
+    const elevMorosos = elevBase.filter(d => !elevPagosNums.has(d.fracao.numero));
     const aReceberElev = Math.round(elevMorosos.reduce((s, d) => s + d.total, 0) * 100) / 100;
     await upsertSaldo("a_receber_quota_extra", aReceberElev);
   } catch (e) {
@@ -1177,6 +1125,7 @@ export function faturacaoMesVisivel(mes: number, ano: number): boolean {
 export const dashboard = new Hono()
   .get("/", async (c) => {
     await recalcularSaldosSeNecessario();
+    await ensureCartasLoaded();
 
     const agora = new Date();
     const mesAtual = agora.getMonth() + 1;
@@ -1614,8 +1563,9 @@ export const dashboard = new Hono()
       ));
     const portaoPagosNums = new Set(portaoPagosRows.map(r => r.numero).filter(Boolean));
 
-    // Morosos = Excel − quem pagou na DB
-    const portaoMorososDinamico = PORTAO_DEVEDORES_EXCEL.filter(d => !portaoPagosNums.has(d.fracao.numero));
+    // Morosos = config/BD − quem pagou na DB
+    const portaoBaseDash = await getPortaoDevedores();
+    const portaoMorososDinamico = portaoBaseDash.filter(d => !portaoPagosNums.has(d.fracao.numero));
     const portaoAReceberDinamico = Math.round(portaoMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
     // Pago = totalDB (mais preciso que 707.25 - aReceber se o Excel não tiver todos os valores exactos)
     const portaoPagoDinamico = portaoExtraDB?.totalPago
@@ -1623,8 +1573,7 @@ export const dashboard = new Hono()
       : Math.round((707.25 - portaoAReceberDinamico) * 100) / 100;
 
     // --- INDAQUA + ELEVADORES (Quota Extra) ---
-    // Fonte: INDAQUA_DEVEDORES_EXCEL − quem pagou na DB
-    // (As cartas de julho não incluem dívida INDAQUA separada — ainda usamos Excel para esta gaveta)
+    // Fonte: configuracoes.indaqua_devedores / fracoes.indaqua_divida − pagos na DB
     let quotaExtraMorososDinamico: Array<{ fracao: any; quotas: any[]; total: number }>;
     let quotaExtraAReceberDinamico: number;
 
@@ -1635,13 +1584,13 @@ export const dashboard = new Hono()
         .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
         .where(and(eq(schema.quotas.tipo, "extra"), eq(schema.quotas.quotaTipoId, ELEV_TIPO_ID), eq(schema.quotas.pago, true)));
       const elevPagosNums = new Set(elevPagosRows.map(r => r.numero).filter(Boolean));
-      quotaExtraMorososDinamico = INDAQUA_DEVEDORES_EXCEL.filter(d => !elevPagosNums.has(d.fracao.numero));
+      const indaquaBase = await getIndaquaDevedores();
+      quotaExtraMorososDinamico = indaquaBase.filter(d => !elevPagosNums.has(d.fracao.numero));
       quotaExtraAReceberDinamico = Math.round(quotaExtraMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
     }
 
     // --- MOTOR GARAGEM ---
-    // Fonte: CARTAS_JULHO_2026 (valores reais emitidos nas cartas de cobrança)
-    // Fallback: MOTOR_DEVEDORES_EXCEL se não há cartas com motor
+    // Fonte: cartas; fallback: fracoes.motor_divida
     let motorMorososDinamico: Array<{ fracao: any; quotas: any[]; total: number }>;
     let motorAReceberDinamico: number;
 
@@ -1684,7 +1633,7 @@ export const dashboard = new Hono()
             fracao: { id: r.numero!, numero: r.numero!, proprietarioNome: r.proprietarioNome ?? "", andar: r.andar ?? 0 },
             total: Math.round((r.motor ?? 0) * 100) / 100, quotas: [],
           })).sort((a, b) => b.total - a.total)
-        : MOTOR_DEVEDORES_EXCEL;
+        : await getMotorDevedoresFallback();
       motorAReceberDinamico = Math.round(motorMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
     }
 
@@ -2023,7 +1972,7 @@ export const dashboard = new Hono()
       },
       // Pagamentos bancários confirmados mas NÃO categorizados no Excel pelo condomínio
       // Estes criam discrepâncias entre o que o Excel mostra e a realidade bancária
-      pagamentosNaoRegistados: PAGAMENTOS_NAO_CATEGORIZADOS,
+      pagamentosNaoRegistados: await getPagamentosNaoCategorizados(),
       // Mapa completo de dívidas por fração por rubrica (fonte: cartas de cobrança)
       dividasIndividuais,
       // Total "Por Receber" real = soma dos totalCarta emitidos

@@ -1,27 +1,29 @@
 /**
  * Script de teste: desempate IBAN colisão AF vs N
- * TXN 2: QA-V2-IBAN-AF-002 (actualizada com dados realistas)
- *   - IBAN: PT50003508260001938493063  (fração N e AF partilham)
- *   - debtorName: "RUI ALEXANDRE SILVA TORRES"
+ * TXN 2: QA-V2-IBAN-AF-002 (actualizada com dados fictícios)
+ *   - IBAN: PT50000000000000000000002  (fração N e AF partilham)
+ *   - debtorName: "RUI FERNANDES"
  *   - description: "ENTRADA 39 AF CONDOMINIO"
  *   - amount: 50
  *
  * Expectativa: desempate → AF
- *   scoreNome(AF): +35 (RUI ALEXANDRE SILVA TORRES match)
+ *   scoreNome(AF): +35 (RUI FERNANDES match)
  *   scoreNome(N): 0
  *   totalScore AF: 50+35 = 85, N: 50+0 = 50 → AF vence
  */
 
 import { identifyByMultiMatch } from "../src/api/lib/identity-matrix";
 
-// Teste 1: dados reais (nome + entrada na descrição)
+const IBAN_PARTILHADO = "PT50000000000000000000002";
+
+// Teste 1: dados fictícios (nome + entrada na descrição)
 async function testeDesempateNome() {
   console.log("=== TESTE 1: Desempate por nome ===");
   const input = {
     descricao: "ENTRADA 39 AF CONDOMINIO",
     amount: 50,
-    ibanSender: "PT50003508260001938493063",
-    debtorName: "RUI ALEXANDRE SILVA TORRES",
+    ibanSender: IBAN_PARTILHADO,
+    debtorName: "RUI FERNANDES",
   };
   console.log("Input:", JSON.stringify(input, null, 2));
 
@@ -42,7 +44,7 @@ async function testeEmpate() {
   const input = {
     descricao: "Condominio",
     amount: 50,
-    ibanSender: "PT50003508260001938493063",
+    ibanSender: IBAN_PARTILHADO,
     debtorName: undefined,
   };
   console.log("Input:", JSON.stringify(input, null, 2));
@@ -59,7 +61,7 @@ async function testeDesempateDescricao() {
   const input = {
     descricao: "ENTRADA 39 AF",
     amount: 50,
-    ibanSender: "PT50003508260001938493063",
+    ibanSender: IBAN_PARTILHADO,
     debtorName: undefined,
   };
   console.log("Input:", JSON.stringify(input, null, 2));
@@ -79,9 +81,9 @@ async function main() {
   console.log("╔══════════════════════════════════════════════════════╗");
   console.log("║  RELATÓRIO SCORE DESEMPATE IBAN: FRAÇÃO AF vs N      ║");
   console.log("╠══════════════════════════════════════════════════════╣");
-  console.log("║  IBAN partilhado: PT50003508260001938493063           ║");
-  console.log("║  Fração N: FILIPE DANIEL F. TEIXEIRA (ENTRADA 21)    ║");
-  console.log("║  Fração AF: RUI ALEXANDRE SILVA TORRES (ENTRADA 39)  ║");
+  console.log("║  IBAN partilhado: PT50000000000000000000002           ║");
+  console.log("║  Fração N: PEDRO OLIVEIRA (ENTRADA 21)               ║");
+  console.log("║  Fração AF: RUI FERNANDES (ENTRADA 39)               ║");
   console.log("╚══════════════════════════════════════════════════════╝\n");
 
   const r1 = await testeDesempateNome();
