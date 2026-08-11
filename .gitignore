@@ -37,3 +37,6 @@ packages/desktop/dist-electron/
 
 # Dados moradores
 identify-data.json
+cartas-julho-data.json
+bank-identity-map.json
+*.pem
