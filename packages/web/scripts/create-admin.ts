@@ -1,32 +1,52 @@
 /**
- * Cria utilizador admin na BD local usando o mesmo hash do better-auth
- * Uso: bun run scripts/create-admin.ts
+ * Cria (ou recria) utilizador admin na BD configurada em DATABASE_URL.
+ * Uso (a partir de packages/web):
+ *   bun --env-file=../../.env run scripts/create-admin.ts
+ *
+ * Credenciais por defeito (altera abaixo se quiseres):
+ *   admin@condominio.local / admin123
  */
 
 import { createClient } from "@libsql/client";
-import { scryptAsync } from "@noble/hashes/scrypt";
-import { bytesToHex, randomBytes } from "@noble/hashes/utils";
+import { hashPassword } from "better-auth/crypto";
+import { resolve } from "path";
 
-const DB_PATH = "file:/home/user/Condominio-7663/packages/web/local.db";
-const EMAIL = "admin@condominio.local";
-const PASSWORD = "admin123";
+const EMAIL = process.env.ADMIN_EMAIL ?? "admin@condominio.local";
+const PASSWORD = process.env.ADMIN_PASSWORD ?? "admin123";
+const NAME = process.env.ADMIN_NAME ?? "Administrador";
 
-const client = createClient({ url: DB_PATH });
-
-async function hashPassword(password: string): Promise<string> {
-  const saltBytes = randomBytes(16);
-  const salt = bytesToHex(saltBytes);
-  const key = await scryptAsync(password.normalize("NFKC"), salt, {
-    N: 16384, r: 16, p: 1, dkLen: 64,
-    maxmem: 128 * 16384 * 16 * 2,
-  });
-  return `${salt}:${bytesToHex(key)}`;
+function resolveDbUrl(raw: string | undefined): string {
+  const url = raw?.trim() || "file:./local.db";
+  if (!url.startsWith("file:")) return url;
+  const pathPart = url.slice("file:".length);
+  // Paths relativos → relativos a packages/web (cwd típico deste script)
+  if (pathPart.startsWith("./") || pathPart.startsWith("../") || !pathPart.startsWith("/")) {
+    return `file:${resolve(process.cwd(), pathPart)}`;
+  }
+  return url;
 }
 
+const DB_URL = resolveDbUrl(process.env.DATABASE_URL);
+const client = createClient({
+  url: DB_URL,
+  authToken: process.env.DATABASE_AUTH_TOKEN,
+});
+
 async function main() {
-  // Apagar utilizador anterior se existir
-  await client.execute({ sql: `DELETE FROM "account" WHERE user_id IN (SELECT id FROM "user" WHERE email = ?)`, args: [EMAIL] });
-  await client.execute({ sql: `DELETE FROM "user" WHERE email = ?`, args: [EMAIL] });
+  console.log(`DB: ${DB_URL.startsWith("file:") ? DB_URL : "[remote]"}`);
+
+  await client.execute({
+    sql: `DELETE FROM "account" WHERE user_id IN (SELECT id FROM "user" WHERE email = ?)`,
+    args: [EMAIL],
+  });
+  await client.execute({
+    sql: `DELETE FROM "session" WHERE user_id IN (SELECT id FROM "user" WHERE email = ?)`,
+    args: [EMAIL],
+  });
+  await client.execute({
+    sql: `DELETE FROM "user" WHERE email = ?`,
+    args: [EMAIL],
+  });
 
   const now = Date.now();
   const userId = crypto.randomUUID();
@@ -34,19 +54,26 @@ async function main() {
   const hashedPw = await hashPassword(PASSWORD);
 
   await client.execute({
-    sql: `INSERT INTO "user" (id, name, email, email_verified, role, fracao_id, created_at, updated_at) VALUES (?, ?, ?, 1, 'admin', NULL, ?, ?)`,
-    args: [userId, "Administrador", EMAIL, now, now],
+    sql: `INSERT INTO "user" (id, name, email, email_verified, role, fracao_id, created_at, updated_at)
+          VALUES (?, ?, ?, 1, 'admin', NULL, ?, ?)`,
+    args: [userId, NAME, EMAIL, now, now],
   });
 
   await client.execute({
-    sql: `INSERT INTO "account" (id, account_id, provider_id, user_id, password, created_at, updated_at) VALUES (?, ?, 'credential', ?, ?, ?, ?)`,
+    sql: `INSERT INTO "account" (id, account_id, provider_id, user_id, password, created_at, updated_at)
+          VALUES (?, ?, 'credential', ?, ?, ?, ?)`,
     args: [accountId, userId, userId, hashedPw, now, now],
   });
 
-  console.log("✅ Admin criado com sucesso!");
+  console.log("✅ Admin criado/reposto com sucesso!");
   console.log(`   Email:    ${EMAIL}`);
   console.log(`   Password: ${PASSWORD}`);
-  process.exit(0);
+  console.log("   Abre http://localhost:4200 e faz login com estas credenciais.");
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });

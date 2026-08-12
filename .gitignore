@@ -30,13 +30,19 @@ Thumbs.db
 # Drizzle generated
 packages/web/drizzle/
 .env.keyfix
-packages/desktop/dist-electron/
 .git-credentials.env
 .env.push
+.env.broken.*
 
+# SQLite local (WAL)
+packages/web/local.db
+packages/web/local.db-*
 
-# Dados moradores
+# Dados moradores / config local (fora do Git)
 identify-data.json
 cartas-julho-data.json
 bank-identity-map.json
 *.pem
+
+# Pacotes arquivados (mobile/desktop — fora do foco actual)
+_archive/**/node_modules/

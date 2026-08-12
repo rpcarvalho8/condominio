@@ -9,6 +9,7 @@
         "@libsql/client": "^0.17.2",
         "@noble/hashes": "^2.2.0",
         "cloudflare": "^5.2.0",
+        "xlsx": "0.18.5",
       },
       "devDependencies": {
         "@tursodatabase/api": "^1.9.2",
