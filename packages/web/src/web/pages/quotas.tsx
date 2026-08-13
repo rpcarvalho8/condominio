@@ -1028,34 +1028,70 @@ function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas
 
 // ─── Modal Nova Cota Extra ────────────────────────────────────────────────────
 function NovaExtraModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
+  const agora = new Date();
   const [nome, setNome] = useState("");
   const [descricao, setDescricao] = useState("");
   const [valorBase, setValorBase] = useState("");
   const [keywords, setKeywords] = useState("");
+  const [mes, setMes] = useState(agora.getMonth() + 1);
+  const [ano, setAno] = useState(agora.getFullYear());
+  const [fracoesSel, setFracoesSel] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState("");
 
+  const { data: fracoesData } = useQuery({
+    queryKey: ["fracoes-lista"],
+    queryFn: async () => (await fetch("/api/fracoes", { credentials: "include" })).json(),
+    enabled: open,
+  });
+  const fracoesList: Array<{ id: string; numero: string; proprietarioNome?: string }> =
+    (fracoesData?.fracoes ?? fracoesData ?? []) as any[];
+
+  function toggleFracao(id: string) {
+    setFracoesSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function seleccionarTodas() {
+    setFracoesSel(new Set(fracoesList.map((f) => f.id)));
+  }
+
   async function criar() {
     if (!nome.trim()) { setErro("Nome obrigatório"); return; }
+    if (!valorBase || parseFloat(valorBase) <= 0) { setErro("Valor por fração obrigatório"); return; }
+    if (fracoesSel.size === 0) { setErro("Seleccione pelo menos uma fração"); return; }
     setLoading(true);
     setErro("");
     try {
-      const res = await fetch("/api/quota-tipos", {
+      const res = await fetch("/api/quotas/gerar-extra", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
           nome: nome.trim(),
-          tipo: "extra",
           descricao: descricao.trim() || null,
-          valorBase: valorBase ? parseFloat(valorBase) : null,
           keywords: keywords.trim() || null,
-          ativo: true,
+          valor: parseFloat(valorBase),
+          fracaoIds: Array.from(fracoesSel),
+          mes,
+          ano,
         }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        const t = await res.json().catch(() => ({}));
+        throw new Error(t.error || await res.text());
+      }
+      const data = await res.json();
       setNome(""); setDescricao(""); setValorBase(""); setKeywords("");
+      setFracoesSel(new Set());
       onCreated();
+      if (data.saltadas?.length) {
+        console.info("Frações já tinham esta extra:", data.saltadas);
+      }
     } catch (e: any) {
       setErro(e.message);
     } finally {
@@ -1064,47 +1100,108 @@ function NovaExtraModal({ open, onClose, onCreated }: { open: boolean; onClose: 
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Nova Cota Extra" size="sm">
+    <Modal open={open} onClose={onClose} title="Nova Cota Extra" size="md">
       <div className="space-y-4">
         <div
           className="rounded-lg p-3 text-xs"
           style={{ background: "var(--blue-subtle)", color: "var(--blue-bright)", border: "1px solid var(--blue-subtle)" }}
         >
-          <strong>Como funciona:</strong> define o nome e keywords. O sistema bancário usa as keywords para associar automaticamente transferências recebidas a esta cota extra.
+          <strong>Como funciona:</strong> escolhe as frações afectadas e o valor por fração.
+          O sistema cria uma obrigação em aberto só para essas frações. Quando entra uma transferência,
+          a cascata aplica o valor às cotas em dívida (condomínio → extras → outras rubricas).
         </div>
 
         <Input
           label="Nome da cota extra"
-          placeholder="ex: Arranjo Motor Portão Garagem"
+          placeholder="ex: Campainhas 2026"
           value={nome}
           onChange={(e: any) => setNome(e.target.value)}
         />
 
         <Input
           label="Descrição (opcional)"
-          placeholder="ex: Reparação do motor do portão da garagem — Março 2026"
+          placeholder="ex: Arranjo das campainhas — Junho 2026"
           value={descricao}
           onChange={(e: any) => setDescricao(e.target.value)}
         />
 
-        <Input
-          label="Valor base total (€)"
-          placeholder="ex: 850.00"
-          type="number"
-          value={valorBase}
-          onChange={(e: any) => setValorBase(e.target.value)}
-        />
-
-        <div>
+        <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Keywords para matching bancário"
-            placeholder="ex: MOTOR GARAGEM, PORTAO, MOTOR"
+            label="Valor por fração (€)"
+            placeholder="ex: 47.50"
+            type="number"
+            value={valorBase}
+            onChange={(e: any) => setValorBase(e.target.value)}
+          />
+          <Input
+            label="Keywords (matching bancário)"
+            placeholder="ex: CAMPAINHA, CAMPAINHAS"
             value={keywords}
             onChange={(e: any) => setKeywords(e.target.value)}
           />
-          <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-            Separar por vírgula. O sistema deteta transferências que contenham estas palavras e associa à cota.
-          </p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Select
+            label="Mês"
+            value={String(mes)}
+            onChange={(e: any) => setMes(parseInt(e.target.value))}
+            options={MESES}
+          />
+          <Select
+            label="Ano"
+            value={String(ano)}
+            onChange={(e: any) => setAno(parseInt(e.target.value))}
+            options={ANOS}
+          />
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
+              Frações afectadas ({fracoesSel.size})
+            </label>
+            <div className="flex gap-2">
+              <button type="button" className="text-xs underline" style={{ color: "var(--blue-bright)" }} onClick={seleccionarTodas}>
+                Todas
+              </button>
+              <button type="button" className="text-xs underline" style={{ color: "var(--text-muted)" }} onClick={() => setFracoesSel(new Set())}>
+                Limpar
+              </button>
+            </div>
+          </div>
+          <div
+            className="max-h-48 overflow-y-auto rounded-lg p-2 grid grid-cols-3 sm:grid-cols-4 gap-1"
+            style={{ border: "1px solid var(--border)", background: "var(--bg-elevated)" }}
+          >
+            {fracoesList.map((f) => {
+              const on = fracoesSel.has(f.id);
+              return (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => toggleFracao(f.id)}
+                  className="text-left text-xs px-2 py-1.5 rounded transition"
+                  style={{
+                    background: on ? "var(--blue-subtle)" : "transparent",
+                    color: on ? "var(--blue-bright)" : "var(--text-secondary)",
+                    border: on ? "1px solid var(--blue-bright)" : "1px solid transparent",
+                  }}
+                  title={f.proprietarioNome}
+                >
+                  {f.numero}
+                </button>
+              );
+            })}
+          </div>
+          {valorBase && fracoesSel.size > 0 && (
+            <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
+              Total: {fracoesSel.size} × €{parseFloat(valorBase || "0").toFixed(2)} ={" "}
+              <strong style={{ color: "var(--text-primary)" }}>
+                €{(fracoesSel.size * parseFloat(valorBase || "0")).toFixed(2)}
+              </strong>
+            </p>
+          )}
         </div>
 
         {erro && (
@@ -1115,7 +1212,7 @@ function NovaExtraModal({ open, onClose, onCreated }: { open: boolean; onClose: 
           <Button variant="secondary" onClick={onClose}>Cancelar</Button>
           <Button onClick={criar} loading={loading}>
             <Plus size={14} />
-            Criar cota extra
+            Criar para {fracoesSel.size || "…"} frações
           </Button>
         </div>
       </div>

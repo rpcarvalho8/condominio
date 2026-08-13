@@ -591,6 +591,7 @@ export async function recalcularSaldos(): Promise<void> {
     //    Estes créditos representam quotas de condomínio pagas directamente por
     //    transferência bancária ainda não importadas para a tabela quotas.
     let creditosBancariosCC = 0;
+    let creditosRateio = 0;
     try {
       const movsBanco = await db
         .select({
@@ -598,20 +599,16 @@ export async function recalcularSaldos(): Promise<void> {
           description: schema.bankTransactions.description,
           rawData:     schema.bankTransactions.rawData,
           date:        schema.bankTransactions.date,
+          imported:    schema.bankTransactions.imported,
+          importType:  schema.bankTransactions.importType,
         })
         .from(schema.bankTransactions)
         .where(and(
           sql`${schema.bankTransactions.date} >= ${ANCORA_CC_TS}`,
           sql`${schema.bankTransactions.amount} > 0`,
-          // CRÍTICO: excluir transações já convertidas em quota/despesa (imported=1).
-          // Sem isto, o mesmo dinheiro era somado 2x: uma vez via receitasQuotasBD
-          // (quotas.pago=true) e outra vez aqui via soma directa de bank_transactions.
-          eq(schema.bankTransactions.imported, 0),
         ));
 
-      // Defesa adicional contra duplicados residuais em bank_transactions (mesma
-      // transação real inserida mais que uma vez por falta de transaction_id da
-      // Enable Banking) — deduplicar por impressão digital antes de somar.
+      // Defesa adicional contra duplicados residuais em bank_transactions
       const fingerprintsVistos = new Set<string>();
 
       for (const mov of movsBanco) {
@@ -624,10 +621,17 @@ export async function recalcularSaldos(): Promise<void> {
         if (fingerprintsVistos.has(fingerprint)) continue;
         fingerprintsVistos.add(fingerprint);
 
-        // Ignorar teste
         if (Math.abs(absVal - VALOR_TESTE_EUR) < 0.005) continue;
 
-        // Ignorar se já contabilizado nas gavetas da triagem
+        // Rateio (campainhas, etc.): conta no CC mesmo com imported=1
+        if (mov.importType === "rateio") {
+          creditosRateio += absVal;
+          continue;
+        }
+
+        // Créditos genéricos ainda não convertidos em quota
+        if (mov.imported !== 0) continue;
+
         const isObras    = /\bOBRAS?\b/i.test(desc) || /COTA\s+(EXTRA\s+)?OBRAS/i.test(desc) || /QUOTA\s+(EXTRA\s+)?OBRAS/i.test(desc);
         const isFR       = /FUNDO\s+DE?\s+RESERVA/i.test(desc) || /\bF\.?R\.?\b/.test(desc) || /FUNDO\s+RESERVA/i.test(desc) || /QUOTA\s+RESERVA/i.test(desc);
         const isMotor    = /MOTOR\s+(DA\s+)?GARAGEM/i.test(desc) || /PORT[AÃ]O\s+(GARAGEM|MOTOR)/i.test(desc) || /COTA\s+(EXTRA\s+)?MOTOR/i.test(desc) || /QUOTA\s+(EXTRA\s+)?MOTOR/i.test(desc) || /COTA\s+(EXTRA\s+)?PORT[AÃ]O/i.test(desc) || /\bAH\s+COTA\s+EXTRA/i.test(desc) || /\bAI\s+COTA\s+EXTRA/i.test(desc);
@@ -635,11 +639,11 @@ export async function recalcularSaldos(): Promise<void> {
 
         if (isObras || isFR || isMotor || isIncendio) continue;
 
-        // Crédito genérico → conta corrente
         creditosBancariosCC += absVal;
         console.log(`[recalcularSaldos] CC bancário +${absVal.toFixed(2)}€ — "${desc.slice(0, 60)}"`);
       }
       creditosBancariosCC = Math.round(creditosBancariosCC * 100) / 100;
+      creditosRateio = Math.round(creditosRateio * 100) / 100;
     } catch (eBanco) {
       console.warn("[recalcularSaldos] Leitura bank_transactions para CC falhou:", eBanco);
     }
@@ -652,13 +656,13 @@ export async function recalcularSaldos(): Promise<void> {
     const totalDespesasDesdeAnc = despesasDesdeAnc.reduce((s, d) => s + d.valor, 0);
 
     saldoContaCorrente = Math.round(
-      (ANCORA_SALDO_CC + receitasQuotasBD + creditosBancariosCC - totalDespesasDesdeAnc) * 100
+      (ANCORA_SALDO_CC + receitasQuotasBD + creditosBancariosCC + creditosRateio - totalDespesasDesdeAnc) * 100
     ) / 100;
 
     console.log(
       `[recalcularSaldos] CC: base=${ANCORA_SALDO_CC}€ ` +
       `+quotasBD=${receitasQuotasBD.toFixed(2)}€ +bancarioCC=${creditosBancariosCC.toFixed(2)}€ ` +
-      `-despesas=${totalDespesasDesdeAnc.toFixed(2)}€ = ${saldoContaCorrente}€`
+      `+rateio=${creditosRateio.toFixed(2)}€ -despesas=${totalDespesasDesdeAnc.toFixed(2)}€ = ${saldoContaCorrente}€`
     );
 
     await upsertSaldo("saldo_conta_corrente", saldoContaCorrente);
@@ -1481,6 +1485,61 @@ export const dashboard = new Hono()
     // Falha graciosamente se a tabela não existir (ambientes antigos).
     const cativos = await calcularValoresCativos();
 
+    // ===== POR RECONCILIAR — créditos sem fração (imported=0, amount>0) =====
+    // Distinto de morosos: dinheiro que entrou no banco mas ainda não tem fração/quota.
+    // Inclui revisão manual (requires_manual_review=1) e staging genérico.
+    let porReconciliar = {
+      count: 0,
+      total: 0,
+      requiresReview: 0,
+      movimentos: [] as Array<{
+        id: string;
+        data: string;
+        montante: number;
+        descritivo: string;
+        debtorName: string | null;
+        requiresReview: boolean;
+      }>,
+    };
+    try {
+      const pendentesCredito = await db
+        .select({
+          id: schema.bankTransactions.id,
+          date: schema.bankTransactions.date,
+          amount: schema.bankTransactions.amount,
+          description: schema.bankTransactions.description,
+          debtorName: schema.bankTransactions.debtorName,
+          requiresManualReview: schema.bankTransactions.requiresManualReview,
+        })
+        .from(schema.bankTransactions)
+        .where(and(
+          eq(schema.bankTransactions.imported, 0),
+          sql`${schema.bankTransactions.amount} > 0`,
+          sql`${schema.bankTransactions.date} >= ${ANCORA_TS}`,
+        ));
+
+      const movs = pendentesCredito.map((r) => {
+        const d = r.date instanceof Date ? r.date : new Date((r.date as number) * 1000);
+        return {
+          id: r.id,
+          data: d.toISOString().slice(0, 10),
+          montante: Math.round(Math.abs(r.amount ?? 0) * 100) / 100,
+          descritivo: r.description ?? "—",
+          debtorName: r.debtorName,
+          requiresReview: !!r.requiresManualReview,
+        };
+      });
+
+      porReconciliar = {
+        count: movs.length,
+        total: Math.round(movs.reduce((s, m) => s + m.montante, 0) * 100) / 100,
+        requiresReview: movs.filter((m) => m.requiresReview).length,
+        movimentos: movs.slice(0, 20),
+      };
+    } catch (e) {
+      console.warn("[dashboard] porReconciliar:", e);
+    }
+
     // ===== DÉBITOS BANCÁRIOS NÃO CATEGORIZADOS (bank_transactions imported=0, amount<0) =====
     // Saídas da conta à ordem ainda não categorizadas como despesas na DB.
     // Reduzem o saldo operacional disponível e são somadas ao totalDespesasMes se forem de junho.
@@ -1684,103 +1743,58 @@ export const dashboard = new Hono()
       incendioAReceberDinamico = Math.round(incendioMorososDinamico.reduce((s, d) => s + d.total, 0) * 100) / 100;
     }
 
-    // --- CONTA CORRENTE (morosos) — fonte: cartas de julho ─────────────────
-    // Usa cartasMorosos.contaCorrente (quotasCC_atraso > 0) como base.
-    // Complementa com frações que têm quotaJulho e ainda não pagaram (julho corrente).
-    // Se não há dados de cartas, cai no fallback BD (morosos).
+    // --- CONTA CORRENTE (morosos) — fonte: BD ───────────────────────────────
+    // Fonte de verdade: quotas tipo=condominio não pagas (ano >= 2026), já em `morosos`.
+    // NÃO tratar "ausência de linha de julho na BD" como dívida (bug que listava ~25
+    // frações a partir das cartas). Cartas `quotasCC_atraso` só entram se a fração
+    // ainda não tiver evidência de liquidação (nenhuma quota condomínio paga desde jul/2026).
     let ccMorososDinamico: Array<{ fracao: any; quotas: any[]; total: number }>;
     let ccTotalEmAtraso: number;
     let ccFracoesEmAtraso: number;
+    let ccFonteDados: "bd" | "bd+cartas" = "bd";
 
-    if (cartasMorosos.contaCorrente.length > 0 || (faturacaoVisivel && CARTAS_JULHO_2026.some(c => c.quotaJulho > 0))) {
-      // Frações com atraso histórico (quotasCC_atraso > 0) das cartas
-      const ccHistorico = cartasMorosos.contaCorrente;
-      // Frações que devem quota de julho mas ainda não pagaram (quotaJulho > 0 e não estão já no histórico)
-      // Cruzar com quotas BD pago=true para mes=7, ano=2026
-      const julhoPagasRows = await db
+    {
+      const pagosDesdeJulho = await db
         .select({ numero: schema.fracoes.numero })
         .from(schema.quotas)
         .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
         .where(and(
           eq(schema.quotas.tipo, "condominio"),
-          eq(schema.quotas.mes, 7),
-          eq(schema.quotas.ano, 2026),
           eq(schema.quotas.pago, true),
+          sql`(${schema.quotas.ano} > 2026 OR (${schema.quotas.ano} = 2026 AND ${schema.quotas.mes} >= 7))`,
         ));
-      const julhoPagosNums = new Set(julhoPagasRows.map(r => r.numero).filter(Boolean));
+      const liquidadosNums = new Set(
+        pagosDesdeJulho.map((r) => (r.numero ?? "").toUpperCase()).filter(Boolean),
+      );
+      const bdMorosoNums = new Set(
+        morosos.map((m) => String(m.fracao?.numero ?? "").toUpperCase()).filter(Boolean),
+      );
 
-      // Frações com quotaJulho não paga (não constam nos pagos e têm quotaJulho > 0)
-      // LIMIAR DE DATA: só entra como "em atraso" depois do dia-limite de pagamento
-      // do mês corrente. Sem isto, qualquer fração sem quota reconciliada na BD
-      // aparecia como devedora mesmo dentro do prazo normal (ex: Fração AI, sem
-      // nenhum registo em `quotas`, era tratada como se estivesse atrasada logo
-      // no início do mês). Ajustável — 8 = dia 8 do mês.
-      const DIA_LIMITE_PAGAMENTO_QUOTA = 8;
-      const diaHoje = new Date().getDate();
-      const prazoQuotaMesCorrenteExpirado = diaHoje > DIA_LIMITE_PAGAMENTO_QUOTA;
+      const cartaHistoricoExtra = (cartasMorosos.contaCorrente ?? [])
+        .filter((m) => {
+          const num = m.fracao.toUpperCase();
+          return !bdMorosoNums.has(num) && !liquidadosNums.has(num);
+        })
+        .map((m) => ({
+          fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
+          total: m.total,
+          quotas: [] as any[],
+        }));
 
-      const historicNums = new Set(ccHistorico.map(m => m.fracao.toUpperCase()));
-      const julhoMorosos = prazoQuotaMesCorrenteExpirado
-        ? CARTAS_JULHO_2026
-            .filter(c => c.quotaJulho > 0 && !julhoPagosNums.has(c.fracao) && !historicNums.has(c.fracao.toUpperCase()))
-            .map(c => ({
-              fracao: { id: c.fracao, numero: c.fracao, proprietarioNome: c.proprietario, andar: 0 },
-              total: Math.round((c.quotaJulho + c.fundoReservaJulho) * 100) / 100,
-              quotas: [],
-            }))
-        : [];
-
-      const ccHistoricoFormatado = ccHistorico.map(m => ({
-        fracao: { id: m.fracao, numero: m.fracao, proprietarioNome: m.proprietario, andar: 0 },
-        total: m.total,
-        quotas: [],
-      }));
-
-      ccMorososDinamico = [...ccHistoricoFormatado, ...julhoMorosos]
-        .sort((a, b) => b.total - a.total);
+      ccMorososDinamico = [...morosos, ...cartaHistoricoExtra].sort((a, b) => b.total - a.total);
       ccTotalEmAtraso = Math.round(ccMorososDinamico.reduce((s, m) => s + m.total, 0) * 100) / 100;
       ccFracoesEmAtraso = ccMorososDinamico.length;
-    } else {
-      // Fallback: BD quotas (comportamento anterior)
-      ccMorososDinamico = morosos;
-      ccTotalEmAtraso = totalMorosos;
-      ccFracoesEmAtraso = morosos.length;
+      if (cartaHistoricoExtra.length > 0) ccFonteDados = "bd+cartas";
     }
 
-    // --- FUNDO DE RESERVA (morosos) — fonte: cartas de julho ────────────────
-    // Todas as cartas têm fundoReservaJulho > 0.
-    // Morosos = frações que não pagaram FR julho (cruzar com quotas BD pago=true)
+    // --- FUNDO DE RESERVA (morosos) — fonte: BD ─────────────────────────────
+    // Só quotas condomínio não pagas com fundo_reserva > 0.
+    // NÃO usar lista completa das cartas (fundoReservaJulho) — gerava os mesmos ~25 falsos.
     let frMorososDinamico: Array<{ fracao: any; quotas: any[]; total: number }>;
     let frTotalEmAtraso: number;
     let frFracoesEmAtraso: number;
 
-    if (faturacaoVisivel && CARTAS_JULHO_2026.some(c => c.fundoReservaJulho > 0)) {
-      // Frações que pagaram FR julho na BD
-      const frPagasRows = await db
-        .select({ numero: schema.fracoes.numero, fundoReserva: schema.quotas.fundoReserva })
-        .from(schema.quotas)
-        .leftJoin(schema.fracoes, eq(schema.quotas.fracaoId, schema.fracoes.id))
-        .where(and(
-          eq(schema.quotas.tipo, "condominio"),
-          eq(schema.quotas.mes, 7),
-          eq(schema.quotas.ano, 2026),
-          eq(schema.quotas.pago, true),
-        ));
-      const frPagosNums = new Set(frPagasRows.map(r => r.numero).filter(Boolean));
-
-      frMorososDinamico = CARTAS_JULHO_2026
-        .filter(c => c.fundoReservaJulho > 0 && !frPagosNums.has(c.fracao))
-        .map(c => ({
-          fracao: { id: c.fracao, numero: c.fracao, proprietarioNome: c.proprietario, andar: 0 },
-          total: Math.round(c.fundoReservaJulho * 100) / 100,
-          quotas: [],
-        }))
-        .sort((a, b) => b.total - a.total);
-
-      frTotalEmAtraso = Math.round(frMorososDinamico.reduce((s, m) => s + m.total, 0) * 100) / 100;
-      frFracoesEmAtraso = frMorososDinamico.length;
-    } else {
-      // Fallback dinâmico: quotas.fundo_reserva não pagas de 2026 agrupadas por fração
+    {
       const frQuotasEmAtraso = await db
         .select({
           quota: schema.quotas,
@@ -1919,7 +1933,7 @@ export const dashboard = new Hono()
         fracoesEmAtraso: ccFracoesEmAtraso,
         morosos: ccMorososDinamico,
         saldoConta: saldos.saldo_conta_corrente,
-        fonteDados: cartasMorosos.contaCorrente.length > 0 ? "cartas" : "bd",
+        fonteDados: ccFonteDados,
       },
       obras: {
         totalPago: totalObrasPago,
@@ -1937,7 +1951,7 @@ export const dashboard = new Hono()
         totalEmAtraso: frTotalEmAtraso,
         fracoesEmAtraso: frFracoesEmAtraso,
         morosos: frMorososDinamico,
-        fonteDados: CARTAS_JULHO_2026.some(c => c.fundoReservaJulho > 0) ? "cartas" : "excel",
+        fonteDados: "bd",
       },
       incendio: {
         // Fonte: cartas de cobrança emitidas (CARTAS_JULHO_2026)
@@ -2009,6 +2023,8 @@ export const dashboard = new Hono()
         // Detalhe por movimento (para debug; omitir na UI de produção se necessário)
         movimentos: cativos.movimentos,
       },
+      // Créditos bancários sem fração atribuída (≠ morosos)
+      porReconciliar,
       // Regras de classificação activas (permite UI de configuração futura)
       regrasCativo: REGRAS_CATIVO.map(r => ({
         gaveta: r.gaveta,

@@ -383,6 +383,81 @@ function CativosAlert({ d }: { d: any }) {
 }
 
 // ══════════════════════════════════════════════
+// POR RECONCILIAR — créditos sem fração (≠ morosos)
+// Dinheiro que entrou no banco mas ainda não tem fração/quota associada.
+// ══════════════════════════════════════════════
+function PorReconciliarAlert({ d }: { d: any }) {
+  const [open, setOpen] = useState(false);
+  const pr = d.porReconciliar ?? {};
+  const count: number = pr.count ?? 0;
+  const total: number = pr.total ?? 0;
+  const requiresReview: number = pr.requiresReview ?? 0;
+  const movimentos: any[] = pr.movimentos ?? [];
+
+  if (count === 0) return null;
+
+  return (
+    <div className="rounded-xl border overflow-hidden" style={{ borderColor: "#3b82f6", background: "rgba(59,130,246,0.06)" }}>
+      <button
+        className="w-full flex items-center justify-between px-4 py-3 text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <div className="flex items-center gap-2.5 min-w-0">
+          <Clock size={15} style={{ color: "#3b82f6", flexShrink: 0 }} />
+          <div className="min-w-0">
+            <span className="text-sm font-semibold" style={{ color: "#3b82f6" }}>
+              {count} transferência{count !== 1 ? "s" : ""} por reconciliar
+            </span>
+            <span className="text-xs ml-2" style={{ color: "var(--text-muted)" }}>
+              {formatEuro(total)} sem fração · ≠ morosos
+            </span>
+            {requiresReview > 0 && (
+              <span className="text-xs ml-2" style={{ color: "var(--amber)" }}>
+                ({requiresReview} em revisão manual)
+              </span>
+            )}
+          </div>
+        </div>
+        {open
+          ? <ChevronUp size={16} style={{ color: "var(--text-muted)" }} />
+          : <ChevronDown size={16} style={{ color: "var(--text-muted)" }} />}
+      </button>
+
+      {open && (
+        <div className="border-t" style={{ borderColor: "rgba(59,130,246,0.2)" }}>
+          <div className="px-4 py-2 text-xs" style={{ color: "var(--text-muted)" }}>
+            Classifica em <strong>Movimentos Bancários</strong> (fração + rubrica). O sistema aprende o perfil do pagador para o próximo mês.
+          </div>
+          <div className="divide-y" style={{ borderColor: "rgba(59,130,246,0.1)" }}>
+            {movimentos.map((m: any) => (
+              <div key={m.id} className="flex items-center justify-between px-4 py-2.5 gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>{m.data}</div>
+                  <div className="text-xs truncate" style={{ color: "var(--text-secondary)" }} title={m.descritivo}>
+                    {m.debtorName ? `${m.debtorName} · ` : ""}{m.descritivo}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {m.requiresReview && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+                      style={{ background: "rgba(245,158,11,0.15)", color: "var(--amber)" }}>
+                      revisão
+                    </span>
+                  )}
+                  <span className="text-sm font-mono font-semibold" style={{ color: "var(--text-primary)" }}>
+                    {formatEuro(m.montante)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════
 // OVERVIEW — layout principal
 // ══════════════════════════════════════════════
 function Overview({ d, setSecao, onRefresh }: any) {
@@ -464,9 +539,10 @@ function Overview({ d, setSecao, onRefresh }: any) {
           />
         </div>
 
-        {/* ── 1b. SALDO OPERACIONAL + CATIVOS ───────── */}
+        {/* ── 1b. SALDO OPERACIONAL + CATIVOS + POR RECONCILIAR ───────── */}
         <div className="space-y-3">
           <SaldoOperacionalCard d={d} />
+          <PorReconciliarAlert d={d} />
           <CativosAlert d={d} />
         </div>
 

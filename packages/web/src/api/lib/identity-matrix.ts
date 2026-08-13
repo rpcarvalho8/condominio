@@ -18,25 +18,45 @@
  */
 
 import { db } from "../database";
-import { fracoes } from "../database/schema";
-import { sql } from "drizzle-orm";
+import { fracoes, quotas } from "../database/schema";
+import { sql, eq, and, asc } from "drizzle-orm";
+import { lookupPagadorPerfil, learnPagadorPerfil, resolveFracaoIdByNumero } from "./pagador-perfis";
+
+/** Extrai nome do pagador do descritivo Santander (PSD2 muitas vezes omite debtor_name). */
+export function extractPayerFromDescription(descricao?: string | null): string | null {
+  if (!descricao) return null;
+  const raw = descricao.trim();
+  const m1 = raw.match(
+    /(?:TRF\.?\s*IMED\.?|TRANSF(?:ERENCIA)?(?:\s*IMED(?:IATA)?)?|TRF\s+CRED\s+(?:SEPA\+|INTRABANC)?)\s*DE\s+(.+?)(?:\s*[-–]\s*\d{5,}|\s*$)/i,
+  );
+  if (m1?.[1]) {
+    const name = m1[1].replace(/\s+DA\s*$/i, "").trim();
+    if (name.length >= 5) return name;
+  }
+  const m2 = raw.match(/^DE\s+(.+?)(?:\s*[-–]\s*\d{5,})\s*$/i);
+  if (m2?.[1] && m2[1].trim().length >= 5) return m2[1].trim();
+  return null;
+}
 
 // ─── Tipos de Cascata ─────────────────────────────────────────────────────────
 
 export interface CascataAplicacao {
-  tipo: keyof DividasAtuais;
+  tipo: string; // condominio | fundo_reserva | extra | obras | indaqua | incendio | motor | ...
   valorAntes: number;
   valorAmortizado: number;
   valorDepois: number;
+  quotaId?: string;
+  ref?: string;
 }
 
 export interface CascataResult {
   idFracao: string;
   valorEntrada: number;
-  quotaLiquida: number;       // absorvido pela quota mensal (condominio + fundo reserva)
-  restoAmortizacao: number;   // montante que entrou na cascata
+  quotaLiquida: number;       // absorvido por cotas condomínio/FR (legado + linhas)
+  restoAmortizacao: number;   // montante que entrou na cascata de extras/dívidas
   aplicacoes: CascataAplicacao[];
   sobra: number;              // valor que ficou sem destino (crédito a favor)
+  quotasPagas: string[];      // ids de quotas marcadas como pagas
 }
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
@@ -69,6 +89,8 @@ export interface FracaoIdentidade {
   permilagem: number;
   /** Nome completo do proprietário conforme Excel */
   nomeProprietario: string;
+  /** Nomes alternativos / negócio / co-proprietários (ex: MARMA, FILIPE BACELO) */
+  nomesAliases: string[];
   /** IBANs conhecidos (estáticos do Excel + aprendidos em runtime) */
   ibansConhecidos: string[];
   valoresFixos: ValoresFixos;
@@ -180,6 +202,14 @@ export function rowToFracao(row: FracaoRow): FracaoIdentidade {
     ibansConhecidos = [];
   }
 
+  let nomesAliases: string[] = [];
+  try {
+    const parsed = JSON.parse((row as { proprietarioAliases?: string | null }).proprietarioAliases ?? "[]");
+    nomesAliases = Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    nomesAliases = [];
+  }
+
   const total = Number(row.quotaMensal ?? 0);
   const condominio = Math.round((total / 1.1) * 100) / 100;
   const fundoReserva = Math.round((total - condominio) * 100) / 100;
@@ -190,6 +220,7 @@ export function rowToFracao(row: FracaoRow): FracaoIdentidade {
     descricao,
     permilagem: Number(row.permilagem ?? 0),
     nomeProprietario: row.proprietarioNome ?? "",
+    nomesAliases,
     ibansConhecidos,
     valoresFixos: { condominio, fundoReserva },
     dividasAtuais: {
@@ -340,7 +371,7 @@ interface MatchInput {
   debtorName?: string;
 }
 
-type MatchCriterio = "iban" | "nome" | "descricao_fracao" | "valor_fixo" | "valor_quota_extra";
+type MatchCriterio = "iban" | "nome" | "descricao_fracao" | "valor_fixo" | "valor_quota_extra" | "perfil_pagador";
 
 /**
  * Normaliza string para comparação: uppercase, sem acentos, sem pontuação estranha.
@@ -356,23 +387,73 @@ function normStr(s: string): string {
 }
 
 /**
- * Verifica se o nome do remetente coincide com proprietário da fração.
- * Aceitamos match parcial de pelo menos 2 tokens do nome (previne falsos positivos em nomes curtos).
+ * Verifica se o nome do remetente coincide com proprietário da fração
+ * ou com algum alias (negócio, co-proprietário, nome bancário).
  */
-function nomeCoincide(debtorName: string, nomeProprietario: string): boolean {
+function nomeCoincide(debtorName: string, nomeProprietario: string, aliases: string[] = []): boolean {
   const src = normStr(debtorName);
-  const ref = normStr(nomeProprietario);
+  const refs = [nomeProprietario, ...aliases].map(normStr).filter(Boolean);
 
-  // Match exacto
-  if (src === ref) return true;
+  for (const ref of refs) {
+    if (src === ref) return true;
 
-  // Match por tokens: o devedor tem pelo menos 2 tokens do nome do proprietário
-  const refTokens = ref.split(" ").filter((t) => t.length > 2);
-  const matchedTokens = refTokens.filter((t) => src.includes(t));
+    const refTokens = ref.split(" ").filter((t) => t.length > 2);
+    if (refTokens.length === 0) continue;
+    const matchedTokens = refTokens.filter((t) => src.includes(t));
+    const minTokens = Math.max(2, Math.ceil(refTokens.length * 0.6));
+    // Alias curto (ex: MARMA): 1 token ≥4 chars basta
+    if (refTokens.length === 1 && refTokens[0].length >= 4 && matchedTokens.length === 1) return true;
+    if (matchedTokens.length >= minTokens) return true;
 
-  // Exige ≥2 tokens ou ≥60% dos tokens (o que for maior)
-  const minTokens = Math.max(2, Math.ceil(refTokens.length * 0.6));
-  return matchedTokens.length >= minTokens;
+    // Também: tokens do pagador contidos no ref (MARCO MAIA ⊆ MARCO ANDRE MENDES MAIA)
+    const srcTokens = src.split(" ").filter((t) => t.length > 2);
+    if (srcTokens.length >= 2) {
+      const matchedInRef = srcTokens.filter((t) => ref.includes(t));
+      if (matchedInRef.length >= Math.min(2, srcTokens.length)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Persiste um nome alternativo em fracoes.proprietario_aliases (JSON).
+ * Usado quando classificação manual confirma que "MARMA" / "FILIPE BACELO" = fração X.
+ */
+export async function learnAlias(
+  idFracao: string,
+  aliasRaw: string,
+): Promise<boolean> {
+  const alias = normStr(aliasRaw);
+  if (!alias || alias.length < 3) return false;
+
+  const fracao = getFracaoById(idFracao);
+  if (!fracao) return false;
+
+  // Já é o nome principal ou alias
+  if (normStr(fracao.nomeProprietario) === alias) return false;
+  if (fracao.nomesAliases.some((a) => normStr(a) === alias)) return false;
+
+  const rows = await db.run(
+    sql`SELECT proprietario_aliases FROM fracoes WHERE numero = ${fracao.idFracao} LIMIT 1`,
+  );
+  const row = (rows as any).rows?.[0];
+  let current: string[] = [];
+  try {
+    current = JSON.parse(row?.proprietario_aliases ?? "[]");
+  } catch {
+    current = [];
+  }
+  if (!Array.isArray(current)) current = [];
+  if (current.map(normStr).includes(alias)) return false;
+
+  current.push(alias);
+  await db.run(
+    sql`UPDATE fracoes SET proprietario_aliases = ${JSON.stringify(current)} WHERE numero = ${fracao.idFracao}`,
+  );
+
+  fracao.nomesAliases.push(alias);
+  console.log(`[identity-matrix] Alias aprendido: "${alias}" → fração ${idFracao} (${fracao.nomeProprietario})`);
+  return true;
 }
 
 /**
@@ -385,10 +466,12 @@ function descricaoMencaonaFracao(descricao: string, idFracao: string): boolean {
 
   // "FRACAO X", "FRACCAO X", "FRACÃO X", "FRAÇÃO X"
   if (new RegExp(`(FRACAO|FRACCAO|FRAC[AÃ]O|FRA[CÇ][AÃ]O)\\s+${id}\\b`).test(d)) return true;
+  // "AI COTA", "COTA EXTRA AH", "FR AI"
+  if (new RegExp(`\\b${id}\\s+(COTA|QUOTA|HAB|RC|LOJA|GAR)\\b`).test(d)) return true;
+  if (new RegExp(`\\b(COTA|QUOTA)(\\s+EXTRA)?\\s+${id}\\b`).test(d)) return true;
+  if (new RegExp(`\\bFR\\s+${id}\\b`).test(d)) return true;
   // "AB HAB" ou "AB RC" (lojas/hab + id no início)
   if (new RegExp(`^${id}\\s+(HAB|RC|LOJA|GAR)`).test(d)) return true;
-  // "ENTRADA NN XY" onde XY == idFracao (ex: ENTRADA 21 1A... but 1A != J)
-  // Usamos a descricao da fração para este match
   return false;
 }
 
@@ -416,9 +499,57 @@ function valorCoincideExtra(amount: number, fracao: FracaoIdentidade): boolean {
  * Score de desempate: nome do remetente vs proprietário (+35).
  * Usa a mesma lógica de tokens que nomeCoincide(), mas devolve pontos em vez de bool.
  */
-function scoreDesempateNome(debtorName: string | undefined, nomeProprietario: string): number {
+function scoreDesempateNome(debtorName: string | undefined, fracao: FracaoIdentidade): number {
   if (!debtorName) return 0;
-  return nomeCoincide(debtorName, nomeProprietario) ? 35 : 0;
+  return nomeCoincide(debtorName, fracao.nomeProprietario, fracao.nomesAliases) ? 35 : 0;
+}
+
+/** Desempate por valor: quota mensal exacta (+40) ou extra em dívida (+25). */
+function scoreDesempateValor(amount: number, fracao: FracaoIdentidade): number {
+  if (valorCoincideQuota(amount, fracao)) return 40;
+  if (valorCoincideExtra(amount, fracao)) return 25;
+  return 0;
+}
+
+/**
+ * Pagador recorrente (ex.: Rui Carvalho paga AI + AH com o mesmo IBAN):
+ * se o montante identifica uma única fração, preferir essa fração mesmo que o IBAN
+ * esteja associado a outra (proxy).
+ */
+function tryIdentificarPorValorUnico(
+  input: MatchInput,
+  ibanCandidatos: FracaoIdentidade[],
+): IdentificacaoResult | null {
+  const valorMatches = MATRIZ_PROPRIEDADES.filter((f) =>
+    valorCoincideQuota(input.amount, f),
+  );
+  if (valorMatches.length !== 1) return null;
+
+  const fracao = valorMatches[0];
+  let score = 40;
+  const criterios: MatchCriterio[] = ["valor_fixo"];
+
+  if (input.ibanSender && ibanCandidatos.length >= 1) {
+    score += 25;
+    criterios.push("iban");
+  }
+  if (input.debtorName && nomeCoincide(input.debtorName, fracao.nomeProprietario, fracao.nomesAliases)) {
+    score += 30;
+    criterios.push("nome");
+  }
+  if (descricaoMencaonaFracao(input.descricao ?? "", fracao.idFracao)) {
+    score += 25;
+    criterios.push("descricao_fracao");
+  }
+
+  if (score < 55 || criterios.length < 2) return null;
+
+  return {
+    fracao,
+    confidence: Math.min(100, score),
+    criterios,
+    ibanNovoAprendido: false,
+  };
 }
 
 /**
@@ -494,8 +625,14 @@ function calcularScoreDesempate(
   let score = 0;
   const criterios: MatchCriterio[] = [];
 
-  const sNome = scoreDesempateNome(input.debtorName, fracao.nomeProprietario);
+  const sNome = scoreDesempateNome(input.debtorName, fracao);
   if (sNome > 0) { score += sNome; criterios.push("nome"); }
+
+  const sValor = scoreDesempateValor(input.amount, fracao);
+  if (sValor > 0) {
+    score += sValor;
+    criterios.push(sValor >= 40 ? "valor_fixo" : "valor_quota_extra");
+  }
 
   const sEntFrac = scoreDesempateEntradaFracao(input.descricao, fracao.entrada, fracao.idFracao);
   if (sEntFrac > 0) { score += sEntFrac; criterios.push("descricao_fracao"); }
@@ -535,10 +672,58 @@ export async function identifyByMultiMatch(
 ): Promise<IdentificacaoResult | null> {
   const candidatos: Array<{ fracao: FracaoIdentidade; score: number; criterios: MatchCriterio[] }> = [];
 
+  // ── Perfil pagador aprendido (IBAN/nome + valor → fração) ─────────────────
+  // Genérico: funciona para Rui AI/AH e qualquer proxy multi-fração noutro condomínio.
+  const perfil = await lookupPagadorPerfil({
+    iban: input.ibanSender,
+    debtorName: input.debtorName,
+    valor: input.amount,
+  });
+  if (perfil && perfil.confidence >= 55) {
+    const fracao = getFracaoById(perfil.fracaoNumero);
+    if (fracao) {
+      let ibanNovoAprendido = false;
+      if (input.ibanSender) {
+        ibanNovoAprendido = await learnIBAN(fracao.idFracao, input.ibanSender);
+      }
+      // Reforçar perfil (confirmação automática)
+      await learnPagadorPerfil({
+        iban: input.ibanSender,
+        debtorName: input.debtorName,
+        valor: input.amount,
+        fracaoId: perfil.fracaoId,
+        fracaoNumero: perfil.fracaoNumero,
+        rubrica: perfil.rubrica,
+        fonte: "auto",
+      });
+      console.log(
+        `[identifyByMultiMatch] perfil_pagador ${perfil.matchedBy}` +
+        ` → ${perfil.fracaoNumero} conf=${perfil.confidence}`,
+      );
+      return {
+        fracao,
+        confidence: perfil.confidence,
+        criterios: ["perfil_pagador", perfil.matchedBy.startsWith("iban") ? "iban" : "nome", "valor_fixo"],
+        ibanNovoAprendido,
+      };
+    }
+  }
+
   // Pre-match por IBAN (se disponível)
   let ibanCandidatos: FracaoIdentidade[] = [];
   if (input.ibanSender) {
     ibanCandidatos = await getFracaoByIBAN(input.ibanSender);
+  }
+
+  // Pagador multi-fração: montante único (ex. Rui → AI 40,33€ vs AH 46,08€)
+  const valorUnico = tryIdentificarPorValorUnico(input, ibanCandidatos);
+  if (valorUnico) {
+    let ibanNovoAprendido = false;
+    if (input.ibanSender) {
+      ibanNovoAprendido = await learnIBAN(valorUnico.fracao.idFracao, input.ibanSender);
+    }
+    await maybeLearnPerfilFromMatch(input, valorUnico.fracao.idFracao);
+    return { ...valorUnico, ibanNovoAprendido };
   }
 
   // ── Colisão IBAN: múltiplas frações com o mesmo IBAN ─────────────────────
@@ -589,6 +774,8 @@ export async function identifyByMultiMatch(
       ibanNovoAprendido = await learnIBAN(winner.fracao.idFracao, input.ibanSender);
     }
 
+    await maybeLearnPerfilFromMatch(input, winner.fracao.idFracao);
+
     return {
       fracao: winner.fracao,
       confidence: Math.min(100, totalScore),
@@ -609,7 +796,7 @@ export async function identifyByMultiMatch(
     }
 
     // Critério 2: Nome do devedor
-    if (input.debtorName && nomeCoincide(input.debtorName, fracao.nomeProprietario)) {
+    if (input.debtorName && nomeCoincide(input.debtorName, fracao.nomeProprietario, fracao.nomesAliases)) {
       score += 30;
       criterios.push("nome");
     }
@@ -652,12 +839,36 @@ export async function identifyByMultiMatch(
     ibanNovoAprendido = await learnIBAN(best.fracao.idFracao, input.ibanSender);
   }
 
+  await maybeLearnPerfilFromMatch(input, best.fracao.idFracao);
+
   return {
     fracao: best.fracao,
     confidence: Math.min(100, best.score),
     criterios: best.criterios,
     ibanNovoAprendido,
   };
+}
+
+/** Persiste perfil pagador após match automático (não bloqueia se falhar). */
+async function maybeLearnPerfilFromMatch(
+  input: MatchInput,
+  fracaoNumero: string,
+): Promise<void> {
+  try {
+    const fracaoId = await resolveFracaoIdByNumero(fracaoNumero);
+    if (!fracaoId) return;
+    await learnPagadorPerfil({
+      iban: input.ibanSender,
+      debtorName: input.debtorName,
+      valor: input.amount,
+      fracaoId,
+      fracaoNumero,
+      rubrica: "condominio",
+      fonte: "auto",
+    });
+  } catch (e) {
+    console.warn("[identifyByMultiMatch] learnPagadorPerfil falhou:", e);
+  }
 }
 
 // ─── Helpers exportados ───────────────────────────────────────────────────────
@@ -712,20 +923,13 @@ export function amortizarDivida(
 /**
  * Processa a cascata de amortização para uma fração após recepção de pagamento.
  *
- * Ordem de prioridade (estrita): obras → indaqua → incendio → motor
+ * Ordem:
+ *   1. Cotas condomínio em aberto (mais antigas primeiro)
+ *   2. Cotas extra / obras em aberto (mais antigas primeiro)
+ *   3. Dívidas em colunas: obras → indaqua → incendio → motor
+ *   4. Sobra → crédito a favor
  *
- * Fluxo:
- *   1. Subtrai quota mensal líquida (condominio + fundoReserva) do montante recebido.
- *   2. O restante percorre as dívidas extra por prioridade até esgotar.
- *   3. Persiste os novos saldos em BD (UPDATE fracoes SET obras_divida=... etc).
- *   4. Actualiza o objecto em memória para que lookups subsequentes sejam correctos.
- *
- * @param idFracao   ID da fração (ex: "L")
- * @param amount     Montante total recebido (€)
- * @param fracaoDB   Linha da BD (para obter fracaoId)
- * @param mes        Mês do pagamento (1-12)
- * @param ano        Ano do pagamento
- * @returns CascataResult com breakdown completo, ou null se fração não encontrada
+ * Só marca uma cota como paga se o resto cobrir o valor (±€0.05).
  */
 export async function processarCascataAmortizacao(
   idFracao: string,
@@ -733,36 +937,93 @@ export async function processarCascataAmortizacao(
   fracaoDBId: string,
   mes: number,
   ano: number,
+  opts?: { dataPagamento?: Date; observacoes?: string },
 ): Promise<CascataResult | null> {
   const fracao = getFracaoById(idFracao);
   if (!fracao) return null;
 
-  // ── 1. Absorver quota mensal ──────────────────────────────────────────────
-  const quotaLiquida = fracao.valoresFixos.condominio + fracao.valoresFixos.fundoReserva;
-  let resto = Math.max(0, parseFloat((amount - quotaLiquida).toFixed(2)));
+  const TOL = 0.05;
+  let resto = Math.max(0, parseFloat(amount.toFixed(2)));
+  const dataPag = opts?.dataPagamento ?? new Date(ano, mes - 1, 15);
+  const obs = opts?.observacoes ?? `[cascata] pagamento €${amount.toFixed(2)}`;
 
   const result: CascataResult = {
     idFracao,
     valorEntrada: amount,
-    quotaLiquida,
-    restoAmortizacao: resto,
+    quotaLiquida: 0,
+    restoAmortizacao: 0,
     aplicacoes: [],
     sobra: 0,
+    quotasPagas: [],
   };
 
-  if (resto <= 0) {
-    result.sobra = 0;
-    return result;
+  const abertas = await db
+    .select()
+    .from(quotas)
+    .where(and(eq(quotas.fracaoId, fracaoDBId), eq(quotas.pago, false)))
+    .orderBy(asc(quotas.ano), asc(quotas.mes));
+
+  const condoFirst = [
+    ...abertas.filter((q) => q.tipo === "condominio" || q.tipo === "fundo_reserva"),
+    ...abertas.filter((q) => q.tipo !== "condominio" && q.tipo !== "fundo_reserva"),
+  ];
+
+  for (const q of condoFirst) {
+    if (resto <= TOL) break;
+    const devido = parseFloat(Number(q.valor).toFixed(2));
+    if (devido <= 0) continue;
+    if (resto + TOL < devido) break;
+
+    const amortizado = devido;
+    resto = parseFloat(Math.max(0, resto - amortizado).toFixed(2));
+
+    await db
+      .update(quotas)
+      .set({
+        pago: true,
+        dataPagamento: dataPag,
+        metodoPagamento: "transferência",
+        observacoes: obs,
+      })
+      .where(eq(quotas.id, q.id));
+
+    result.quotasPagas.push(q.id);
+    if (q.tipo === "condominio" || q.tipo === "fundo_reserva") {
+      result.quotaLiquida = parseFloat((result.quotaLiquida + amortizado).toFixed(2));
+    }
+    result.aplicacoes.push({
+      tipo: q.tipo ?? "condominio",
+      valorAntes: devido,
+      valorAmortizado: amortizado,
+      valorDepois: 0,
+      quotaId: q.id,
+      ref: `${q.mes}/${q.ano}`,
+    });
   }
 
-  // ── 2. Ler dívidas actuais da BD (fonte de verdade durable) ──────────────
+  if (result.quotaLiquida === 0 && abertas.every((q) => q.tipo !== "condominio")) {
+    const quotaLiquida = fracao.valoresFixos.condominio + fracao.valoresFixos.fundoReserva;
+    if (resto + TOL >= quotaLiquida && quotaLiquida > 0) {
+      const amortizado = Math.min(resto, quotaLiquida);
+      resto = parseFloat(Math.max(0, resto - amortizado).toFixed(2));
+      result.quotaLiquida = amortizado;
+      result.aplicacoes.push({
+        tipo: "condominio",
+        valorAntes: quotaLiquida,
+        valorAmortizado: amortizado,
+        valorDepois: 0,
+        ref: `${mes}/${ano}-fixo`,
+      });
+    }
+  }
+
+  result.restoAmortizacao = resto;
+
   const rows = await db.run(
     sql`SELECT obras_divida, incendio_divida, indaqua_divida, motor_divida
         FROM fracoes WHERE id = ${fracaoDBId} LIMIT 1`
   );
   const row = (rows as any).rows?.[0];
-
-  // Usar BD se disponível; caso contrário cair para memória (sistema fresh/seed)
   const dividasBD: DividasAtuais = row
     ? {
         obras:    parseFloat((row.obras_divida as string | number) ?? 0) || 0,
@@ -772,13 +1033,11 @@ export async function processarCascataAmortizacao(
       }
     : { ...fracao.dividasAtuais };
 
-  // ── 3. Aplicar cascata: obras → indaqua → incendio → motor ───────────────
   const ordem: Array<keyof DividasAtuais> = ["obras", "indaqua", "incendio", "motor"];
-
   const novasDividas = { ...dividasBD };
 
   for (const tipo of ordem) {
-    if (resto <= 0) break;
+    if (resto <= TOL) break;
     const divida = novasDividas[tipo];
     if (divida <= 0) continue;
 
@@ -797,7 +1056,6 @@ export async function processarCascataAmortizacao(
 
   result.sobra = resto;
 
-  // ── 4. Persistir em BD ────────────────────────────────────────────────────
   await db.run(
     sql`UPDATE fracoes
         SET obras_divida    = ${novasDividas.obras},
@@ -807,17 +1065,17 @@ export async function processarCascataAmortizacao(
         WHERE id = ${fracaoDBId}`
   );
 
-  // ── 5. Actualizar memória ─────────────────────────────────────────────────
   fracao.dividasAtuais.obras    = novasDividas.obras;
   fracao.dividasAtuais.incendio = novasDividas.incendio;
   fracao.dividasAtuais.indaqua  = novasDividas.indaqua;
   fracao.dividasAtuais.motor    = novasDividas.motor;
 
   console.log(
-    `[cascata] ${idFracao} — entrada €${amount.toFixed(2)}, quota €${quotaLiquida.toFixed(2)}, ` +
-    `amortizações: [${result.aplicacoes.map(a => `${a.tipo} -€${a.valorAmortizado}`).join(", ")}], ` +
-    `sobra €${result.sobra.toFixed(2)}`
+    `[cascata] ${idFracao} — entrada €${amount.toFixed(2)}, ` +
+    `aplicações: [${result.aplicacoes.map((a) => `${a.tipo}${a.ref ? `(${a.ref})` : ""} -€${a.valorAmortizado}`).join(", ")}], ` +
+    `sobra €${result.sobra.toFixed(2)}`,
   );
 
   return result;
 }
+

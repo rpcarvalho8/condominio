@@ -73,6 +73,13 @@ async function main() {
   const quotas = await count("SELECT COUNT(*) as count FROM quotas");
   ok("quotas table reachable", Number.isFinite(quotas), `count=${quotas}`);
 
+  try {
+    const perfis = await count("SELECT COUNT(*) as count FROM pagador_perfis");
+    ok("pagador_perfis table reachable", Number.isFinite(perfis), `count=${perfis}`);
+  } catch {
+    ok("pagador_perfis table reachable", false, "table missing — run bun run ensure:pagador-perfis");
+  }
+
   if (failed > 0) {
     console.log(`\nSmoke FAILED (${failed} checks)`);
     process.exit(1);

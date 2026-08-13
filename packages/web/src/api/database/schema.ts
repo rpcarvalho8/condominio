@@ -15,6 +15,8 @@ export const fracoes = sqliteTable("fracoes", {
   telegramId: text("telegram_id"),
   tipo: text("tipo").notNull().default("apartamento"), // "apartamento" | "loja" | "garagem"
   ibansConhecidos: text("ibans_conhecidos"),            // JSON array de IBANs associados (estáticos + aprendidos)
+  /** Nomes alternativos do proprietário / negócio (JSON array). Ex: ["MARMA","MARCO ANDRE MENDES MAIA"] */
+  proprietarioAliases: text("proprietario_aliases"),
   quotaMensal: real("quota_mensal").notNull().default(0),
   permilagem: real("permilagem"),             // % do edifício
   // Dívidas extra por tipo — actualizadas pela cascata de amortização
@@ -198,6 +200,79 @@ export const quotaTipos = sqliteTable("quota_tipos", {
   ativo: integer("ativo", { mode: "boolean" }).default(true),
   dataInicio: integer("data_inicio", { mode: "timestamp" }),
   dataFim: integer("data_fim", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- PERFIS DE PAGADOR (aprendizagem cross-condomínio) ---
+// Mapeia (IBAN e/ou nome + valor) → fração + rubrica.
+// Ex.: Rui Carvalho IBAN+X €40,33 → AI; mesmo IBAN €46,08 → AH.
+// Alimentado por classificação manual e matches automáticos confirmados.
+export const pagadorPerfis = sqliteTable("pagador_perfis", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  /** IBAN normalizado (sem espaços); opcional se só houver nome */
+  iban: text("iban"),
+  /** Nome do remetente normalizado (uppercase, sem acentos) */
+  nomeNormalizado: text("nome_normalizado"),
+  /** Montante exacto tipicamente transferido (€) */
+  valor: real("valor").notNull(),
+  /** Fração destino (UUID em fracoes.id) */
+  fracaoId: text("fracao_id").notNull().references(() => fracoes.id),
+  /** Número curto da fração (AI, G, …) — denormalizado para lookups rápidos */
+  fracaoNumero: text("fracao_numero").notNull(),
+  /** Rubrica: condominio | obras | extra | fundo_reserva */
+  rubrica: text("rubrica").notNull().default("condominio"),
+  /** Quantas vezes este perfil foi confirmado (manual ou auto) */
+  confirmacoes: integer("confirmacoes").notNull().default(1),
+  /** Origem da última confirmação */
+  fonte: text("fonte").notNull().default("manual"), // "manual" | "auto"
+  ativo: integer("ativo", { mode: "boolean" }).default(true),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- RATEIOS / COMPARTICIPAÇÕES ---
+// Ex.: campainhas — N condóminos transferem valor fixo ao condomínio;
+// o condomínio paga depois o fornecedor. Não é quota mensal.
+export const rateioCampanhas = sqliteTable("rateio_campanhas", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  nome: text("nome").notNull(),
+  descricao: text("descricao"),
+  valorUnitario: real("valor_unitario").notNull(),
+  quantidadeEsperada: integer("quantidade_esperada").notNull().default(1),
+  quantidadeRecebida: integer("quantidade_recebida").notNull().default(0),
+  totalRecebido: real("total_recebido").notNull().default(0),
+  /** Keywords CSV para auto-match: "CAMPAINHA,CAMPAINHAS" */
+  keywords: text("keywords"),
+  /** JSON array de números de fração esperados: ["AB","AE","AH",…] */
+  fracoesEsperadas: text("fracoes_esperadas"),
+  status: text("status").notNull().default("aberta"), // aberta | completa | paga
+  fornecedorNome: text("fornecedor_nome"),
+  /** Débito ao fornecedor (quando status=paga) */
+  pagoValor: real("pago_valor"),
+  pagoBankTransactionId: text("pago_bank_transaction_id"),
+  pagoEm: integer("pago_em", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const rateioPagamentos = sqliteTable("rateio_pagamentos", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  campanhaId: text("campanha_id").notNull().references(() => rateioCampanhas.id),
+  bankTransactionId: text("bank_transaction_id").references(() => bankTransactions.id),
+  fracaoId: text("fracao_id").references(() => fracoes.id),
+  valor: real("valor").notNull(),
+  debtorName: text("debtor_name"),
+  data: integer("data", { mode: "timestamp" }).notNull(),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),

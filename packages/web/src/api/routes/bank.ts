@@ -17,7 +17,7 @@ import * as schema from "../database/schema";
 import { eq, desc, and, sql } from "drizzle-orm";
 import crypto from "node:crypto";
 import { recalcularSaldos } from "./dashboard";
-import { identifyByMultiMatch, processarCascataAmortizacao, learnIBAN } from "../lib/identity-matrix";
+import { identifyByMultiMatch, processarCascataAmortizacao, learnIBAN, extractPayerFromDescription } from "../lib/identity-matrix";
 import { llmIdentifyFracao, LLM_LEARN_THRESHOLD, type RubricaExtra } from "../lib/llm-fallback";
 
 /**
@@ -91,7 +91,8 @@ const KW_MAP: Array<[RegExp, string]> = [
   [/honora|administr/i, "honorarios"],
 ];
 
-// Administradores do condomínio — pagamentos DBIT para eles = honorários
+// Administradores do condomínio — apenas para categorizar SAÍDAS (honorários).
+// Não afecta identificação de entradas (créditos) de condóminos/administradores.
 const ADMIN_NAMES = [
   /SERGIO\s+MIGUEL\s+MONTEIRO/i,
   /RUI\s+CARVALHO/i,
@@ -590,9 +591,8 @@ export async function processarStagedTransactions(): Promise<{
   for (const txn of pendentes) {
     const txId = txn.transactionId ?? txn.id;
     try {
-      // Só processamos créditos (entradas) — débitos já processados via importTransactions
+      // Débitos: process-staged não cria despesas aqui (sync/import trata)
       if (txn.type === "DBIT" || (txn.amount ?? 0) < 0) {
-        // Débito sem connectionId: marcar como processed/ignored sem cascata
         await db.update(schema.bankTransactions)
           .set({ imported: 1, status: "ignored", importType: "despesa" })
           .where(eq(schema.bankTransactions.id, txn.id));
@@ -619,11 +619,12 @@ export async function processarStagedTransactions(): Promise<{
             })()
           : undefined);                        // P2: fallback rawData
 
+      const debtorFromDesc = extractPayerFromDescription(txn.description);
       const matrixResult = await identifyByMultiMatch({
         descricao: txn.description ?? "",
         amount: Math.abs(txn.amount ?? 0),
         ibanSender,
-        debtorName: txn.debtorName ?? undefined,
+        debtorName: txn.debtorName ?? debtorFromDesc ?? undefined,
       });
 
       if (!matrixResult || matrixResult.confidence < 55) {
@@ -942,20 +943,23 @@ export const bankRoutes = new Hono()
 
     if (body.date_from) {
       dateFrom = new Date(body.date_from);
+    } else if (body.backfill) {
+      // Histórico operacional: 45 dias (evita rate-limit; PSD2 permite até ~89)
+      dateFrom = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+      console.log(`[bank/sync] BACKFILL desde ${dateFrom.toISOString().slice(0, 10)}`);
     } else {
-      // Incremental: from last sync, or 90 days on first run
+      // Incremental: from last sync, or 45 days on first run
       const lastSync = await db.select().from(schema.bankSyncLogs)
         .orderBy(desc(schema.bankSyncLogs.createdAt)).limit(1);
       dateFrom = lastSync[0]?.syncedTo
         ? new Date(lastSync[0].syncedTo as any)
-        : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+        : new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
     }
     if (body.date_to) {
       dateTo = new Date(body.date_to);
     }
 
-    // Santander PT via Enable Banking: max ~89 days back from today
-    // Cap dateFrom to avoid 422 WRONG_TRANSACTIONS_PERIOD
+    // Santander PT via Enable Banking: hard cap ~89 days
     const MAX_LOOKBACK_DAYS = 89;
     const earliestAllowed = new Date(Date.now() - MAX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
     if (dateFrom < earliestAllowed) {
@@ -1122,7 +1126,7 @@ export const bankRoutes = new Hono()
   });
 
 // ─── Scheduled sync (callable programmatically) ───────────────────────────────
-export async function runBankSync(): Promise<void> {
+export async function runBankSync(opts?: { backfill?: boolean; dateFrom?: string }): Promise<void> {
   const conn = await db.select().from(schema.bankConnections).limit(1);
   if (conn.length === 0) return;
 
@@ -1133,9 +1137,17 @@ export async function runBankSync(): Promise<void> {
   const lastSync = await db.select().from(schema.bankSyncLogs)
     .orderBy(desc(schema.bankSyncLogs.createdAt)).limit(1);
 
-  let dateFrom = lastSync[0]?.syncedTo
-    ? new Date(lastSync[0].syncedTo as any)
-    : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  let dateFrom: Date;
+  if (opts?.dateFrom) {
+    dateFrom = new Date(opts.dateFrom);
+  } else if (opts?.backfill) {
+    dateFrom = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+    console.log(`[bank-cron] BACKFILL desde ${dateFrom.toISOString().slice(0, 10)}`);
+  } else {
+    dateFrom = lastSync[0]?.syncedTo
+      ? new Date(lastSync[0].syncedTo as any)
+      : new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+  }
   const dateTo = new Date();
 
   // Cap dateFrom: Santander PT via Enable Banking não aceita mais de 89 dias para trás

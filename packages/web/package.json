@@ -18,6 +18,9 @@
     "db:setup-local": "bun run scripts/setup-local-db.ts",
     "seed:quotas-extras": "bun --env-file=../../.env run src/api/database/seed-quotas-extras.ts",
     "seed:fracoes": "bun --env-file=../../.env run src/api/database/seed-fracoes.ts",
+    "fix:proprietarios": "bun --env-file=../../.env run scripts/fix-proprietarios-fracoes.ts",
+    "ensure:pagador-perfis": "bun --env-file=../../.env run scripts/ensure-pagador-perfis.ts",
+    "reconcile:passo2": "bun --env-file=../../.env run scripts/reconcile-passo2-aliases-rateio.ts",
     "seed:gdpr-config": "bun --env-file=../../.env run src/api/database/seed-gdpr-config.ts",
     "seed:ancora": "bun --env-file=../../.env run src/api/database/seed-ancora.ts",
     "smoke:db": "bun --env-file=../../.env run scripts/smoke-db-check.ts"

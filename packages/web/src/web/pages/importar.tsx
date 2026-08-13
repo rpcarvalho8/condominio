@@ -167,11 +167,11 @@ function BankPanel() {
     setConnecting(false);
   }
 
-  async function handleSync(customDates?: { date_from: string; date_to: string }) {
+  async function handleSync(opts?: { date_from: string; date_to: string } | { backfill: true }) {
     setSyncing(true);
     setSyncResult(null);
     try {
-      const body = customDates ? JSON.stringify(customDates) : undefined;
+      const body = opts ? JSON.stringify(opts) : undefined;
       const res = await authFetch("/api/bank/sync", {
         method: "POST",
         headers: body ? { "Content-Type": "application/json" } : undefined,
@@ -255,6 +255,15 @@ function BankPanel() {
                 {syncing
                   ? <><RefreshCw size={14} className="animate-spin" /> A sincronizar…</>
                   : <><Zap size={14} /> Sincronizar agora</>}
+              </button>
+              <button
+                onClick={() => handleSync({ backfill: true })}
+                disabled={syncing}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition hover:opacity-80 disabled:opacity-50"
+                style={{ background: "var(--bg-elevated)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+                title="Reimportar últimos 45 dias (recomendado; PSD2 permite até ~89)"
+              >
+                Histórico 45d
               </button>
               <button
                 onClick={() => setShowCustomDate(v => !v)}

@@ -15,8 +15,15 @@ interface Movement {
   categoriaSource: "auto" | "unmatched";
   nomeIdentificado?: string;
   notaCategorizacao?: string;
+  fracaoNumero?: string;
   status: string;
   requiresReview: boolean;
+}
+
+interface FracaoOption {
+  id: string;
+  numero: string;
+  proprietarioNome: string | null;
 }
 
 interface Stats {
@@ -45,19 +52,29 @@ async function apiFetch<T>(path: string): Promise<T> {
 async function patchClassificacao(
   id: string,
   classificacao: string,
-  debtorName?: string,
+  fracaoId?: string,
 ): Promise<void> {
   const r = await fetch(`/api/bank-movements/${id}/classificacao`, {
     method: "PATCH",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
-    // debtorName é usado pelo backend para inferir a fração e criar a quota
-    body: JSON.stringify({ classificacao, ...(debtorName ? { debtorName } : {}) }),
+    body: JSON.stringify({
+      classificacao,
+      ...(fracaoId ? { fracaoId } : {}),
+    }),
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
     throw new Error((err as any).error ?? `HTTP ${r.status}`);
   }
 }
+
+const QUOTA_CLASSIFICACOES = new Set([
+  "quota",
+  "quota_obras",
+  "quota_incendio",
+  "quota_motor",
+]);
+// despesa NÃO exige fração
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 function KpiCard({ label, value, sub, color = "text-gray-900" }: {
@@ -98,42 +115,91 @@ function Toast({ message, onDone }: { message: string; onDone: () => void }) {
   );
 }
 
-function ClassDropdown({ id, current, debtorName, onSave }: {
+function MovementClassifyControls({
+  id,
+  tipo,
+  currentCat,
+  currentFracao,
+  fracoes,
+  onSave,
+}: {
   id: string;
-  current: string;
-  debtorName?: string;
-  onSave: (id: string, val: string, debtorName?: string) => Promise<void>;
+  tipo: "Entrada" | "Saída";
+  currentCat: string;
+  currentFracao?: string;
+  fracoes: FracaoOption[];
+  onSave: (id: string, val: string, fracaoId?: string) => Promise<void>;
 }) {
+  const [fracao, setFracao] = useState(currentFracao ?? "");
   const [saving, setSaving] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
 
-  async function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
+  useEffect(() => {
+    setFracao(currentFracao ?? "");
+  }, [currentFracao, id]);
+
+  const normalised = CLASSIFICACOES.find(c => c.value === currentCat)?.value ?? "";
+  const showFracao = tipo === "Entrada";
+
+  async function handleCategoryChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const val = e.target.value;
     if (!val) return;
+    if (QUOTA_CLASSIFICACOES.has(val) && !fracao) {
+      setErro("Seleccione a fração antes de classificar como quota.");
+      return;
+    }
+    setErro(null);
     setSaving(true);
     try {
-      await onSave(id, val, debtorName);
+      await onSave(id, val, fracao || undefined);
+    } catch (err) {
+      setErro(err instanceof Error ? err.message : "Erro ao guardar");
     } finally {
       setSaving(false);
     }
   }
 
-  const normalised = CLASSIFICACOES.find(c => c.value === current)?.value ?? "";
+  const selectCls = `text-xs border rounded-md px-2 py-1.5 bg-white text-gray-900 font-medium
+    focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+    hover:border-gray-400 cursor-pointer transition-all
+    ${saving ? "opacity-50 cursor-wait" : ""}`;
 
   return (
-    <select
-      value={normalised}
-      onChange={handleChange}
-      disabled={saving}
-      className={`text-xs border border-gray-300 rounded-md px-2 py-1.5 bg-white text-gray-900 font-medium
-        focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500
-        hover:border-gray-400 cursor-pointer transition-all
-        ${saving ? "opacity-50 cursor-wait" : ""}`}
-    >
-      <option value="" className="text-gray-500">— Não classificado —</option>
-      {CLASSIFICACOES.map(c => (
-        <option key={c.value} value={c.value} className="text-gray-900">{c.label}</option>
-      ))}
-    </select>
+    <div className="flex flex-col gap-1.5 min-w-[200px]">
+      <div className="flex flex-wrap gap-1.5 items-center">
+        {showFracao && (
+          <select
+            value={fracao}
+            onChange={(e) => { setFracao(e.target.value); setErro(null); }}
+            disabled={saving}
+            className={`${selectCls} max-w-[110px] ${!fracao && currentCat !== "Não classificado" ? "border-amber-400" : "border-gray-300"}`}
+            title="Fração destinatária"
+          >
+            <option value="">— Fração —</option>
+            {fracoes.map(f => (
+              <option key={f.id} value={f.numero}>
+                {f.numero}{f.proprietarioNome ? ` · ${f.proprietarioNome.split(" ")[0]}` : ""}
+              </option>
+            ))}
+          </select>
+        )}
+        <select
+          value={normalised}
+          onChange={handleCategoryChange}
+          disabled={saving}
+          className={`${selectCls} border-gray-300 flex-1 min-w-[140px]`}
+        >
+          <option value="" className="text-gray-500">— Não classificado —</option>
+          {CLASSIFICACOES.map(c => (
+            <option key={c.value} value={c.value} className="text-gray-900">{c.label}</option>
+          ))}
+        </select>
+      </div>
+      {fracao && currentCat !== "Não classificado" && (
+        <span className="text-[10px] text-gray-500">Fração {fracao}</span>
+      )}
+      {erro && <span className="text-[10px] text-red-600">{erro}</span>}
+    </div>
   );
 }
 
@@ -181,24 +247,30 @@ export default function MovimentosBancariosPage() {
     staleTime: 30_000,
   });
 
+  // ── Frações (selector manual) ──
+  const { data: fracoesData } = useQuery({
+    queryKey: ["fracoes"],
+    queryFn: () => apiFetch<{ fracoes: FracaoOption[] }>("/api/fracoes"),
+    staleTime: 300_000,
+  });
+  const fracoesList = (fracoesData?.fracoes ?? [])
+    .slice()
+    .sort((a, b) => a.numero.localeCompare(b.numero, "pt"));
+
   // ── Mutation: gravar classificação + disparar cascata ──
   const classifyMutation = useMutation({
-    mutationFn: ({ id, val, debtorName }: { id: string; val: string; debtorName?: string }) =>
-      patchClassificacao(id, val, debtorName),
-    onSuccess: () => {
-      // Invalidar todos os dados dependentes — dashboard, lista, categorias
+    mutationFn: ({ id, val, fracaoId }: { id: string; val: string; fracaoId?: string }) =>
+      patchClassificacao(id, val, fracaoId),
+    onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["bm-lista"] });
       qc.invalidateQueries({ queryKey: ["bm-overview"] });
       qc.invalidateQueries({ queryKey: ["bm-categorias"] });
       qc.invalidateQueries({ queryKey: ["bm-reconciliacao"] });
-      // Dashboard cards também precisam de refresh
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       qc.invalidateQueries({ queryKey: ["fracoes"] });
       qc.invalidateQueries({ queryKey: ["quotas"] });
       qc.invalidateQueries({ queryKey: ["morosos-count"] });
-      // Toast + reload forçado para garantir que não há cache a mascarar os dados reais
-      setToast("✨ Movimento reclassificado! A recarregar...");
-      setTimeout(() => window.location.reload(), 1200);
+      setToast(`✨ Movimento classificado${vars.fracaoId ? ` → fração ${vars.fracaoId}` : ""}`);
     },
     onError: (err: Error) => {
       setToast(`❌ Erro ao reclassificar: ${err.message}`);
@@ -378,7 +450,7 @@ export default function MovimentosBancariosPage() {
                     <tr>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Data</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Descritivo</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Classificação</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Classificação / Fração</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Montante</th>
                     </tr>
                   </thead>
@@ -396,12 +468,16 @@ export default function MovimentosBancariosPage() {
                             </div>
                           )}
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
-                          <ClassDropdown
+                        <td className="px-4 py-3">
+                          <MovementClassifyControls
                             id={m.id}
-                            current={m.categoria}
-                            debtorName={m.nomeIdentificado}
-                            onSave={(id, val, dn) => classifyMutation.mutateAsync({ id, val, debtorName: dn })}
+                            tipo={m.tipo}
+                            currentCat={m.categoria}
+                            currentFracao={m.fracaoNumero}
+                            fracoes={fracoesList}
+                            onSave={(id, val, fracaoId) =>
+                              classifyMutation.mutateAsync({ id, val, fracaoId })
+                            }
                           />
                         </td>
                         <td className={`px-4 py-3 text-right font-mono font-medium whitespace-nowrap ${

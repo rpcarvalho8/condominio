@@ -58,6 +58,107 @@ export const quotas = new Hono()
     }
     return c.json({ criadas: novasQuotas.length, quotas: novasQuotas }, 201);
   })
+  /** Gera cota extra só para as frações indicadas (ex.: campainhas). */
+  .post("/gerar-extra", async (c) => {
+    const body = await c.req.json();
+    const {
+      fracaoIds,
+      fracaoNumeros,
+      valor,
+      nome,
+      keywords,
+      descricao,
+      mes,
+      ano,
+      quotaTipoId,
+    } = body as {
+      fracaoIds?: string[];
+      fracaoNumeros?: string[];
+      valor: number;
+      nome?: string;
+      keywords?: string;
+      descricao?: string;
+      mes?: number;
+      ano?: number;
+      quotaTipoId?: string;
+    };
+
+    if (!valor || valor <= 0) {
+      return c.json({ error: "Valor obrigatório e > 0" }, 400);
+    }
+
+    const now = new Date();
+    const mesQ = mes ?? (now.getMonth() + 1);
+    const anoQ = ano ?? now.getFullYear();
+
+    let tipoId = quotaTipoId ?? null;
+    if (!tipoId && nome) {
+      const [tipo] = await db.insert(schema.quotaTipos).values({
+        nome,
+        tipo: "extra",
+        descricao: descricao ?? null,
+        keywords: keywords ?? null,
+        valorBase: valor,
+        ativo: true,
+      }).returning();
+      tipoId = tipo.id;
+    }
+
+    const allFracoes = await db.select().from(schema.fracoes).where(eq(schema.fracoes.ativo, true));
+    const byId = new Map(allFracoes.map((f) => [f.id, f]));
+    const byNum = new Map(allFracoes.map((f) => [f.numero.toUpperCase(), f]));
+
+    const targets: typeof allFracoes = [];
+    for (const id of fracaoIds ?? []) {
+      const f = byId.get(id);
+      if (f) targets.push(f);
+    }
+    for (const num of fracaoNumeros ?? []) {
+      const f = byNum.get(String(num).toUpperCase());
+      if (f && !targets.some((t) => t.id === f.id)) targets.push(f);
+    }
+
+    if (targets.length === 0) {
+      return c.json({ error: "Seleccione pelo menos uma fração" }, 400);
+    }
+
+    const criadas = [];
+    const saltadas = [];
+    for (const fracao of targets) {
+      const existing = await db.select({ id: schema.quotas.id }).from(schema.quotas).where(
+        and(
+          eq(schema.quotas.fracaoId, fracao.id),
+          eq(schema.quotas.mes, mesQ),
+          eq(schema.quotas.ano, anoQ),
+          eq(schema.quotas.tipo, "extra"),
+          tipoId ? eq(schema.quotas.quotaTipoId, tipoId) : eq(schema.quotas.valor, valor),
+        ),
+      ).limit(1);
+      if (existing.length > 0) {
+        saltadas.push(fracao.numero);
+        continue;
+      }
+      const [q] = await db.insert(schema.quotas).values({
+        fracaoId: fracao.id,
+        quotaTipoId: tipoId,
+        tipo: "extra",
+        mes: mesQ,
+        ano: anoQ,
+        valor,
+        fundoReserva: 0,
+        pago: false,
+        observacoes: nome ? `[extra:${nome}]` : null,
+      }).returning();
+      criadas.push({ id: q.id, fracao: fracao.numero });
+    }
+
+    return c.json({
+      criadas: criadas.length,
+      saltadas,
+      quotaTipoId: tipoId,
+      quotas: criadas,
+    }, 201);
+  })
   .patch("/:id/pagar", async (c) => {
     const id = c.req.param("id");
     const { metodoPagamento, observacoes } = await c.req.json();
