@@ -5,14 +5,13 @@ import { eq } from "drizzle-orm";
 import { requireAdmin } from "../middleware/auth";
 
 export const quotaTiposRoutes = new Hono()
-  .use(requireAdmin)
   // List all
   .get("/", async (c) => {
     const tipos = await db.select().from(quotaTipos).orderBy(quotaTipos.createdAt);
     return c.json(tipos);
   })
   // Create
-  .post("/", async (c) => {
+  .post("/", requireAdmin, async (c) => {
     const body = await c.req.json();
     const [novo] = await db.insert(quotaTipos).values({
       nome: body.nome,
@@ -27,7 +26,7 @@ export const quotaTiposRoutes = new Hono()
     return c.json(novo, 201);
   })
   // Update
-  .put("/:id", async (c) => {
+  .put("/:id", requireAdmin, async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json();
     const [updated] = await db.update(quotaTipos)
@@ -47,7 +46,7 @@ export const quotaTiposRoutes = new Hono()
     return c.json(updated);
   })
   // Delete
-  .delete("/:id", async (c) => {
+  .delete("/:id", requireAdmin, async (c) => {
     const id = c.req.param("id");
     await db.delete(quotaTipos).where(eq(quotaTipos.id, id));
     return c.json({ ok: true });

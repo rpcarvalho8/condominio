@@ -39,6 +39,23 @@ type PortalData = {
   };
 };
 
+type AtaPortal = {
+  id: string;
+  titulo: string;
+  dataReuniao: string;
+  status: "aprovada" | "rejeitada" | "aguardando_votos" | "pdf_definitiva" | "rascunho" | "em_revisao";
+  ataTexto: string;
+  resumoDeliberacoes: string | null;
+  approvedAt: string | null;
+  rejectedAt: string | null;
+  pdfUrl: string | null;
+  pdfFinalizedAt: string | null;
+  approvalDeadlineAt: string | null;
+  audioAvailableUntil: string | null;
+  userVote: "approve" | "reject" | null;
+  userVotedAt: string | null;
+};
+
 const MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 
 function formatEur(v: number) {
@@ -55,13 +72,61 @@ function tipoLabel(tipo: string) {
   return map[tipo] ?? tipo;
 }
 
+function AtaAudioPlayer({
+  ataId,
+  canPlay,
+  token,
+}: {
+  ataId: string;
+  canPlay: boolean;
+  token: string;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!canPlay) return;
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/atas/${ataId}/audio`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await r.text());
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        if (!cancelled) setSrc(url);
+      })
+      .catch(() => {
+        if (!cancelled) setSrc(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      setLoading(false);
+    };
+  }, [ataId, canPlay, token]);
+
+  return (
+    <div className="mt-3">
+      {loading && <p className="text-xs text-gray-500">A carregar áudio...</p>}
+      {src ? <audio controls src={src} className="w-full" /> : !loading && canPlay ? <p className="text-xs text-gray-500">Áudio indisponível.</p> : null}
+    </div>
+  );
+}
+
 export default function PortalPage() {
   const [, navigate] = useLocation();
   const { data: session, isPending } = authClient.useSession();
   const [data, setData] = useState<PortalData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"quotas" | "recibos">("quotas");
+  const [tab, setTab] = useState<"quotas" | "recibos" | "atas">("quotas");
   const [anoFiltro, setAnoFiltro] = useState(new Date().getFullYear());
+  const [atas, setAtas] = useState<AtaPortal[]>([]);
+  const token = localStorage.getItem("bm_token") ?? "";
 
   useEffect(() => {
     if (isPending) return;
@@ -74,14 +139,20 @@ export default function PortalPage() {
 
   async function loadData() {
     try {
-      const res = await fetch("/api/portal/minha-fracao", {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("bm_token") ?? ""}`,
-        },
-      });
-      if (res.ok) {
-        const d = await res.json();
+      const headers = {
+        Authorization: `Bearer ${localStorage.getItem("bm_token") ?? ""}`,
+      };
+      const [resFracao, resAtas] = await Promise.all([
+        fetch("/api/portal/minha-fracao", { headers }),
+        fetch("/api/atas", { headers }),
+      ]);
+      if (resFracao.ok) {
+        const d = await resFracao.json();
         setData(d);
+      }
+      if (resAtas.ok) {
+        const listaAtas = await resAtas.json() as AtaPortal[];
+        setAtas(listaAtas);
       }
     } finally {
       setLoading(false);
@@ -94,6 +165,22 @@ export default function PortalPage() {
     navigate("/login");
   }
 
+  async function submitAtaVote(ataId: string, vote: "approve" | "reject") {
+    const res = await fetch(`/api/atas/${ataId}/votes`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ vote }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.message ?? "Erro ao submeter voto.");
+    }
+    await loadData();
+  }
+
   if (isPending || loading) {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center">
@@ -104,10 +191,13 @@ export default function PortalPage() {
 
   if (!data) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-gray-400 mb-4">Sem fração associada à sua conta.</p>
-          <p className="text-gray-600 text-sm">Contacte o administrador do condomínio.</p>
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+        <div className="text-center max-w-sm">
+          <h1 className="text-white text-lg font-semibold mb-2">
+            Olá{session?.user?.name ? `, ${session.user.name}` : ""}
+          </h1>
+          <p className="text-gray-400 mb-2">A sua conta está ativa, mas ainda não tem fração associada.</p>
+          <p className="text-gray-600 text-sm">Peça ao administrador do condomínio para ligar a sua fração à conta.</p>
           <button onClick={handleLogout} className="mt-6 text-blue-400 hover:underline text-sm">
             Sair
           </button>
@@ -203,6 +293,12 @@ export default function PortalPage() {
             >
               Recibos
             </button>
+            <button
+              onClick={() => setTab("atas")}
+              className={`flex-1 py-3 text-sm font-medium transition ${tab === "atas" ? "text-white border-b-2 border-blue-500" : "text-gray-500 hover:text-gray-300"}`}
+            >
+              Atas
+            </button>
           </div>
 
           {tab === "quotas" && (
@@ -282,6 +378,107 @@ export default function PortalPage() {
                           </a>
                         )}
                       </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === "atas" && (
+            <div className="p-4">
+              {atas.length === 0 ? (
+                <p className="text-gray-500 text-sm text-center py-6">Sem atas publicadas ainda.</p>
+              ) : (
+                <div className="space-y-4">
+                  {atas.map((ata) => (
+                    <div key={ata.id} className="rounded-xl border border-gray-800 p-4 bg-gray-950/50">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h3 className="text-sm font-semibold">{ata.titulo}</h3>
+                          <span className="text-xs text-gray-500">
+                            {new Date(ata.dataReuniao).toLocaleDateString("pt-PT")}
+                          </span>
+                        </div>
+                        <span className="text-xs text-gray-500">{ata.status}</span>
+                      </div>
+                      {ata.resumoDeliberacoes && (
+                        <p className="text-xs text-gray-400 mt-2 whitespace-pre-wrap">{ata.resumoDeliberacoes}</p>
+                      )}
+
+                      {ata.pdfUrl && (
+                        <div className="mt-3">
+                          <a
+                            href={ata.pdfUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-400 hover:text-blue-300 transition text-sm"
+                          >
+                            Abrir PDF definitivo
+                          </a>
+                        </div>
+                      )}
+
+                      {ata.status === "aguardando_votos" && ata.approvalDeadlineAt && (
+                        <div className="mt-3">
+                          <p className="text-xs text-amber-300">
+                            Votação termina em{" "}
+                            {Math.max(0, Math.ceil((new Date(ata.approvalDeadlineAt).getTime() - Date.now()) / 60000))} min
+                          </p>
+
+                          <div className="flex flex-wrap gap-2 mt-2">
+                            <button
+                              className="px-3 py-1.5 rounded-md text-sm"
+                              style={{
+                                background: ata.userVote === "approve" ? "var(--green-subtle)" : "var(--blue-primary)",
+                                color: ata.userVote === "approve" ? "var(--green)" : "white",
+                                border: "1px solid var(--border-strong)",
+                                cursor: ata.userVote === "approve" ? "not-allowed" : "pointer",
+                              }}
+                              disabled={
+                                ata.userVote === "approve" ||
+                                new Date(ata.approvalDeadlineAt).getTime() < Date.now()
+                              }
+                              onClick={() => submitAtaVote(ata.id, "approve")}
+                            >
+                              Aprovar
+                            </button>
+                            <button
+                              className="px-3 py-1.5 rounded-md text-sm"
+                              style={{
+                                background: ata.userVote === "reject" ? "var(--red-subtle)" : "var(--bg-secondary)",
+                                color: ata.userVote === "reject" ? "var(--red)" : "var(--text-primary)",
+                                border: "1px solid var(--border-strong)",
+                                cursor: ata.userVote === "reject" ? "not-allowed" : "pointer",
+                              }}
+                              disabled={
+                                ata.userVote === "reject" ||
+                                new Date(ata.approvalDeadlineAt).getTime() < Date.now()
+                              }
+                              onClick={() => submitAtaVote(ata.id, "reject")}
+                            >
+                              Rejeitar
+                            </button>
+                          </div>
+
+                          <AtaAudioPlayer
+                            ataId={ata.id}
+                            token={token}
+                            canPlay={ata.status === "aguardando_votos"}
+                          />
+                        </div>
+                      )}
+
+                      {ata.status === "aprovada" && (
+                        <p className="mt-3 text-xs text-green-300">Aprovada e publicada.</p>
+                      )}
+                      {ata.status === "rejeitada" && (
+                        <p className="mt-3 text-xs text-red-300">Rejeitada.</p>
+                      )}
+
+                      <pre className="mt-3 text-xs text-gray-200 whitespace-pre-wrap font-sans leading-relaxed">
+                        {ata.ataTexto}
+                      </pre>
                     </div>
                   ))}
                 </div>

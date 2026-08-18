@@ -30,10 +30,17 @@ export default function UtilizadoresPage() {
   const [form, setForm] = useState({ name: "", email: "", password: "", role: "condómino", fracaoId: "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
 
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (!success) return;
+    const t = setTimeout(() => setSuccess(""), 5000);
+    return () => clearTimeout(t);
+  }, [success]);
 
   async function loadData() {
     try {
@@ -71,6 +78,7 @@ export default function UtilizadoresPage() {
   async function handleSave() {
     setSaving(true);
     setError("");
+    setSuccess("");
     try {
       if (editUser) {
         const res = await fetch(`/api/admin/users/${editUser.id}`, {
@@ -79,6 +87,7 @@ export default function UtilizadoresPage() {
           body: JSON.stringify({ name: form.name, role: form.role, fracaoId: form.fracaoId || null }),
         });
         if (!res.ok) throw new Error("Erro ao atualizar");
+        setSuccess(`Utilizador "${form.name}" atualizado com sucesso.`);
       } else {
         if (!form.password) { setError("Password obrigatória"); setSaving(false); return; }
         const res = await fetch("/api/admin/users", {
@@ -90,6 +99,14 @@ export default function UtilizadoresPage() {
           const d = await res.json();
           throw new Error(d.message ?? "Erro ao criar");
         }
+        const fracaoLabel = form.role === "condómino" && form.fracaoId
+          ? fracoes.find(f => f.id === form.fracaoId)
+          : null;
+        setSuccess(
+          fracaoLabel
+            ? `Utilizador "${form.name}" criado com sucesso (Fração ${fracaoLabel.numero}).`
+            : `Utilizador "${form.name}" criado com sucesso.`
+        );
       }
       setShowModal(false);
       await loadData();
@@ -126,6 +143,15 @@ export default function UtilizadoresPage() {
       />
 
       <div className="p-6">
+        {success && (
+          <div
+            className="mb-4 text-sm rounded-lg px-3 py-2 flex items-center gap-2"
+            style={{ background: "var(--green-subtle)", border: "1px solid var(--green)", color: "var(--green)" }}
+          >
+            <Check size={14} />
+            {success}
+          </div>
+        )}
         {loading ? (
           <div className="text-center py-12" style={{ color: "var(--text-muted)" }}>A carregar...</div>
         ) : (

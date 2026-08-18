@@ -1,6 +1,7 @@
-import { useState, Component, type ReactNode } from "react";
+import { useState, useEffect, Component, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { useIsAdmin } from "../lib/auth";
 import { PageHeader } from "../components/Layout";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -42,6 +43,7 @@ class QuotasErrorBoundary extends Component<{children: ReactNode}, {error: any}>
 }
 
 function QuotasPageInner() {
+  const isAdmin = useIsAdmin();
   const qc = useQueryClient();
   const agora = new Date();
   const [mes, setMes] = useState(agora.getMonth() + 1);
@@ -75,6 +77,16 @@ function QuotasPageInner() {
   });
   const quotaTipos: any[] = (quotaTiposData as any) ?? [];
   const extraTipos = quotaTipos.filter((t: any) => t.tipo === "extra");
+
+  const { data: fracoesData } = useQuery({
+    queryKey: ["fracoes"],
+    queryFn: async () => (await fetch("/api/fracoes", { credentials: "include" })).json(),
+  });
+  const fracoesActivas = ((fracoesData as any)?.fracoes ?? [])
+    .filter((f: { ativo?: boolean }) => f.ativo !== false)
+    .sort((a: { numero: string }, b: { numero: string }) =>
+      a.numero.localeCompare(b.numero, "pt", { numeric: true }),
+    );
 
   const pagarMut = useMutation({
     mutationFn: async ({ id, metodoPagamento }: any) =>
@@ -170,7 +182,7 @@ function QuotasPageInner() {
         title="Quotas"
         subtitle={tipo === "condominio" ? `${getMesNome(mes)} ${ano}` : TABS.find(t => t.value === tipo)?.label}
         breadcrumb={["Gestão Condomínio", "Quotas"]}
-        actions={
+        actions={isAdmin ? (
           <div className="flex items-center gap-2">
             {tipo === "extra" && (
               <Button size="sm" onClick={() => setNovaExtraModal(true)} variant="secondary">
@@ -185,7 +197,7 @@ function QuotasPageInner() {
               </Button>
             )}
           </div>
-        }
+        ) : undefined}
       />
 
       <div className="p-6 space-y-4">
@@ -264,10 +276,12 @@ function QuotasPageInner() {
                   <p className="text-sm" style={{ color: "var(--text-muted)" }}>
                     Sem quotas condomínio para {getMesNome(mes)} {ano}
                   </p>
-                  <Button size="sm" onClick={() => gerarMut.mutate()} loading={gerarMut.isPending}>
-                    <Zap size={13} />
-                    Gerar quotas do mês
-                  </Button>
+                  {isAdmin && (
+                    <Button size="sm" onClick={() => gerarMut.mutate()} loading={gerarMut.isPending}>
+                      <Zap size={13} />
+                      Gerar quotas do mês
+                    </Button>
+                  )}
                 </CardContent>
               </Card>
             ) : (
@@ -346,36 +360,38 @@ function QuotasPageInner() {
       </div>
 
       {/* Modal marcar pago */}
-      <Modal open={!!pagarModal} onClose={() => setPagarModal(null)} title="Registar pagamento" size="sm">
-        {pagarModal && (
-          <div className="space-y-4">
-            <div className="rounded-lg p-3" style={{ background: "var(--bg-elevated)" }}>
-              <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-                Fração {pagarModal.fracao?.numero} — {pagarModal.fracao?.proprietarioNome}
-              </p>
-              <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                {getMesNome(pagarModal.quota.mes)} {pagarModal.quota.ano} · {formatEuro(pagarModal.quota.valor)}
-              </p>
+      {isAdmin && (
+        <Modal open={!!pagarModal} onClose={() => setPagarModal(null)} title="Registar pagamento" size="sm">
+          {pagarModal && (
+            <div className="space-y-4">
+              <div className="rounded-lg p-3" style={{ background: "var(--bg-elevated)" }}>
+                <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                  Fração {pagarModal.fracao?.numero} — {pagarModal.fracao?.proprietarioNome}
+                </p>
+                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                  {getMesNome(pagarModal.quota.mes)} {pagarModal.quota.ano} · {formatEuro(pagarModal.quota.valor)}
+                </p>
+              </div>
+              <Select
+                label="Método de pagamento"
+                options={METODOS_PAGAMENTO}
+                value={metodo}
+                onChange={(e) => setMetodo(e.target.value)}
+              />
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" onClick={() => setPagarModal(null)}>Cancelar</Button>
+                <Button
+                  onClick={() => pagarMut.mutate({ id: pagarModal.quota.id, metodoPagamento: metodo })}
+                  loading={pagarMut.isPending}
+                >
+                  <CheckCircle2 size={14} />
+                  Confirmar pagamento
+                </Button>
+              </div>
             </div>
-            <Select
-              label="Método de pagamento"
-              options={METODOS_PAGAMENTO}
-              value={metodo}
-              onChange={(e) => setMetodo(e.target.value)}
-            />
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setPagarModal(null)}>Cancelar</Button>
-              <Button
-                onClick={() => pagarMut.mutate({ id: pagarModal.quota.id, metodoPagamento: metodo })}
-                loading={pagarMut.isPending}
-              >
-                <CheckCircle2 size={14} />
-                Confirmar pagamento
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+          )}
+        </Modal>
+      )}
 
       {/* Modal Reassign Categoria */}
       <Modal open={!!reassignModal} onClose={() => setReassignModal(null)} title="Alterar categoria" size="sm">
@@ -416,14 +432,21 @@ function QuotasPageInner() {
       </Modal>
 
       {/* Modal Nova Cota Extra */}
-      <NovaExtraModal
-        open={novaExtraModal}
-        onClose={() => setNovaExtraModal(false)}
-        onCreated={() => {
-          qc.invalidateQueries({ queryKey: ["quota-tipos"] });
-          setNovaExtraModal(false);
-        }}
-      />
+      {isAdmin && (
+        <NovaExtraModal
+          open={novaExtraModal}
+          onClose={() => setNovaExtraModal(false)}
+          fracoes={fracoesActivas}
+          onCreated={async () => {
+            await Promise.all([
+              qc.invalidateQueries({ queryKey: ["quotas"] }),
+              qc.invalidateQueries({ queryKey: ["dashboard"] }),
+              qc.invalidateQueries({ queryKey: ["quota-tipos"] }),
+            ]);
+            setNovaExtraModal(false);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -449,6 +472,7 @@ function SecaoMorosos({
   onDesmarcar: (quotaId: string) => void;
   pagarLoading?: boolean;
 }) {
+  const isAdmin = useIsAdmin();
   const [pagarModal, setPagarModal] = useState<{
     fracao: any;
     total: number;
@@ -548,31 +572,33 @@ function SecaoMorosos({
                         {formatEuro(m.total)}
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          {quotaIdPagar && (
-                            <button
-                              className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
-                              style={{ background: "var(--green-subtle)", color: "var(--green)" }}
-                              onClick={() => {
-                                setMetodo("transferência");
-                                setPagarModal({ fracao: m.fracao, total: m.total, quotaId: quotaIdPagar });
-                              }}
-                            >
-                              <CheckCircle2 size={12} />
-                              Pagar
-                            </button>
-                          )}
-                          {quotaIdDesmarcar && (
-                            <button
-                              className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
-                              style={{ background: "var(--bg-elevated)", color: "var(--text-muted)" }}
-                              onClick={() => onDesmarcar(quotaIdDesmarcar)}
-                            >
-                              <XCircle size={12} />
-                              Desmarcar
-                            </button>
-                          )}
-                        </div>
+                        {isAdmin && (
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {quotaIdPagar && (
+                              <button
+                                className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
+                                style={{ background: "var(--green-subtle)", color: "var(--green)" }}
+                                onClick={() => {
+                                  setMetodo("transferência");
+                                  setPagarModal({ fracao: m.fracao, total: m.total, quotaId: quotaIdPagar });
+                                }}
+                              >
+                                <CheckCircle2 size={12} />
+                                Pagar
+                              </button>
+                            )}
+                            {quotaIdDesmarcar && (
+                              <button
+                                className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
+                                style={{ background: "var(--bg-elevated)", color: "var(--text-muted)" }}
+                                onClick={() => onDesmarcar(quotaIdDesmarcar)}
+                              >
+                                <XCircle size={12} />
+                                Desmarcar
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -583,46 +609,48 @@ function SecaoMorosos({
         </Card>
       )}
 
-      <Modal
-        open={!!pagarModal}
-        onClose={() => setPagarModal(null)}
-        title="Registar pagamento"
-        size="sm"
-      >
-        {pagarModal && (
-          <div className="space-y-4">
-            <div className="rounded-lg p-3" style={{ background: "var(--bg-elevated)" }}>
-              <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-                Fração {pagarModal.fracao?.numero} — {pagarModal.fracao?.proprietarioNome}
-              </p>
-              <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                Valor em dívida · {formatEuro(pagarModal.total)}
-              </p>
+      {isAdmin && (
+        <Modal
+          open={!!pagarModal}
+          onClose={() => setPagarModal(null)}
+          title="Registar pagamento"
+          size="sm"
+        >
+          {pagarModal && (
+            <div className="space-y-4">
+              <div className="rounded-lg p-3" style={{ background: "var(--bg-elevated)" }}>
+                <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                  Fração {pagarModal.fracao?.numero} — {pagarModal.fracao?.proprietarioNome}
+                </p>
+                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                  Valor em dívida · {formatEuro(pagarModal.total)}
+                </p>
+              </div>
+              <Select
+                label="Método de pagamento"
+                options={METODOS_PAGAMENTO.filter((m) =>
+                  ["transferência", "mbway", "numerário", "cheque"].includes(m.value)
+                )}
+                value={metodo}
+                onChange={(e) => setMetodo(e.target.value)}
+              />
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" onClick={() => setPagarModal(null)}>Cancelar</Button>
+                <Button
+                  onClick={() => {
+                    onPagar(pagarModal.quotaId, metodo);
+                    setPagarModal(null);
+                  }}
+                  loading={pagarLoading}
+                >
+                  <CheckCircle2 size={14} />
+                  Confirmar Pagamento
+                </Button>
+              </div>
             </div>
-            <Select
-              label="Método de pagamento"
-              options={METODOS_PAGAMENTO.filter((m) =>
-                ["transferência", "mbway", "numerário", "cheque"].includes(m.value)
-              )}
-              value={metodo}
-              onChange={(e) => setMetodo(e.target.value)}
-            />
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setPagarModal(null)}>Cancelar</Button>
-              <Button
-                onClick={() => {
-                  onPagar(pagarModal.quotaId, metodo);
-                  setPagarModal(null);
-                }}
-                loading={pagarLoading}
-              >
-                <CheckCircle2 size={14} />
-                Confirmar Pagamento
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }
@@ -633,6 +661,7 @@ function SecaoExtras({
   pagas, nPagas, extraTipoFiltro, setExtraTipoFiltro, onNovaExtra,
   selecionadas, onPagar, onDesmarcar, onReassign, loading
 }: any) {
+  const isAdmin = useIsAdmin();
   const d = dashData;
 
   // Hardcoded extras do Excel
@@ -854,10 +883,12 @@ function SecaoExtras({
         <div className="rounded-xl border-2 border-dashed flex flex-col items-center justify-center py-8 gap-2" style={{ borderColor: "var(--border)" }}>
           <Plus size={20} style={{ color: "var(--text-muted)" }} />
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>Adicionar nova cota extra ao sistema</p>
-          <Button size="sm" variant="secondary" onClick={onNovaExtra}>
-            <Plus size={13} />
-            Nova Cota Extra
-          </Button>
+          {isAdmin && (
+            <Button size="sm" variant="secondary" onClick={onNovaExtra}>
+              <Plus size={13} />
+              Nova Cota Extra
+            </Button>
+          )}
         </div>
       )}
 
@@ -908,6 +939,7 @@ function SecaoExtras({
 
 // ─── Tabela de quotas (reutilizável) ─────────────────────────────────────────
 function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas, onPagar, onDesmarcar, onReassign, fracoesNaoCategorizadas }: any) {
+  const isAdmin = useIsAdmin();
   const naoCat: Set<string> = fracoesNaoCategorizadas ?? new Set();
 
   const estadoQuota = (q: any): { variant: "green" | "amber" | "red"; label: string } => {
@@ -985,24 +1017,26 @@ function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {!q.quota.pago ? (
-                      <button
-                        className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
-                        style={{ background: "var(--green-subtle)", color: "var(--green)" }}
-                        onClick={() => onPagar(q)}
-                      >
-                        <CheckCircle2 size={12} />
-                        Marcar pago
-                      </button>
-                    ) : (
-                      <button
-                        className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
-                        style={{ background: "var(--bg-elevated)", color: "var(--text-muted)" }}
-                        onClick={() => onDesmarcar(q.quota.id)}
-                      >
-                        <XCircle size={12} />
-                        Desmarcar
-                      </button>
+                    {isAdmin && (
+                      !q.quota.pago ? (
+                        <button
+                          className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
+                          style={{ background: "var(--green-subtle)", color: "var(--green)" }}
+                          onClick={() => onPagar(q)}
+                        >
+                          <CheckCircle2 size={12} />
+                          Marcar pago
+                        </button>
+                      ) : (
+                        <button
+                          className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:opacity-80 transition-opacity"
+                          style={{ background: "var(--bg-elevated)", color: "var(--text-muted)" }}
+                          onClick={() => onDesmarcar(q.quota.id)}
+                        >
+                          <XCircle size={12} />
+                          Desmarcar
+                        </button>
+                      )
                     )}
                     {tipo === "extra" && (
                       <button
@@ -1026,26 +1060,54 @@ function QuotasTable({ quotas, tipo, extrasByTipo, extraTipoFiltro, selecionadas
   );
 }
 
-// ─── Modal Nova Cota Extra ────────────────────────────────────────────────────
-function NovaExtraModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
+// ─── Modal Nova Cota Extra (2 passos: tipo + frações) ───────────────────────
+type FracaoExtraRow = {
+  id: string;
+  numero: string;
+  proprietarioNome?: string | null;
+};
+
+function NovaExtraModal({
+  open,
+  onClose,
+  onCreated,
+  fracoes,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void | Promise<void>;
+  fracoes: FracaoExtraRow[];
+}) {
   const agora = new Date();
+  const mesActual = agora.getMonth() + 1;
+  const anoActual = agora.getFullYear();
+
+  const [step, setStep] = useState<1 | 2>(1);
   const [nome, setNome] = useState("");
   const [descricao, setDescricao] = useState("");
   const [valorBase, setValorBase] = useState("");
   const [keywords, setKeywords] = useState("");
-  const [mes, setMes] = useState(agora.getMonth() + 1);
-  const [ano, setAno] = useState(agora.getFullYear());
   const [fracoesSel, setFracoesSel] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState("");
+  const [aviso, setAviso] = useState("");
 
-  const { data: fracoesData } = useQuery({
-    queryKey: ["fracoes-lista"],
-    queryFn: async () => (await fetch("/api/fracoes", { credentials: "include" })).json(),
-    enabled: open,
-  });
-  const fracoesList: Array<{ id: string; numero: string; proprietarioNome?: string }> =
-    (fracoesData?.fracoes ?? fracoesData ?? []) as any[];
+  const valorNum = parseFloat(valorBase);
+  const valorValido = Number.isFinite(valorNum) && valorNum > 0;
+  const passo1Ok = nome.trim().length > 0 && valorValido;
+
+  useEffect(() => {
+    if (!open) return;
+    setStep(1);
+    setNome("");
+    setDescricao("");
+    setValorBase("");
+    setKeywords("");
+    setFracoesSel(new Set());
+    setErro("");
+    setAviso("");
+    setLoading(false);
+  }, [open]);
 
   function toggleFracao(id: string) {
     setFracoesSel((prev) => {
@@ -1057,163 +1119,287 @@ function NovaExtraModal({ open, onClose, onCreated }: { open: boolean; onClose: 
   }
 
   function seleccionarTodas() {
-    setFracoesSel(new Set(fracoesList.map((f) => f.id)));
+    setFracoesSel(new Set(fracoes.map((f) => f.id)));
   }
 
   async function criar() {
-    if (!nome.trim()) { setErro("Nome obrigatório"); return; }
-    if (!valorBase || parseFloat(valorBase) <= 0) { setErro("Valor por fração obrigatório"); return; }
-    if (fracoesSel.size === 0) { setErro("Seleccione pelo menos uma fração"); return; }
+    if (!passo1Ok) {
+      setErro("Preencha o nome e um valor por fração válido");
+      setStep(1);
+      return;
+    }
+    if (fracoesSel.size === 0) {
+      setErro("Seleccione pelo menos uma fração");
+      return;
+    }
+
     setLoading(true);
     setErro("");
+    setAviso("");
+
+    let quotaTipoId: string | null = null;
+
     try {
-      const res = await fetch("/api/quotas/gerar-extra", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
+      const tipoRes = await api["quota-tipos"].$post({
+        json: {
           nome: nome.trim(),
+          tipo: "extra",
           descricao: descricao.trim() || null,
+          valorBase: valorNum,
           keywords: keywords.trim() || null,
-          valor: parseFloat(valorBase),
-          fracaoIds: Array.from(fracoesSel),
-          mes,
-          ano,
-        }),
+          ativo: true,
+        },
       });
-      if (!res.ok) {
-        const t = await res.json().catch(() => ({}));
-        throw new Error(t.error || await res.text());
+      if (!tipoRes.ok) {
+        const t = await tipoRes.json().catch(() => ({}));
+        throw new Error((t as { message?: string; error?: string }).message || (t as { error?: string }).error || await tipoRes.text());
       }
-      const data = await res.json();
-      setNome(""); setDescricao(""); setValorBase(""); setKeywords("");
-      setFracoesSel(new Set());
-      onCreated();
+      const tipo = await tipoRes.json() as { id: string };
+      quotaTipoId = tipo.id;
+
+      const quotasRes = await api.quotas["gerar-extra"].$post({
+        json: {
+          quotaTipoId,
+          fracaoIds: Array.from(fracoesSel),
+          valor: valorNum,
+          nome: nome.trim(),
+          mes: mesActual,
+          ano: anoActual,
+        },
+      });
+
+      if (!quotasRes.ok) {
+        const t = await quotasRes.json().catch(() => ({}));
+        throw new Error(
+          (t as { error?: string; message?: string }).error || (t as { message?: string }).message || await quotasRes.text(),
+        );
+      }
+
+      const data = await quotasRes.json() as { saltadas?: string[]; criadas?: number };
       if (data.saltadas?.length) {
-        console.info("Frações já tinham esta extra:", data.saltadas);
+        setAviso(`Tipo criado. ${data.criadas ?? 0} quota(s) novas; já existiam: ${data.saltadas.join(", ")}`);
       }
+      await onCreated();
     } catch (e: any) {
-      setErro(e.message);
+      if (quotaTipoId) {
+        setErro(
+          `O tipo de cota foi criado (id ${quotaTipoId.slice(0, 8)}…), mas falhou ao gerar as quotas por fração: ${e.message}`,
+        );
+      } else {
+        setErro(e.message || "Erro ao criar cota extra");
+      }
     } finally {
       setLoading(false);
     }
   }
 
+  const totalEuros = fracoesSel.size * (valorValido ? valorNum : 0);
+
   return (
     <Modal open={open} onClose={onClose} title="Nova Cota Extra" size="md">
       <div className="space-y-4">
-        <div
-          className="rounded-lg p-3 text-xs"
-          style={{ background: "var(--blue-subtle)", color: "var(--blue-bright)", border: "1px solid var(--blue-subtle)" }}
-        >
-          <strong>Como funciona:</strong> escolhe as frações afectadas e o valor por fração.
-          O sistema cria uma obrigação em aberto só para essas frações. Quando entra uma transferência,
-          a cascata aplica o valor às cotas em dívida (condomínio → extras → outras rubricas).
-        </div>
-
-        <Input
-          label="Nome da cota extra"
-          placeholder="ex: Campainhas 2026"
-          value={nome}
-          onChange={(e: any) => setNome(e.target.value)}
-        />
-
-        <Input
-          label="Descrição (opcional)"
-          placeholder="ex: Arranjo das campainhas — Junho 2026"
-          value={descricao}
-          onChange={(e: any) => setDescricao(e.target.value)}
-        />
-
-        <div className="grid grid-cols-2 gap-3">
-          <Input
-            label="Valor por fração (€)"
-            placeholder="ex: 47.50"
-            type="number"
-            value={valorBase}
-            onChange={(e: any) => setValorBase(e.target.value)}
-          />
-          <Input
-            label="Keywords (matching bancário)"
-            placeholder="ex: CAMPAINHA, CAMPAINHAS"
-            value={keywords}
-            onChange={(e: any) => setKeywords(e.target.value)}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <Select
-            label="Mês"
-            value={String(mes)}
-            onChange={(e: any) => setMes(parseInt(e.target.value))}
-            options={MESES}
-          />
-          <Select
-            label="Ano"
-            value={String(ano)}
-            onChange={(e: any) => setAno(parseInt(e.target.value))}
-            options={ANOS}
-          />
-        </div>
-
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
-              Frações afectadas ({fracoesSel.size})
-            </label>
-            <div className="flex gap-2">
-              <button type="button" className="text-xs underline" style={{ color: "var(--blue-bright)" }} onClick={seleccionarTodas}>
-                Todas
-              </button>
-              <button type="button" className="text-xs underline" style={{ color: "var(--text-muted)" }} onClick={() => setFracoesSel(new Set())}>
-                Limpar
-              </button>
-            </div>
-          </div>
-          <div
-            className="max-h-48 overflow-y-auto rounded-lg p-2 grid grid-cols-3 sm:grid-cols-4 gap-1"
-            style={{ border: "1px solid var(--border)", background: "var(--bg-elevated)" }}
+        {/* Stepper */}
+        <div className="flex items-center gap-2 text-xs">
+          <span
+            className="px-2 py-1 rounded font-medium"
+            style={{
+              background: step === 1 ? "var(--blue-subtle)" : "var(--bg-elevated)",
+              color: step === 1 ? "var(--blue-bright)" : "var(--text-muted)",
+            }}
           >
-            {fracoesList.map((f) => {
-              const on = fracoesSel.has(f.id);
-              return (
-                <button
-                  key={f.id}
-                  type="button"
-                  onClick={() => toggleFracao(f.id)}
-                  className="text-left text-xs px-2 py-1.5 rounded transition"
-                  style={{
-                    background: on ? "var(--blue-subtle)" : "transparent",
-                    color: on ? "var(--blue-bright)" : "var(--text-secondary)",
-                    border: on ? "1px solid var(--blue-bright)" : "1px solid transparent",
-                  }}
-                  title={f.proprietarioNome}
-                >
-                  {f.numero}
-                </button>
-              );
-            })}
-          </div>
-          {valorBase && fracoesSel.size > 0 && (
-            <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
-              Total: {fracoesSel.size} × €{parseFloat(valorBase || "0").toFixed(2)} ={" "}
-              <strong style={{ color: "var(--text-primary)" }}>
-                €{(fracoesSel.size * parseFloat(valorBase || "0")).toFixed(2)}
-              </strong>
-            </p>
-          )}
+            1 Definir
+          </span>
+          <ChevronRight size={14} style={{ color: "var(--text-muted)" }} />
+          <span
+            className="px-2 py-1 rounded font-medium"
+            style={{
+              background: step === 2 ? "var(--blue-subtle)" : "var(--bg-elevated)",
+              color: step === 2 ? "var(--blue-bright)" : "var(--text-muted)",
+            }}
+          >
+            2 Frações
+          </span>
         </div>
 
+        {step === 1 && (
+          <>
+            <div
+              className="rounded-lg p-3 text-xs"
+              style={{ background: "var(--blue-subtle)", color: "var(--blue-bright)", border: "1px solid var(--blue-subtle)" }}
+            >
+              Define o tipo de cota extra e o valor unitário. No passo seguinte escolhes quais frações ficam obrigadas a pagar.
+            </div>
+
+            <Input
+              label="Nome da cota extra *"
+              placeholder="ex: Campainhas 2026"
+              value={nome}
+              onChange={(e: any) => setNome(e.target.value)}
+            />
+
+            <Input
+              label="Descrição (opcional)"
+              placeholder="ex: Arranjo das campainhas — Junho 2026"
+              value={descricao}
+              onChange={(e: any) => setDescricao(e.target.value)}
+            />
+
+            <Input
+              label="Valor por fração (€) *"
+              placeholder="ex: 47.50"
+              type="number"
+              min="0"
+              step="0.01"
+              value={valorBase}
+              onChange={(e: any) => setValorBase(e.target.value)}
+            />
+
+            <Input
+              label="Keywords para matching bancário (opcional)"
+              placeholder="ex: CAMPAINHA, CAMPAINHAS"
+              value={keywords}
+              onChange={(e: any) => setKeywords(e.target.value)}
+            />
+            <p className="text-xs -mt-2" style={{ color: "var(--text-muted)" }}>
+              Separar por vírgula. Usadas para detetar transferências relacionadas.
+            </p>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
+                Frações activas
+              </label>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  className="text-xs underline"
+                  style={{ color: "var(--blue-bright)" }}
+                  onClick={seleccionarTodas}
+                >
+                  Seleccionar todas
+                </button>
+                <button
+                  type="button"
+                  className="text-xs underline"
+                  style={{ color: "var(--text-muted)" }}
+                  onClick={() => setFracoesSel(new Set())}
+                >
+                  Limpar selecção
+                </button>
+              </div>
+            </div>
+
+            <div
+              className="max-h-56 overflow-y-auto rounded-lg divide-y"
+              style={{ border: "1px solid var(--border)", background: "var(--bg-elevated)" }}
+            >
+              {fracoes.length === 0 ? (
+                <p className="text-xs p-4" style={{ color: "var(--text-muted)" }}>
+                  A carregar frações…
+                </p>
+              ) : (
+                fracoes.map((f) => {
+                  const checked = fracoesSel.has(f.id);
+                  return (
+                    <label
+                      key={f.id}
+                      className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:opacity-90"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleFracao(f.id)}
+                        className="rounded"
+                      />
+                      <span
+                        className="inline-flex items-center justify-center min-w-[2rem] h-7 px-1 rounded text-xs font-bold shrink-0"
+                        style={{ background: "var(--blue-subtle)", color: "var(--blue-bright)" }}
+                      >
+                        {f.numero}
+                      </span>
+                      <span className="text-sm truncate" style={{ color: "var(--text-primary)" }}>
+                        {f.proprietarioNome || "—"}
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+
+            <div
+              className="rounded-lg px-3 py-2 text-sm"
+              style={{ background: "var(--bg-surface)", border: "1px solid var(--border)" }}
+            >
+              <span style={{ color: "var(--text-muted)" }}>
+                {fracoesSel.size === 1
+                  ? "1 fração seleccionada"
+                  : `${fracoesSel.size} frações seleccionadas`}
+                {" · "}
+              </span>
+              <span className="font-mono font-semibold" style={{ color: "var(--text-primary)" }}>
+                Total: {formatEuro(totalEuros)}
+              </span>
+              {valorValido && fracoesSel.size > 0 && (
+                <span className="text-xs ml-1" style={{ color: "var(--text-muted)" }}>
+                  ({fracoesSel.size} × {formatEuro(valorNum)})
+                </span>
+              )}
+            </div>
+          </>
+        )}
+
+        {aviso && (
+          <p className="text-xs rounded-lg p-2" style={{ background: "var(--amber-subtle, var(--bg-elevated))", color: "var(--amber, var(--text-secondary))" }}>
+            {aviso}
+          </p>
+        )}
         {erro && (
           <p className="text-xs" style={{ color: "var(--red)" }}>{erro}</p>
         )}
 
-        <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={onClose}>Cancelar</Button>
-          <Button onClick={criar} loading={loading}>
-            <Plus size={14} />
-            Criar para {fracoesSel.size || "…"} frações
-          </Button>
+        <div className="flex justify-between gap-2 pt-1">
+          <div>
+            {step === 2 && (
+              <Button variant="secondary" onClick={() => setStep(1)} disabled={loading}>
+                <ChevronLeft size={14} />
+                Anterior
+              </Button>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={onClose} disabled={loading}>
+              Cancelar
+            </Button>
+            {step === 1 ? (
+              <Button
+                onClick={() => {
+                  if (!passo1Ok) {
+                    setErro("Nome e valor por fração são obrigatórios");
+                    return;
+                  }
+                  setErro("");
+                  setStep(2);
+                }}
+                disabled={!passo1Ok}
+              >
+                Seguinte
+                <ChevronRight size={14} />
+              </Button>
+            ) : (
+              <Button
+                onClick={criar}
+                loading={loading}
+                disabled={loading || fracoesSel.size === 0 || !valorValido}
+              >
+                <Plus size={14} />
+                Criar cota extra
+              </Button>
+            )}
+          </div>
         </div>
       </div>
     </Modal>

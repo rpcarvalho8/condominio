@@ -24,6 +24,10 @@ const DEFAULTS: Record<string, string> = {
   saldo_portao:          "0",
   a_receber_portao:      "593.27",  // 707.25 - 59.66(base) - 25.35(AI) - 28.97(AH)
   portao_pago:           "113.98",  // 59.66 + 25.35 + 28.97
+  // Atas de assembleia — janela de votação e threshold mínimo
+  atas_aprovacao_window_minutes: "30",
+  // Threshold mínimo (% sobre permilagem total) para "aprovada"
+  atas_aprovacao_threshold_percent: "50",
 };
 
 export const configuracoesRoutes = new Hono()

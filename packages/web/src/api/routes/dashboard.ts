@@ -21,6 +21,7 @@ import {
   TOTAL_FRACOES,
   MATRIZ_PROPRIEDADES,
 } from "../lib/identity-matrix";
+import { extractCounterpartyIban } from "../lib/iban";
 import {
   CARTAS_JULHO_2026,
   getCartaFracao,
@@ -502,7 +503,7 @@ export async function recalcularSaldos(): Promise<void> {
         try {
           if (mov.rawData) {
             const raw = JSON.parse(mov.rawData);
-            ibanDestino = raw.creditor?.account?.iban ?? raw.creditorIban ?? null;
+            ibanDestino = extractCounterpartyIban(raw, { credit: false });
           }
         } catch {}
         const ibanNorm = (ibanDestino ?? "").replace(/\s/g, "").toUpperCase();

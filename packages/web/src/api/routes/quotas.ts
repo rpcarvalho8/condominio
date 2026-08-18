@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { db } from "../database";
 import * as schema from "../database/schema";
 import { eq, and } from "drizzle-orm";
+import { requireAdmin } from "../middleware/auth";
 
 export const quotas = new Hono()
   .get("/", async (c) => {
@@ -35,7 +36,7 @@ export const quotas = new Hono()
     const [quota] = await db.insert(schema.quotas).values(body).returning();
     return c.json({ quota }, 201);
   })
-  .post("/gerar-mensal", async (c) => {
+  .post("/gerar-mensal", requireAdmin, async (c) => {
     // Gera quotas para todas as frações ativas para um dado mês/ano
     const { mes, ano } = await c.req.json();
     const fracoesList = await db.select().from(schema.fracoes).where(eq(schema.fracoes.ativo, true));
@@ -59,7 +60,7 @@ export const quotas = new Hono()
     return c.json({ criadas: novasQuotas.length, quotas: novasQuotas }, 201);
   })
   /** Gera cota extra só para as frações indicadas (ex.: campainhas). */
-  .post("/gerar-extra", async (c) => {
+  .post("/gerar-extra", requireAdmin, async (c) => {
     const body = await c.req.json();
     const {
       fracaoIds,
@@ -159,7 +160,7 @@ export const quotas = new Hono()
       quotas: criadas,
     }, 201);
   })
-  .patch("/:id/pagar", async (c) => {
+  .patch("/:id/pagar", requireAdmin, async (c) => {
     const id = c.req.param("id");
     const { metodoPagamento, observacoes } = await c.req.json();
     const [quota] = await db.update(schema.quotas).set({
@@ -179,7 +180,7 @@ export const quotas = new Hono()
     const [quota] = await db.update(schema.quotas).set(updateData).where(eq(schema.quotas.id, id)).returning();
     return c.json({ quota }, 200);
   })
-  .patch("/:id/desmarcar", async (c) => {
+  .patch("/:id/desmarcar", requireAdmin, async (c) => {
     const id = c.req.param("id");
     const [quota] = await db.update(schema.quotas).set({
       pago: false,
@@ -188,7 +189,7 @@ export const quotas = new Hono()
     }).where(eq(schema.quotas.id, id)).returning();
     return c.json({ quota }, 200);
   })
-  .delete("/:id", async (c) => {
+  .delete("/:id", requireAdmin, async (c) => {
     const id = c.req.param("id");
     await db.delete(schema.quotas).where(eq(schema.quotas.id, id));
     return c.json({ success: true }, 200);

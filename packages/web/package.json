@@ -23,7 +23,9 @@
     "reconcile:passo2": "bun --env-file=../../.env run scripts/reconcile-passo2-aliases-rateio.ts",
     "seed:gdpr-config": "bun --env-file=../../.env run src/api/database/seed-gdpr-config.ts",
     "seed:ancora": "bun --env-file=../../.env run src/api/database/seed-ancora.ts",
-    "smoke:db": "bun --env-file=../../.env run scripts/smoke-db-check.ts"
+    "smoke:db": "bun --env-file=../../.env run scripts/smoke-db-check.ts",
+    "postinstall": "bun scripts/ensure-puppeteer-chrome.ts",
+    "pdf:install-browser": "bun scripts/ensure-puppeteer-chrome.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.2",
@@ -36,7 +38,7 @@
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.10",
     "lucide-react": "^0.577.0",
-    "puppeteer-core": "^25.0.4",
+    "puppeteer": "^25.0.4",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-hook-form": "^7.71.2",

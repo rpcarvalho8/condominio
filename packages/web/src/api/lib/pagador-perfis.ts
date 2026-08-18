@@ -14,6 +14,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../database";
 import { pagadorPerfis, fracoes } from "../database/schema";
+import { normalizeIBAN } from "./iban";
 
 const VALOR_TOL = 0.02;
 
@@ -38,10 +39,6 @@ export interface LearnPagadorInput {
   fracaoNumero: string;
   rubrica?: RubricaPerfil;
   fonte: "manual" | "auto";
-}
-
-function normalizeIBAN(iban: string): string {
-  return iban.replace(/\s+/g, "").toUpperCase();
 }
 
 /** Mesma normalização que identity-matrix (sem import circular). */

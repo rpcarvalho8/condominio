@@ -19,6 +19,7 @@ export default defineConfig(({ mode }) => {
 			},
 		},
 		server: {
+			host: true, // 0.0.0.0 — acessível na LAN (iPad / telemóvel)
 			port: 4200,
 			allowedHosts: true,
 			hmr: { overlay: false, },

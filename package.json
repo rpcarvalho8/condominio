@@ -6,6 +6,7 @@
     "packages/*"
   ],
   "scripts": {
+    "postinstall": "bun --cwd packages/web scripts/ensure-puppeteer-chrome.ts",
     "dev": "cd packages/web && bun --env-file=../../.env x vite",
     "build": "turbo build",
     "typecheck": "turbo typecheck",

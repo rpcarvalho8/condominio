@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { PageHeader } from "../components/Layout";
 import { Plus, Trash2, Edit2, X, Check } from "lucide-react";
+import { useIsAdmin } from "../lib/auth";
 
 type QuotaTipo = {
   id: string;
   nome: string;
   tipo: string;
   descricao: string | null;
+  keywords: string | null;
   valorBase: number | null;
   ativo: boolean;
   dataInicio: string | null;
@@ -30,15 +32,17 @@ const TIPO_COLORS: Record<string, string> = {
   fundo_reserva: "bg-green-500/20 text-green-300",
 };
 
-const emptyForm = { nome: "", tipo: "condominio", descricao: "", valorBase: "", ativo: true, dataInicio: "", dataFim: "" };
+const emptyForm = { nome: "", tipo: "condominio", descricao: "", keywords: "", valorBase: "", ativo: true, dataInicio: "", dataFim: "" };
 
 export default function QuotaTiposPage() {
+  const isAdmin = useIsAdmin();
   const [tipos, setTipos] = useState<QuotaTipo[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editTipo, setEditTipo] = useState<QuotaTipo | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [erro, setErro] = useState("");
 
   useEffect(() => { loadData(); }, []);
 
@@ -51,6 +55,7 @@ export default function QuotaTiposPage() {
   function openCreate() {
     setForm(emptyForm);
     setEditTipo(null);
+    setErro("");
     setShowModal(true);
   }
 
@@ -59,21 +64,25 @@ export default function QuotaTiposPage() {
       nome: t.nome,
       tipo: t.tipo,
       descricao: t.descricao ?? "",
+      keywords: t.keywords ?? "",
       valorBase: t.valorBase?.toString() ?? "",
       ativo: t.ativo,
       dataInicio: t.dataInicio ? new Date(t.dataInicio).toISOString().split("T")[0] : "",
       dataFim: t.dataFim ? new Date(t.dataFim).toISOString().split("T")[0] : "",
     });
     setEditTipo(t);
+    setErro("");
     setShowModal(true);
   }
 
   async function handleSave() {
     setSaving(true);
+    setErro("");
     const payload = {
       nome: form.nome,
       tipo: form.tipo,
       descricao: form.descricao || null,
+      keywords: form.keywords?.trim() || null,
       valorBase: form.valorBase ? parseFloat(form.valorBase) : null,
       ativo: form.ativo,
       dataInicio: form.dataInicio || null,
@@ -81,7 +90,19 @@ export default function QuotaTiposPage() {
     };
     const url = editTipo ? `/api/quota-tipos/${editTipo.id}` : "/api/quota-tipos";
     const method = editTipo ? "PUT" : "POST";
-    await fetch(url, { method, headers: headers(), body: JSON.stringify(payload) });
+    const res = await fetch(url, { method, headers: headers(), body: JSON.stringify(payload) });
+    if (!res.ok) {
+      let msg = "";
+      try {
+        const body = await res.json();
+        msg = body.message || body.error || JSON.stringify(body);
+      } catch {
+        msg = await res.text();
+      }
+      setErro(`Erro ${res.status}: ${msg || res.statusText}`);
+      setSaving(false);
+      return;
+    }
     setShowModal(false);
     setSaving(false);
     await loadData();
@@ -99,12 +120,12 @@ export default function QuotaTiposPage() {
         title="Tipos de Quota"
         subtitle="Gestão das categorias de quota"
         breadcrumb={["Administração", "Tipos de Quota"]}
-        actions={
+        actions={isAdmin ? (
           <button onClick={openCreate} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition"
             style={{ background: "var(--blue-primary)" }}>
             <Plus size={16} /> Novo Tipo
           </button>
-        }
+        ) : undefined}
       />
 
       <div className="p-6">
@@ -147,14 +168,16 @@ export default function QuotaTiposPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => openEdit(t)} className="p-1.5 rounded hover:opacity-70 transition" style={{ color: "var(--text-muted)" }}>
-                      <Edit2 size={14} />
-                    </button>
-                    <button onClick={() => handleDelete(t.id)} className="p-1.5 rounded hover:opacity-70 transition text-red-400">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
+                  {isAdmin && (
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => openEdit(t)} className="p-1.5 rounded hover:opacity-70 transition" style={{ color: "var(--text-muted)" }}>
+                        <Edit2 size={14} />
+                      </button>
+                      <button onClick={() => handleDelete(t.id)} className="p-1.5 rounded hover:opacity-70 transition text-red-400">
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -203,6 +226,17 @@ export default function QuotaTiposPage() {
                   className="w-full rounded-lg px-3 py-2 text-sm border"
                   style={{ background: "var(--bg-elevated)", borderColor: "var(--border)", color: "var(--text-primary)" }} />
               </div>
+              <div>
+                <label className="text-xs font-medium mb-1 block" style={{ color: "var(--text-muted)" }}>Keywords para matching bancário</label>
+                <input
+                  value={form.keywords}
+                  onChange={e => setForm(f => ({ ...f, keywords: e.target.value }))}
+                  placeholder="ex: CAMPAINHAS, CAMPAINHA 2026"
+                  className="w-full rounded-lg px-3 py-2 text-sm border"
+                  style={{ background: "var(--bg-elevated)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+                />
+                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Separar por vírgula</p>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-medium mb-1 block" style={{ color: "var(--text-muted)" }}>Data início</label>
@@ -222,6 +256,12 @@ export default function QuotaTiposPage() {
                 Ativo
               </label>
             </div>
+
+            {erro && (
+              <p className="text-xs rounded-lg px-3 py-2" style={{ background: "var(--red-subtle)", color: "var(--red)" }}>
+                {erro}
+              </p>
+            )}
 
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setShowModal(false)} className="px-4 py-2 rounded-lg text-sm border transition"

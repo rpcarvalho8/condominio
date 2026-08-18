@@ -49,6 +49,8 @@ NODE_ENV=development
 WEBSITE_URL=http://localhost:4200
 # Com ngrok (Enable Banking callback HTTPS):
 # WEBSITE_URL=https://xxxx.ngrok-free.dev
+# Com cloudflared (gravação iPad / HTTPS):
+# WEBSITE_URL=https://xxxx.trycloudflare.com
 
 # Auth
 BETTER_AUTH_SECRET=...
@@ -162,7 +164,42 @@ bun install
 bun run dev                   # API + frontend, porta 4200
 ```
 
-## 8. Próximos passos
+`bun install` instala também o Chromium do Puppeteer (útil para testes automatizados; **não** é necessário para gravar no iPad).
+
+## 8. Testar gravação de reunião no iPad (Safari)
+
+Cenário: o portátil fica em casa no Wi-Fi; só o iPad vai para a reunião (hotspot/4G). A gravação de microfone no Safari iOS **exige HTTPS**.
+
+O mesmo `WEBSITE_URL` HTTPS da secção 4 (ngrok) serve. Em alternativa, sem conta: **cloudflared**.
+
+### Passos (cloudflared)
+
+1. Em casa, terminal 1 (raiz do repositório):
+
+```bash
+bun run dev
+```
+
+2. Terminal 2:
+
+```bash
+cloudflared tunnel --url http://localhost:4200
+# se não estiver no PATH: /home/rui/bin/cloudflared tunnel --url http://localhost:4200
+```
+
+Copiar o URL `https://….trycloudflare.com`.
+
+3. Definir `WEBSITE_URL` no `.env` com esse URL HTTPS e **reiniciar** `bun run dev`.
+
+4. No Safari do iPad, abrir o mesmo URL HTTPS. Login → **Atas** ou **Reuniões** → **Gravar áudio** → autorizar o microfone.
+
+### Notas
+
+- O URL do túnel muda a cada sessão → actualizar `WEBSITE_URL` e reiniciar o `bun run dev`.
+- O portátil tem de permanecer acordado; se dormir ou o túnel cair, o iPad deixa de funcionar.
+- Sem túnel: HTTP na LAN permite navegar, mas o microfone falha; em alternativa, gravar um memo de voz e carregar o ficheiro.
+
+## 9. Próximos passos
 
 - [x] Migrar frações/âncoras para BD; limpar PII do código tracked
 - [x] Remover `.pem` do tip (+ purge histórico; force-push coordenado se ainda pendente)

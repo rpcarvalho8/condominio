@@ -15,6 +15,7 @@ import { db } from "../database";
 import { rateioCampanhas, rateioPagamentos, fracoes } from "../database/schema";
 import { getFracaoByIBAN, learnIBAN, learnAlias } from "./identity-matrix";
 import { learnPagadorPerfil, lookupPagadorPerfil } from "./pagador-perfis";
+import { normalizeIBAN } from "./iban";
 
 const VALOR_TOL = 0.05;
 
@@ -218,7 +219,7 @@ export async function resolverFracaoRateio(input: {
   const extractedName = extractPayerFromDescription(input.descricao);
   const effectiveName = (input.debtorName?.trim() || extractedName || "").trim() || null;
   const blob = normDesc(`${effectiveName ?? ""} ${input.descricao ?? ""}`);
-  const ibanNorm = input.iban ? input.iban.replace(/\s+/g, "").toUpperCase() : null;
+  const ibanNorm = normalizeIBAN(input.iban);
 
   type Cand = { id: string; numero: string; score: number; criterios: string[]; ibans: string[] };
   const scored: Cand[] = [];
@@ -226,7 +227,9 @@ export async function resolverFracaoRateio(input: {
   const parseIbans = (raw: string | null): string[] => {
     try {
       const p = JSON.parse(raw ?? "[]");
-      if (Array.isArray(p)) return p.map((i) => String(i).replace(/\s+/g, "").toUpperCase());
+      if (Array.isArray(p)) {
+        return p.map((i) => normalizeIBAN(String(i))).filter((i): i is string => !!i);
+      }
     } catch { /* */ }
     return [];
   };

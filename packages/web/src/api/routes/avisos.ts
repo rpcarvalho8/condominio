@@ -18,7 +18,7 @@ import { eq, and } from "drizzle-orm";
 import fs from "node:fs";
 import path from "node:path";
 import { exec } from "node:child_process";
-import puppeteer from "puppeteer-core";
+import { htmlToPdf } from "../lib/html-to-pdf";
 
 // ─── Devedores Extra — fonte BD (`configuracoes`); seed: seed-gdpr-config.ts ─
 
@@ -314,21 +314,6 @@ function buildAvisoHtml(data: {
   <div class="pagina">Página 1 / 1</div>
 </body>
 </html>`;
-}
-
-async function htmlToPdf(html: string, outPath: string): Promise<void> {
-  const browser = await puppeteer.launch({
-    executablePath: "/usr/bin/google-chrome-stable",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    headless: true,
-  });
-  try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle0" });
-    await page.pdf({ path: outPath, format: "A4", printBackground: true });
-  } finally {
-    await browser.close();
-  }
 }
 
 async function sendAvisoEmail(params: {

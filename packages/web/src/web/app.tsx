@@ -16,6 +16,8 @@ import QuotaTiposPage from "./pages/quota-tipos";
 import ImportarPage from "./pages/importar";
 import RelatoriosPage from "./pages/relatorios";
 import MovimentosBancariosPage from "./pages/movimentos-bancarios";
+import AtasPage from "./pages/atas";
+import ReunioesPage from "./pages/reunioes";
 
 export default function App() {
   return (
@@ -43,11 +45,17 @@ export default function App() {
               <Route path="/fornecedores" component={FornecedoresPage} />
               <Route path="/recibos" component={RecibosPage} />
               <Route path="/definicoes" component={DefinicoesPage} />
-              <Route path="/utilizadores" component={UtilizadoresPage} />
+              <Route path="/utilizadores">
+                <ProtectedRoute adminOnly>
+                  <UtilizadoresPage />
+                </ProtectedRoute>
+              </Route>
               <Route path="/quota-tipos" component={QuotaTiposPage} />
               <Route path="/importar" component={ImportarPage} />
               <Route path="/relatorios" component={RelatoriosPage} />
               <Route path="/movimentos-bancarios" component={MovimentosBancariosPage} />
+              <Route path="/atas" component={AtasPage} />
+              <Route path="/reunioes" component={ReunioesPage} />
             </Switch>
           </Layout>
         </ProtectedRoute>

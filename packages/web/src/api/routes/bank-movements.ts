@@ -21,8 +21,9 @@ import * as schema from "../database/schema";
 import { bankTransactions, quotas, fracoes } from "../database/schema";
 import { eq, desc, and, inArray } from "drizzle-orm";
 import { recalcularSaldos } from "./dashboard";
-import { learnIBAN, loadMatrizFromDB, learnAlias } from "../lib/identity-matrix";
+import { learnIBAN, loadMatrizFromDB, learnAlias, getFracaoById } from "../lib/identity-matrix";
 import { learnPagadorPerfil, rubricaFromClassificacao } from "../lib/pagador-perfis";
+import { aplicarMatchTransferencia, loadQuotaTiposExtras, matchTransferencia, signalsFromBankTransaction } from "../lib/transfer-match";
 
 // Classificações mapeadas ao domínio real do condomínio
 const VALID_CLASSIFICATIONS = [
@@ -267,9 +268,54 @@ export const bankMovementsRoutes = new Hono()
           const txDate = txn.date instanceof Date
             ? txn.date
             : new Date((txn.date as unknown as number) * 1000);
+          const valor = Math.abs(txn.amount ?? 0);
+
+          await loadMatrizFromDB();
+          await loadQuotaTiposExtras();
+          const ident = getFracaoById(fracaoMatch.numero);
+          const signals = signalsFromBankTransaction(txn);
+          if (signals.ibanSender && !txn.debtorIban) {
+            await db
+              .update(bankTransactions)
+              .set({ debtorIban: signals.ibanSender })
+              .where(eq(bankTransactions.id, id));
+          }
+          if (ident) {
+            const match = await matchTransferencia({
+              descricao: signals.descricao,
+              amount: valor,
+              ibanSender: signals.ibanSender,
+              debtorName: signals.debtorName ?? body.debtorName,
+              identityOverride: ident,
+            });
+            const applied = await aplicarMatchTransferencia({
+              txnId: id,
+              description: signals.descricao,
+              amount: valor,
+              date: txDate,
+              ibanSender: signals.ibanSender,
+              debtorName: signals.debtorName ?? body.debtorName,
+              match,
+              observacoesPrefix: `[manual:${classificacao}]`,
+            });
+            if (applied.applied) {
+              quotaCriada = true;
+              quotaId = applied.quotaId ?? null;
+              if (applied.fracao) fracaoAtribuida = applied.fracao;
+              await recalcularSaldos();
+              return c.json({
+                ok: true,
+                id,
+                importType: classificacao,
+                fracaoNumero: fracaoAtribuida,
+                quotaCriada,
+                quotaId,
+              });
+            }
+          }
+
           const mes = txDate.getMonth() + 1;
           const ano = txDate.getFullYear();
-          const valor = Math.abs(txn.amount ?? 0);
 
           const existing = await db
             .select({ id: quotas.id })
@@ -320,21 +366,21 @@ export const bankMovementsRoutes = new Hono()
               .where(eq(bankTransactions.id, id));
             quotaCriada = true;
 
-            if (txn.debtorIban) {
-              await learnIBAN(fracaoMatch.numero, txn.debtorIban);
+            if (signals.ibanSender) {
+              await learnIBAN(fracaoMatch.numero, signals.ibanSender);
               await loadMatrizFromDB();
             }
 
             // Alias: se o nome bancário ≠ proprietário, aprender como nome alternativo
-            const nomeBanco = txn.debtorName ?? body.debtorName;
+            const nomeBanco = signals.debtorName ?? body.debtorName;
             if (nomeBanco) {
               await learnAlias(fracaoMatch.numero, nomeBanco);
             }
 
             // Aprender perfil pagador (IBAN/nome + valor → fração) para syncs futuros
             await learnPagadorPerfil({
-              iban: txn.debtorIban,
-              debtorName: txn.debtorName ?? body.debtorName,
+              iban: signals.ibanSender,
+              debtorName: signals.debtorName ?? body.debtorName,
               valor,
               fracaoId: fracaoMatch.id,
               fracaoNumero: fracaoMatch.numero,

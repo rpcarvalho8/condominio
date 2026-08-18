@@ -16,9 +16,10 @@ import {
   Home,
   FileText,
   Landmark,
+  Mic,
 } from "lucide-react";
 import { cn } from "../lib/utils";
-import { authClient, clearToken, getToken } from "../lib/auth";
+import { authClient, clearToken, getToken, useIsAdmin } from "../lib/auth";
 import { useQuery } from "@tanstack/react-query";
 
 const NAV_ITEMS = [
@@ -34,6 +35,8 @@ const NAV_ITEMS = [
 ];
 
 const ADMIN_ITEMS = [
+  { href: "/atas", label: "Atas", icon: FileText },
+  { href: "/reunioes", label: "Reuniões", icon: Mic },
   { href: "/utilizadores", label: "Utilizadores", icon: UserCog },
   { href: "/quota-tipos", label: "Tipos de Quota", icon: Tag },
   { href: "/importar", label: "Importar Dados", icon: DatabaseZap },
@@ -43,6 +46,7 @@ const ADMIN_ITEMS = [
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location, navigate] = useLocation();
   const { data: session } = authClient.useSession();
+  const isAdmin = useIsAdmin();
 
   const { data: morososData } = useQuery<{ count: number }>({
     queryKey: ["morosos-count"],
@@ -153,7 +157,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               Administração
             </span>
           </div>
-          {ADMIN_ITEMS.map(({ href, label, icon: Icon }) => {
+          {ADMIN_ITEMS.filter(({ href }) => href !== "/utilizadores" || isAdmin).map(({ href, label, icon: Icon }) => {
             const active = location.startsWith(href);
             return (
               <Link key={href} href={href}>

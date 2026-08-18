@@ -17,8 +17,8 @@ import { eq, and, desc } from "drizzle-orm";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import puppeteer from "puppeteer-core";
 import { exec } from "node:child_process";
+import { htmlToPdf } from "../lib/html-to-pdf";
 
 // ─── Logo base64 (embedded for PDF generation) ──────────────────────────────
 const LOGO_PATH = path.join(process.cwd(), "public", "logo_condominio.png");
@@ -406,26 +406,6 @@ async function enviarReciboEmail(params: {
       else resolve();
     });
   });
-}
-
-// ─── Generate PDF via Puppeteer ───────────────────────────────────────────────
-async function htmlToPdf(html: string, outPath: string): Promise<void> {
-  const browser = await puppeteer.launch({
-    executablePath: "/usr/bin/google-chrome-stable",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    headless: true,
-  });
-  try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle0" });
-    await page.pdf({
-      path: outPath,
-      format: "A4",
-      printBackground: true,
-    });
-  } finally {
-    await browser.close();
-  }
 }
 
 // ─── Core: gerar recibos para mês/ano ────────────────────────────────────────

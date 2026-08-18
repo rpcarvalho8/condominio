@@ -1,4 +1,5 @@
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { user } from "./auth-schema";
 
 export * from "./auth-schema";
 
@@ -24,6 +25,8 @@ export const fracoes = sqliteTable("fracoes", {
   incendioDivida: real("incendio_divida").default(0),
   indaquaDivida: real("indaqua_divida").default(0),
   motorDivida: real("motor_divida").default(0),
+  iban: text("iban"),
+  ibanSecundario: text("iban_secundario"),
   ativo: integer("ativo", { mode: "boolean" }).default(true),
   notas: text("notas"),
   createdAt: integer("created_at", { mode: "timestamp" })
@@ -41,6 +44,8 @@ export const fornecedores = sqliteTable("fornecedores", {
   telefone: text("telefone"),
   website: text("website"),
   avaliacao: real("avaliacao"),               // 1.0 a 5.0
+  iban: text("iban"),
+  ibanSecundario: text("iban_secundario"),
   ativo: integer("ativo", { mode: "boolean" }).default(true),
   notas: text("notas"),
   createdAt: integer("created_at", { mode: "timestamp" })
@@ -79,6 +84,7 @@ export const quotas = sqliteTable("quotas", {
   dataPagamento: integer("data_pagamento", { mode: "timestamp" }),
   metodoPagamento: text("metodo_pagamento"),  // "transferência", "mbway", "numerário", "cheque"
   observacoes: text("observacoes"),
+  dataVencimento: integer("data_vencimento", { mode: "timestamp" }),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -276,4 +282,186 @@ export const rateioPagamentos = sqliteTable("rateio_pagamentos", {
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
+});
+
+// --- NOTAS DE REUNIÃO (internas, admin only) ---
+export const reunioes = sqliteTable("reunioes", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  titulo: text("titulo").notNull(),
+  data: integer("data", { mode: "timestamp" }).notNull(),
+  participantes: text("participantes"),
+  transcricao: text("transcricao"),
+  resumo: text("resumo"),
+  audioPath: text("audio_path"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- ATAS DE ASSEMBLEIA ---
+export const atas = sqliteTable("atas", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  titulo: text("titulo").notNull(),
+  dataReuniao: integer("data_reuniao", { mode: "timestamp" }).notNull(),
+  status: text("status").notNull().default("rascunho"), // "rascunho" | "em_revisao" | "pdf_definitiva" | "aguardando_votos" | "aprovada" | "rejeitada"
+  transcricaoRaw: text("transcricao_raw").notNull(),
+  ataTexto: text("ata_texto").notNull(),
+  resumoDeliberacoes: text("resumo_deliberacoes"),
+  // O áudio só deve ser disponibilizado ao portal dentro da janela de votação,
+  // para depois ser removido (limpeza).
+  audioPath: text("audio_path"), // nullable (após cleanup)
+  audioAvailableUntil: integer("audio_available_until", { mode: "timestamp" }),
+  pdfUrl: text("pdf_url"),
+  pdfFinalizedAt: integer("pdf_finalized_at", { mode: "timestamp" }),
+  approvalDeadlineAt: integer("approval_deadline_at", { mode: "timestamp" }),
+  approvedAt: integer("approved_at", { mode: "timestamp" }),
+  rejectedAt: integer("rejected_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- VOTOS DAS ATAS (condenominos) ---
+export const ataVotes = sqliteTable("ata_votes", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  ataId: text("ata_id")
+    .notNull()
+    .references(() => atas.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  vote: text("vote").notNull(), // "approve" | "reject"
+  votedAt: integer("voted_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- AVISOS ---
+export const avisos = sqliteTable("avisos", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  titulo: text("titulo").notNull(),
+  conteudo: text("conteudo").notNull(),
+  tipo: text("tipo").default("geral"),
+  destinatarios: text("destinatarios").default("todos"),
+  enviado: integer("enviado").default(0),
+  dataEnvio: integer("data_envio", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- DOCUMENTOS ---
+export const documentos = sqliteTable("documentos", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  nome: text("nome").notNull(),
+  tipo: text("tipo"),
+  url: text("url").notNull(),
+  tamanho: integer("tamanho"),
+  descricao: text("descricao"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- AVISOS ENVIADOS (legado Turso — colunas reais, não ligadas a `avisos`) ---
+export const avisosEnviados = sqliteTable("avisos_enviados", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  fracao: text("fracao").notNull(),
+  proprietario: text("proprietario").notNull(),
+  email: text("email").notNull(),
+  assunto: text("assunto").notNull(),
+  valorTotal: real("valor_total").notNull(),
+  dividaCondominio: real("divida_condominio").default(0),
+  dividaFundoReserva: real("divida_fundo_reserva").default(0),
+  dividaMotorGaragem: real("divida_motor_garagem").default(0),
+  dividaObras: real("divida_obras").default(0),
+  dividaOutros: real("divida_outros").default(0),
+  htmlBody: text("html_body"),
+  enviadoEm: text("enviado_em").notNull(),
+  estado: text("estado").notNull().default("enviado"),
+  resendMessageId: text("resend_message_id"),
+  erroMsg: text("erro_msg"),
+});
+
+// --- RECONCILIATION RULES (legado Turso) ---
+export const reconciliationRules = sqliteTable("reconciliation_rules", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  triggerType: text("trigger_type").notNull(),
+  triggerValue: text("trigger_value").notNull(),
+  fracaoId: text("fracao_id"),
+  categoria: text("categoria").notNull(),
+  weight: integer("weight").notNull().default(1),
+  usedCount: integer("used_count").notNull().default(1),
+  createdAt: integer("created_at"),
+  updatedAt: integer("updated_at"),
+});
+
+// --- BANK MOVEMENTS (legado Turso — distinto de bank_transactions) ---
+export const bankMovements = sqliteTable("bank_movements", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  conta: text("conta").notNull().default("condominio"),
+  externalId: text("external_id"),
+  dataOperacao: text("data_operacao").notNull(),
+  dataValor: text("data_valor"),
+  descritivo: text("descritivo").notNull(),
+  montante: real("montante").notNull(),
+  saldo: real("saldo"),
+  tipo: text("tipo"),
+  nomeOrdenante: text("nome_ordenante"),
+  ibanOrigem: text("iban_origem"),
+  referencia: text("referencia"),
+  pdfPath: text("pdf_path"),
+  pdfText: text("pdf_text"),
+  pdfNomePagador: text("pdf_nome_pagador"),
+  pdfIbanPagador: text("pdf_iban_pagador"),
+  pdfReferencia: text("pdf_referencia"),
+  fracaoId: text("fracao_id"),
+  categoria: text("categoria"),
+  subcategoria: text("subcategoria"),
+  confidence: integer("confidence").default(0),
+  confidenceLevel: text("confidence_level"),
+  categoriaSource: text("categoria_source"),
+  notaCategorizacao: text("nota_categorizacao"),
+  allocations: text("allocations"),
+  status: text("status").notNull().default("pendente"),
+  manualOverride: integer("manual_override").default(false),
+  confirmedBy: text("confirmed_by"),
+  confirmedAt: integer("confirmed_at"),
+  createdAt: integer("created_at"),
+  updatedAt: integer("updated_at"),
+});
+
+// --- IMPUTAÇÃO AUDIT LOG (legado Turso) ---
+export const imputacaoAuditLog = sqliteTable("imputacao_audit_log", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  movementId: text("movement_id"),
+  quotaId: text("quota_id"),
+  fracaoId: text("fracao_id"),
+  tipo: text("tipo").notNull(),
+  fromCategoria: text("from_categoria"),
+  toCategoria: text("to_categoria"),
+  fromFracaoId: text("from_fracao_id"),
+  toFracaoId: text("to_fracao_id"),
+  valor: real("valor"),
+  motivo: text("motivo"),
+  utilizador: text("utilizador"),
+  createdAt: integer("created_at"),
+});
+
+// --- SALDOS DE REFERÊNCIA (legado Turso) ---
+export const saldosReferencia = sqliteTable("saldos_referencia", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  fracao: text("fracao").notNull(),
+  rubrica: text("rubrica").notNull().default("condominio"),
+  valorDivida: real("valor_divida").notNull().default(0),
+  dataReferencia: text("data_referencia").notNull(),
+  fonte: text("fonte").notNull().default("excel_2026"),
+  notas: text("notas"),
+  createdAt: integer("created_at"),
 });

@@ -20,6 +20,8 @@ import { configuracoesRoutes } from "./routes/configuracoes";
 import { relatorioRoutes, scheduleRelatoriosCron } from "./routes/relatorio";
 import { avisosRoutes, scheduleAvisosCron, gerarAvisosCobranca, enviarLoteUnificado } from "./routes/avisos";
 import { identityRoutes } from "./routes/identity";
+import { atasRoutes } from "./routes/atas";
+import { reunioesRoutes } from "./routes/reunioes";
 import { rehydrateDividasFromDB } from "./lib/identity-matrix";
 
 // ─── Sync imediato no arranque do servidor ────────────────────────────────────
@@ -198,7 +200,9 @@ const app = new Hono()
   .route("/configuracoes", configuracoesRoutes)
   .route("/relatorio", relatorioRoutes)
   .route("/avisos", avisosRoutes)
-  .route("/identity", identityRoutes);
+  .route("/identity", identityRoutes)
+  .route("/atas", atasRoutes)
+  .route("/reunioes", reunioesRoutes);
 
 export type AppType = typeof app;
 export default app;

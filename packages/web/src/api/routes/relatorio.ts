@@ -17,7 +17,7 @@ import { eq, and, sql } from "drizzle-orm";
 import fs from "node:fs";
 import path from "node:path";
 import { exec } from "node:child_process";
-import puppeteer from "puppeteer-core";
+import { htmlToPdf } from "../lib/html-to-pdf";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 const CONDOMINIO = {
@@ -590,22 +590,6 @@ function buildRelatorioHtml(data: Awaited<ReturnType<typeof calcularRelatorio>>)
 </html>`;
 }
 
-// ─── PDF generation ───────────────────────────────────────────────────────────
-async function htmlToPdf(html: string, outPath: string): Promise<void> {
-  const browser = await puppeteer.launch({
-    executablePath: "/usr/bin/google-chrome-stable",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    headless: true,
-  });
-  try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle0" });
-    await page.pdf({ path: outPath, format: "A4", printBackground: true, landscape: true });
-  } finally {
-    await browser.close();
-  }
-}
-
 // ─── Email ────────────────────────────────────────────────────────────────────
 async function enviarRelatorioEmail(params: {
   mes: number; ano: number; pdfPath: string;
@@ -642,7 +626,7 @@ export async function gerarRelatorioMensal(mes: number, ano: number, sendEmail =
   const html = buildRelatorioHtml(dados);
   const filename = `relatorio_${ano}_${String(mes).padStart(2, "0")}.pdf`;
   const pdfPath = path.join(PDF_DIR, filename);
-  await htmlToPdf(html, pdfPath);
+  await htmlToPdf(html, pdfPath, { landscape: true });
 
   let emailEnviado = false;
   if (sendEmail) {

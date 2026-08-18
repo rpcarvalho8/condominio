@@ -25,3 +25,8 @@ export function captureToken(ctx: { response: Response }) {
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
+
+export function useIsAdmin(): boolean {
+  const { data: session } = authClient.useSession();
+  return (session?.user as any)?.role === "admin";
+}

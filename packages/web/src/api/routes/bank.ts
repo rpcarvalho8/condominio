@@ -17,21 +17,18 @@ import * as schema from "../database/schema";
 import { eq, desc, and, sql } from "drizzle-orm";
 import crypto from "node:crypto";
 import { recalcularSaldos } from "./dashboard";
-import { identifyByMultiMatch, processarCascataAmortizacao, learnIBAN, extractPayerFromDescription } from "../lib/identity-matrix";
-import { llmIdentifyFracao, LLM_LEARN_THRESHOLD, type RubricaExtra } from "../lib/llm-fallback";
-
-/**
- * Infere a rubrica financeira a partir do descritivo da transação.
- * Usado na Camada L1 (motor matricial) onde o LLM não corre.
- */
-function inferirRubricaDeDescricao(descricao: string): RubricaExtra {
-  const d = descricao.toUpperCase();
-  if (/\bOBRAS?\b|COTA\s+(EXTRA\s+)?OBRAS|QUOTA\s+(EXTRA\s+)?OBRAS/.test(d)) return "OBRAS";
-  if (/MOTOR\s+(DA\s+)?GARAGEM|PORT[AÃ]O\s+(GARAGEM|MOTOR)|COTA\s+(EXTRA\s+)?MOTOR|QUOTA\s+(EXTRA\s+)?MOTOR|COTA\s+(EXTRA\s+)?PORT[AÃ]O|\bAH\s+COTA\s+EXTRA|\bAI\s+COTA\s+EXTRA/.test(d)) return "MOTOR";
-  if (/INC[EÊ]NDIO|SEGURO\s+(INCENDIO|INC[EÊ]NDIO)|COTA\s+INC[EÊ]NDIO|QUOTA\s+INC[EÊ]NDIO/.test(d)) return "INCENDIO";
-  if (/INDAQUA|ELEVADOR|ELEV\b|COTA\s+(EXTRA\s+)?ELEV|QUOTA\s+(EXTRA\s+)?ELEV/.test(d)) return "ELEVADORES";
-  return "CONDOMINIO";
-}
+import { learnIBAN, loadMatrizFromDB } from "../lib/identity-matrix";
+import { llmIdentifyFracao, LLM_LEARN_THRESHOLD } from "../lib/llm-fallback";
+import {
+  aplicarMatchTransferencia,
+  findCreditoDuplicado,
+  loadQuotaTiposExtras,
+  marcarDuplicadoIgnorado,
+  matchTransferencia,
+  selectTransacoesParaMatch,
+  signalsFromBankTransaction,
+} from "../lib/transfer-match";
+import { extractCounterpartyIban } from "../lib/iban";
 
 const CLIENT_ID = process.env.ENABLE_BANKING_CLIENT_ID ?? "";
 // Support both literal newlines and \n escape sequences in .env
@@ -117,13 +114,6 @@ function isBankFeeDesc(desc: string): boolean {
     d.includes("JURO ILIQUIDO") || d.includes("DESPESAS BANCÁR");
 }
 
-// Motor Garagem — CRDT com "MOTOR GARAGEM" = cota extra de manutenção/garagem
-// Padrão: "MOTOR GARAGEM - FRACAO X" — fração identificada no sufixo
-function isMotorGaragemDesc(desc: string): boolean {
-  return /MOTOR\s+GARAGEM/i.test(desc);
-}
-
-// dedup key — primária por descrição normalizada + valor + dia
 function despesaKey(desc: string, valor: number, date: Date): string {
   const day = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
   return `${desc}|${valor.toFixed(2)}|${day}`;
@@ -160,8 +150,12 @@ async function stageTransactions(
     const date = dateStr ? new Date(dateStr) : new Date();
     const txId: string | null = tx.transaction_id ?? tx.transactionId ?? null;
     const creditorName: string | null = tx.creditor?.name ?? tx.creditorName ?? null;
-    const debtorName: string | null = tx.debtor?.name ?? tx.debtorName ?? null;
-    const debtorIban: string | null = tx.debtor?.account?.iban ?? tx.debtorIban ?? null;
+    const debtorName: string | null =
+      tx.debtor?.name ?? tx.debtorName ?? tx.debtor_account?.name ?? null;
+    const debtorIban: string | null = extractCounterpartyIban(tx, {
+      credit: !isDebit,
+      description,
+    });
 
     // Skip if already staged by external transaction_id
     if (txId) {
@@ -241,34 +235,10 @@ async function importTransactions(transactions: any[], connectionId?: string): P
     errors: [] as string[],
   };
 
-  const [allFracoes, existingDespesas, existingQuotas, allQuotaTipos] = await Promise.all([
-    db.select().from(schema.fracoes),
+  const [existingDespesas] = await Promise.all([
     db.select({ id: schema.despesas.id, descricao: schema.despesas.descricao, valor: schema.despesas.valor, data: schema.despesas.data }).from(schema.despesas),
-    db.select({ id: schema.quotas.id, fracaoId: schema.quotas.fracaoId, mes: schema.quotas.mes, ano: schema.quotas.ano, tipo: schema.quotas.tipo }).from(schema.quotas),
-    db.select().from(schema.quotaTipos),
   ]);
 
-  // Build keyword → quotaTipo map for auto-matching
-  // keywords field: "MOTOR GARAGEM,PORTAO" (CSV)
-  const extraTiposByKeyword: Array<{ tipo: any; kw: string }> = [];
-  for (const qt of allQuotaTipos) {
-    if (qt.tipo === "extra" && qt.keywords) {
-      for (const kw of qt.keywords.split(",")) {
-        const k = kw.trim().toUpperCase();
-        if (k) extraTiposByKeyword.push({ tipo: qt, kw: k });
-      }
-    }
-  }
-
-  function findExtraTipo(desc: string): any | null {
-    const upper = desc.toUpperCase();
-    for (const { tipo, kw } of extraTiposByKeyword) {
-      if (upper.includes(kw)) return tipo;
-    }
-    return null;
-  }
-
-  const fracaoByNum = new Map(allFracoes.map(f => [f.numero.toUpperCase(), f]));
   const despesaKeys = new Set<string>();
   const despesaKeysValorData = new Set<string>(); // dedup secundário valor+data
   for (const d of existingDespesas) {
@@ -276,13 +246,8 @@ async function importTransactions(transactions: any[], connectionId?: string): P
     despesaKeys.add(despesaKey(d.descricao, d.valor, dDate));
     despesaKeysValorData.add(despesaKeyValorData(d.valor, dDate));
   }
-  const quotaKeys = new Set<string>(existingQuotas.map(q => `${q.fracaoId}|${q.mes}|${q.ano}|${q.tipo}`));
 
   const despesasToInsert: any[] = [];
-  const quotasToInsert: any[] = [];
-  const quotasToUpdate: any[] = [];
-  // Cascata: acumulamos durante o loop para processar após batch inserts
-  const cascataPendente: Array<{ idFracao: string; fracaoDBId: string; amount: number; mes: number; ano: number }> = [];
 
   for (const tx of transactions) {
     try {
@@ -304,147 +269,8 @@ async function importTransactions(transactions: any[], connectionId?: string): P
       if (isBankFeeDesc(desc)) { results.despesasSkipped++; continue; }
 
       if (!isDebit) {
-        // Entrada — identificar via Matriz de Identidade (multi-critério + auto-learning)
-        const ibanSender: string | undefined = tx.debtor?.account?.iban ?? tx.debtorIban ?? undefined;
-        const debtorName: string | undefined = tx.debtor?.name ?? tx.debtorName ?? undefined;
-
-        // ── Tentativa 1: Motor Matricial (identifyByMultiMatch) ───────────────
-        const matrixResult = await identifyByMultiMatch({
-          descricao: desc,
-          amount: valor,
-          ibanSender,
-          debtorName,
-        });
-
-        if (matrixResult && matrixResult.confidence >= 55) {
-          // Fração identificada com confiança — registar quota
-          const fracaoDB = fracaoByNum.get(matrixResult.fracao.idFracao.toUpperCase());
-          if (!fracaoDB) {
-            results.errors.push(`Fração matriz ${matrixResult.fracao.idFracao} não existe na BD — sincronizar seed`);
-            continue;
-          }
-
-          // Determinar tipo: extra (motor/elevador) ou condominio
-          const extraTipo = findExtraTipo(desc);
-          const isExtra = extraTipo || isMotorGaragemDesc(desc);
-          const tipoQuota = isExtra ? "extra" : "condominio";
-
-          const mes = date.getMonth() + 1;
-          const ano = date.getFullYear();
-          const qKey = `${fracaoDB.id}|${mes}|${ano}|${tipoQuota}`;
-
-          if (isExtra && !quotaKeys.has(qKey)) {
-            quotaKeys.add(qKey);
-            quotasToInsert.push({
-              fracaoId: fracaoDB.id,
-              tipo: "extra",
-              mes, ano, valor,
-              fundoReserva: 0,
-              quotaTipoId: extraTipo?.id ?? null,
-              pago: true, dataPagamento: date, metodoPagamento: "transferência",
-              observacoes: `[motor matricial:${matrixResult.confidence}%] ${desc}`,
-            });
-            results.quotasCreated++;
-          } else if (!isExtra) {
-            if (quotaKeys.has(qKey)) {
-              quotasToUpdate.push({ fracaoId: fracaoDB.id, mes, ano, tipo: "condominio", valor, data: date });
-              quotaKeys.delete(qKey);
-              results.quotasUpdated++;
-            } else {
-              quotaKeys.add(qKey);
-              quotasToInsert.push({
-                fracaoId: fracaoDB.id, tipo: "condominio", mes, ano, valor,
-                fundoReserva: parseFloat((valor * 0.1).toFixed(2)),
-                pago: true, dataPagamento: date, metodoPagamento: "transferência",
-                observacoes: `[motor matricial:${matrixResult.confidence}% criterios:${matrixResult.criterios.join("+")}]${matrixResult.ibanNovoAprendido ? " [IBAN aprendido]" : ""}`,
-              });
-              results.quotasCreated++;
-            }
-            // Cascata: agendar amortização de dívidas com o excesso deste pagamento
-            cascataPendente.push({
-              idFracao: matrixResult.fracao.idFracao,
-              fracaoDBId: fracaoDB.id,
-              amount: valor,
-              mes,
-              ano,
-            });
-          }
-          continue;
-        }
-
-        // ── Tentativa 2: Fallback regex simples (compatibilidade legacy) ──────
-        const descUpper = desc.toUpperCase();
-        const fallbackExtraTipo = findExtraTipo(desc);
-        if (fallbackExtraTipo || isMotorGaragemDesc(desc)) {
-          let fracaoNum = "";
-          const mgMatch = descUpper.match(/FRACA[OÃ]O\s+([A-Z]{1,2})\b/);
-          if (mgMatch) fracaoNum = mgMatch[1];
-          if (!fracaoNum) {
-            const mgSimple = descUpper.match(/MOTOR\s+GARAGEM\s*[-–]\s*([A-Z]{1,2})\b/);
-            if (mgSimple) fracaoNum = mgSimple[1];
-          }
-          if (!fracaoNum) {
-            const trailingLetter = descUpper.match(/\b([A-Z]{1,2})\s*$/);
-            if (trailingLetter) fracaoNum = trailingLetter[1];
-          }
-          const fracao = fracaoNum ? fracaoByNum.get(fracaoNum) : undefined;
-          if (!fracao) {
-            results.errors.push(`Cota extra (${fallbackExtraTipo?.nome ?? "Motor Garagem"}): fração não identificada em "${desc.slice(0, 60)}"`);
-            continue;
-          }
-          const mes = date.getMonth() + 1;
-          const ano = date.getFullYear();
-          const qKey = `${fracao.id}|${mes}|${ano}|extra`;
-          if (!quotaKeys.has(qKey)) {
-            quotaKeys.add(qKey);
-            quotasToInsert.push({
-              fracaoId: fracao.id, tipo: "extra", mes, ano, valor,
-              fundoReserva: 0, quotaTipoId: fallbackExtraTipo?.id ?? null,
-              pago: true, dataPagamento: date, metodoPagamento: "transferência",
-              observacoes: desc,
-            });
-            results.quotasCreated++;
-          }
-          continue;
-        }
-
-        const isQuota = descUpper.includes("CONDOM") || descUpper.includes("QUOTA") ||
-          descUpper.includes("FRACAO") || descUpper.includes("FRAÇÃO") ||
-          /\bENTRADA\b/.test(descUpper);
-        if (!isQuota) continue;
-
-        let fracaoNum = "";
-        const fracaoExplicit = descUpper.match(/FRACA[OÃ]O\s+([A-Z]{1,2})\b/);
-        if (fracaoExplicit) fracaoNum = fracaoExplicit[1];
-        if (!fracaoNum) {
-          const entradaMatch = descUpper.match(/ENTRADA\s+\d+\s+([A-Z]{1,2})\b/);
-          if (entradaMatch) fracaoNum = entradaMatch[1];
-        }
-        if (!fracaoNum) {
-          const standaloneMatch = descUpper.match(/\s([A-Z]{1,2})-\d{5,}/);
-          if (standaloneMatch) fracaoNum = standaloneMatch[1];
-        }
-        const fracao = fracaoNum ? fracaoByNum.get(fracaoNum) : undefined;
-        if (!fracao) {
-          results.errors.push(`Fração não identificada (matriz+regex): ${desc.slice(0, 60)}`);
-          continue;
-        }
-        const mes = date.getMonth() + 1;
-        const ano = date.getFullYear();
-        const qKey = `${fracao.id}|${mes}|${ano}|condominio`;
-        if (quotaKeys.has(qKey)) {
-          quotasToUpdate.push({ fracaoId: fracao.id, mes, ano, tipo: "condominio", valor, data: date });
-          quotaKeys.delete(qKey);
-          results.quotasUpdated++;
-        } else {
-          quotaKeys.add(qKey);
-          quotasToInsert.push({
-            fracaoId: fracao.id, tipo: "condominio", mes, ano, valor,
-            fundoReserva: parseFloat((valor * 0.1).toFixed(2)),
-            pago: true, dataPagamento: date, metodoPagamento: "transferência",
-          });
-          results.quotasCreated++;
-        }
+        // Créditos: identidade + finalidade no process-staged (matchTransferencia).
+        continue;
       } else {
         // Saída — despesa
         const dKey = despesaKey(desc, valor, date);
@@ -466,49 +292,15 @@ async function importTransactions(transactions: any[], connectionId?: string): P
     }
   }
 
-  // Batch writes
+  // Batch writes — créditos são aplicados em processarStagedTransactions()
   const BATCH = 50;
   const insertedDespesaIds: string[] = [];
   for (let i = 0; i < despesasToInsert.length; i += BATCH) {
     const inserted = await db.insert(schema.despesas).values(despesasToInsert.slice(i, i + BATCH)).returning({ id: schema.despesas.id });
     insertedDespesaIds.push(...inserted.map(r => r.id));
   }
-  const insertedQuotaIds: string[] = [];
-  for (let i = 0; i < quotasToInsert.length; i += BATCH) {
-    const inserted = await db.insert(schema.quotas).values(quotasToInsert.slice(i, i + BATCH)).returning({ id: schema.quotas.id });
-    insertedQuotaIds.push(...inserted.map(r => r.id));
-  }
-  for (const q of quotasToUpdate) {
-    await db.update(schema.quotas)
-      .set({ pago: true, valor: q.valor, dataPagamento: q.data, metodoPagamento: "transferência" })
-      .where(and(
-        eq(schema.quotas.fracaoId, q.fracaoId),
-        eq(schema.quotas.mes, q.mes),
-        eq(schema.quotas.ano, q.ano),
-        eq(schema.quotas.tipo, q.tipo),
-      ));
-  }
 
-  // ── STEP 2b: Cascata de Amortização Dinâmica ─────────────────────────────
-  // Processa depois dos batch inserts para garantir que a quota foi criada antes de amortizar.
-  for (const entrada of cascataPendente) {
-    try {
-      await processarCascataAmortizacao(
-        entrada.idFracao,
-        entrada.amount,
-        entrada.fracaoDBId,
-        entrada.mes,
-        entrada.ano,
-      );
-    } catch (e: any) {
-      results.errors.push(`[cascata] ${entrada.idFracao}: ${e.message}`);
-    }
-  }
-
-  // ── STEP 3: Mark staged transactions as imported=1 ────────────────────────
-  // For each processed transaction, find its staged row by transactionId and update.
-  // We also mark any CRDT entries that were skipped (bank fees, ignored) as imported=1 status=ignored
-  // to prevent them from appearing as "cativos" forever.
+  // ── STEP 3: Débitos/taxas staged → imported=1. Créditos ficam imported=0 para o matcher.
   if (connectionId) {
     for (const tx of transactions) {
       const txId: string | null = tx.transaction_id ?? tx.transactionId ?? null;
@@ -522,36 +314,16 @@ async function importTransactions(transactions: any[], connectionId?: string): P
         return r.length > 0 ? r.join(" ") : (tx.creditor?.name ?? tx.debtor?.name ?? "");
       })();
 
-      // Determine what happened to this tx:
-      let importType: string | null = null;
-      let status = "processed";
       if (isBankFeeDesc(desc)) {
-        importType = null; status = "ignored";
-      } else if (isDebit) {
-        importType = "despesa";
-      } else {
-        // credit — quota ou ignored
-        const extraTipo = (() => {
-          const upper = desc.toUpperCase();
-          for (const { tipo, kw } of extraTiposByKeyword) {
-            if (upper.includes(kw)) return tipo;
-          }
-          return null;
-        })();
-        if (extraTipo || isMotorGaragemDesc(desc)) {
-          importType = "quota";
-        } else {
-          const descUpper = desc.toUpperCase();
-          const isQuota = descUpper.includes("CONDOM") || descUpper.includes("QUOTA") ||
-            descUpper.includes("FRACAO") || descUpper.includes("FRAÇÃO") ||
-            /\bENTRADA\b/.test(descUpper);
-          importType = isQuota ? "quota" : null;
-          if (!importType) status = "ignored";
-        }
+        await db.update(schema.bankTransactions)
+          .set({ imported: 1, status: "ignored", importType: null })
+          .where(eq(schema.bankTransactions.transactionId, txId));
+        continue;
       }
+      if (!isDebit) continue; // crédito: process-staged
 
       await db.update(schema.bankTransactions)
-        .set({ imported: 1, status, importType })
+        .set({ imported: 1, status: "processed", importType: "despesa" })
         .where(eq(schema.bankTransactions.transactionId, txId));
     }
   }
@@ -560,9 +332,8 @@ async function importTransactions(transactions: any[], connectionId?: string): P
 }
 
 // ─── Process Staged Transactions ─────────────────────────────────────────────
-// Lê todas as bank_transactions com imported=0, corre o motor matricial
-// e a cascata de amortização, e atualiza flags.
-// Retorna sumário do processamento.
+// Matcher transversal (identidade + finalidade): staging novo, duplicados extra,
+// e rateios importados sem fração. Não reabre as ~48 reviews genéricas.
 export async function processarStagedTransactions(): Promise<{
   processed: number;
   manualReview: number;
@@ -576,22 +347,21 @@ export async function processarStagedTransactions(): Promise<{
     details: [] as Array<{ transactionId: string; result: "processed" | "manual_review" | "error"; fracao?: string; score?: number; motivo?: string }>,
   };
 
-  // Buscar todas as TXNs pendentes (imported=0)
-  const pendentes = await db
-    .select()
-    .from(schema.bankTransactions)
-    .where(eq(schema.bankTransactions.imported, 0));
-
+  await loadMatrizFromDB();
+  await loadQuotaTiposExtras();
+  const pendentes = await selectTransacoesParaMatch();
   if (pendentes.length === 0) return summary;
 
-  // Carregar frações uma vez
-  const allFracoes = await db.select().from(schema.fracoes);
-  const fracaoByNum = new Map(allFracoes.map(f => [f.numero.toUpperCase(), f]));
+  const txDateOf = (raw: unknown): Date => {
+    if (raw instanceof Date) return raw;
+    if (typeof raw === "number") return raw > 1e12 ? new Date(raw) : new Date(raw * 1000);
+    return new Date();
+  };
 
   for (const txn of pendentes) {
     const txId = txn.transactionId ?? txn.id;
+    const jaImportadoRateio = txn.imported === 1 && txn.importType === "rateio";
     try {
-      // Débitos: process-staged não cria despesas aqui (sync/import trata)
       if (txn.type === "DBIT" || (txn.amount ?? 0) < 0) {
         await db.update(schema.bankTransactions)
           .set({ imported: 1, status: "ignored", importType: "despesa" })
@@ -601,43 +371,51 @@ export async function processarStagedTransactions(): Promise<{
         continue;
       }
 
-      // Extrair IBAN do remetente.
-      // Prioridade 1: coluna dedicada debtor_iban (gravada na ingestão — caminho rápido).
-      // Prioridade 2: fallback rawData para retrocompatibilidade com transações antigas
-      //               que entraram antes desta migração.
-      const ibanSender: string | undefined =
-        txn.debtorIban                         // P1: coluna direta
-        ?? (txn.rawData
-          ? (() => {
-              try {
-                const d = JSON.parse(txn.rawData);
-                return d.iban_sender            // formato QA seed / simplificado
-                  ?? d.debtor?.account?.iban    // Enable Banking real
-                  ?? d.debtorIban              // camelCase legacy
-                  ?? undefined;
-              } catch { return undefined; }
-            })()
-          : undefined);                        // P2: fallback rawData
+      const dup = txn.imported === 0 ? await findCreditoDuplicado(txn) : null;
+      if (dup) {
+        await marcarDuplicadoIgnorado(txn.id, dup.id);
+        summary.processed++;
+        summary.details.push({ transactionId: txId, result: "processed", motivo: `duplicado de ${dup.id}` });
+        continue;
+      }
 
-      const debtorFromDesc = extractPayerFromDescription(txn.description);
-      const matrixResult = await identifyByMultiMatch({
-        descricao: txn.description ?? "",
-        amount: Math.abs(txn.amount ?? 0),
+      const signals = signalsFromBankTransaction(txn);
+      const ibanSender = signals.ibanSender ?? undefined;
+      const date = txDateOf(txn.date);
+      const amount = signals.amount;
+
+      if (ibanSender && !txn.debtorIban) {
+        await db.update(schema.bankTransactions)
+          .set({ debtorIban: ibanSender })
+          .where(eq(schema.bankTransactions.id, txn.id));
+      }
+
+      let match = await matchTransferencia({
+        descricao: signals.descricao,
+        amount,
         ibanSender,
-        debtorName: txn.debtorName ?? debtorFromDesc ?? undefined,
+        debtorName: signals.debtorName ?? undefined,
       });
 
-      if (!matrixResult || matrixResult.confidence < 55) {
-        // ── Camada 2: LLM Fallback ────────────────────────────────────────────
+      if (!match.identity || match.identity.confidence < 55) {
+        if (jaImportadoRateio) {
+          summary.details.push({
+            transactionId: txId,
+            result: "manual_review",
+            score: match.confidence,
+            motivo: "rateio sem identidade suficiente (IBAN/nome/fração) — mantido",
+          });
+          continue;
+        }
+
         const llmResult = await llmIdentifyFracao({
-          descricao:   txn.description ?? "",
-          amount:      Math.abs(txn.amount ?? 0),
-          debtorName:  txn.debtorName ?? undefined,
+          descricao: signals.descricao,
+          amount,
+          debtorName: signals.debtorName ?? undefined,
           ibanSender,
         });
 
         if (!llmResult.fracao || llmResult.confidence < 55) {
-          // LLM também não identificou — manual review
           await db.update(schema.bankTransactions)
             .set({ requiresManualReview: 1, status: "pending" })
             .where(eq(schema.bankTransactions.id, txn.id));
@@ -646,165 +424,68 @@ export async function processarStagedTransactions(): Promise<{
             transactionId: txId,
             result: "manual_review",
             score: llmResult.confidence,
-            motivo: `motor:${matrixResult?.confidence ?? 0} llm:${llmResult.confidence} provider:${llmResult.provider}`,
+            motivo: `motor:${match.confidence} llm:${llmResult.confidence} provider:${llmResult.provider}`,
           });
           continue;
         }
 
-        // LLM identificou com confiança suficiente — usar como resultado
-        // Ancorar IBAN se confiança alta o suficiente para auto-learning
-        let ibanAprendidoPorLLM = false;
         if (llmResult.confidence >= LLM_LEARN_THRESHOLD && ibanSender) {
-          ibanAprendidoPorLLM = await learnIBAN(llmResult.fracao.idFracao, ibanSender);
+          await learnIBAN(llmResult.fracao.idFracao, ibanSender);
         }
 
-        // Continuar com o fluxo normal usando o resultado do LLM
-        const fracaoDBFromLLM = fracaoByNum.get(llmResult.fracao.idFracao.toUpperCase());
-        if (!fracaoDBFromLLM) {
-          throw new Error(`[LLM] Fração ${llmResult.fracao.idFracao} não encontrada na BD`);
-        }
-
-        const txDateLLM = txn.date instanceof Date ? txn.date : new Date((txn.date as number) * 1000);
-        const mesLLM    = txDateLLM.getMonth() + 1;
-        const anoLLM    = txDateLLM.getFullYear();
-        const valorLLM  = Math.abs(txn.amount ?? 0);
-
-        const existingQuotaLLM = await db.select({ id: schema.quotas.id })
-          .from(schema.quotas)
-          .where(and(
-            eq(schema.quotas.fracaoId, fracaoDBFromLLM.id),
-            eq(schema.quotas.mes, mesLLM),
-            eq(schema.quotas.ano, anoLLM),
-            eq(schema.quotas.tipo, "condominio"),
-          ))
-          .limit(1);
-
-        let quotaIdLLM: string;
-        const obsLLM = `[llm-fallback:${llmResult.provider}:${llmResult.confidence}%]${ibanAprendidoPorLLM ? " [IBAN aprendido]" : ""} ${llmResult.motivo}`;
-        if (existingQuotaLLM.length > 0) {
-          await db.update(schema.quotas)
-            .set({ pago: true, valor: valorLLM, dataPagamento: txDateLLM,
-                   metodoPagamento: "transferência", observacoes: obsLLM })
-            .where(eq(schema.quotas.id, existingQuotaLLM[0].id));
-          quotaIdLLM = existingQuotaLLM[0].id;
-        } else {
-          const insertedLLM = await db.insert(schema.quotas).values({
-            fracaoId: fracaoDBFromLLM.id,
-            tipo: "condominio",
-            mes: mesLLM, ano: anoLLM, valor: valorLLM,
-            fundoReserva: parseFloat((valorLLM * 0.1).toFixed(2)),
-            pago: true,
-            dataPagamento: txDateLLM,
-            metodoPagamento: "transferência",
-            observacoes: obsLLM,
-          }).returning({ id: schema.quotas.id });
-          quotaIdLLM = insertedLLM[0].id;
-        }
-
-        await processarCascataAmortizacao(
-          llmResult.fracao.idFracao, valorLLM, fracaoDBFromLLM.id, mesLLM, anoLLM
-        );
-
-        await db.update(schema.bankTransactions)
-          .set({ imported: 1, status: "processed", importType: "quota",
-                 importRefId: quotaIdLLM, requiresManualReview: 0,
-                 rubricaExtra: llmResult.rubrica })
-          .where(eq(schema.bankTransactions.id, txn.id));
-
-        summary.processed++;
-        summary.details.push({
-          transactionId: txId,
-          result: "processed",
-          fracao: llmResult.fracao.idFracao,
-          score: llmResult.confidence,
-          motivo: `llm-fallback:${llmResult.provider} | ${llmResult.motivo}`,
+        match = await matchTransferencia({
+          descricao: signals.descricao,
+          amount,
+          ibanSender,
+          debtorName: signals.debtorName ?? undefined,
+          identityOverride: llmResult.fracao,
         });
+      }
+
+      const applied = await aplicarMatchTransferencia({
+        txnId: txn.id,
+        description: txn.description ?? "",
+        amount,
+        date,
+        ibanSender,
+        debtorName: signals.debtorName,
+        match,
+        observacoesPrefix: match.identity?.criterios.includes("override")
+          ? `[llm-fallback:${match.identity.confidence}%]`
+          : `[process-staged motor:${match.identity?.confidence ?? 0}%]`,
+      });
+
+      if (!applied.applied) {
+        if (jaImportadoRateio) {
+          summary.details.push({
+            transactionId: txId,
+            result: "manual_review",
+            motivo: applied.motivo,
+          });
+          continue;
+        }
+        await db.update(schema.bankTransactions)
+          .set({ requiresManualReview: 1, status: "pending" })
+          .where(eq(schema.bankTransactions.id, txn.id));
+        summary.manualReview++;
+        summary.details.push({ transactionId: txId, result: "manual_review", motivo: applied.motivo });
         continue;
-        // ── Fim Camada 2 ──────────────────────────────────────────────────────
       }
-
-      // Motor L1 identificou — fração confirmada
-      const fracaoDB = fracaoByNum.get(matrixResult.fracao.idFracao.toUpperCase());
-      if (!fracaoDB) {
-        throw new Error(`Fração ${matrixResult.fracao.idFracao} não encontrada na BD`);
-      }
-
-      const txDate = txn.date instanceof Date ? txn.date : new Date((txn.date as number) * 1000);
-      const mes = txDate.getMonth() + 1;
-      const ano = txDate.getFullYear();
-      const valor = Math.abs(txn.amount ?? 0);
-
-      // Verificar dedup — não criar quota duplicada
-      const existingQuota = await db.select({ id: schema.quotas.id })
-        .from(schema.quotas)
-        .where(and(
-          eq(schema.quotas.fracaoId, fracaoDB.id),
-          eq(schema.quotas.mes, mes),
-          eq(schema.quotas.ano, ano),
-          eq(schema.quotas.tipo, "condominio"),
-        ))
-        .limit(1);
-
-      let quotaId: string;
-      if (existingQuota.length > 0) {
-        // Atualizar quota existente para pago=true
-        await db.update(schema.quotas)
-          .set({ pago: true, valor, dataPagamento: txDate, metodoPagamento: "transferência",
-                 observacoes: `[process-staged motor:${matrixResult.confidence}% criterios:${matrixResult.criterios.join("+")}]` })
-          .where(eq(schema.quotas.id, existingQuota[0].id));
-        quotaId = existingQuota[0].id;
-      } else {
-        // Inserir nova quota
-        const inserted = await db.insert(schema.quotas).values({
-          fracaoId: fracaoDB.id,
-          tipo: "condominio",
-          mes, ano, valor,
-          fundoReserva: parseFloat((valor * 0.1).toFixed(2)),
-          pago: true,
-          dataPagamento: txDate,
-          metodoPagamento: "transferência",
-          observacoes: `[process-staged motor:${matrixResult.confidence}% criterios:${matrixResult.criterios.join("+")}]${matrixResult.ibanNovoAprendido ? " [IBAN aprendido]" : ""}`,
-        }).returning({ id: schema.quotas.id });
-        quotaId = inserted[0].id;
-      }
-
-      // Cascata de amortização
-      await processarCascataAmortizacao(
-        matrixResult.fracao.idFracao,
-        valor,
-        fracaoDB.id,
-        mes,
-        ano,
-      );
-
-      // Marcar TXN como imported=1
-      await db.update(schema.bankTransactions)
-        .set({
-          imported: 1,
-          status: "processed",
-          importType: "quota",
-          importRefId: quotaId,
-          requiresManualReview: 0,
-          rubricaExtra: inferirRubricaDeDescricao(txn.description ?? ""),
-        })
-        .where(eq(schema.bankTransactions.id, txn.id));
 
       summary.processed++;
       summary.details.push({
         transactionId: txId,
         result: "processed",
-        fracao: matrixResult.fracao.idFracao,
-        score: matrixResult.confidence,
-        motivo: `criterios: ${matrixResult.criterios.join("+")}`,
+        fracao: applied.fracao,
+        score: match.confidence,
+        motivo: applied.motivo,
       });
-
     } catch (e: any) {
       summary.errors.push(`[${txId}] ${e.message}`);
       summary.details.push({ transactionId: txId, result: "error", motivo: e.message });
     }
   }
 
-  // Recalcular saldos após processar staged
   try {
     await recalcularSaldos();
   } catch (e: any) {
