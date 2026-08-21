@@ -19,8 +19,7 @@ import { MATRIZ_PROPRIEDADES, type FracaoIdentidade } from "./identity-matrix";
 const GROQ_API_KEY     = process.env.GROQ_API_KEY ?? "";
 const OPENROUTER_KEY   = process.env.OPENROUTER_API_KEY ?? "";
 
-/** Modelo Groq — rápido e gratuito para este volume */
-const GROQ_MODEL       = "llama-3.3-70b-versatile";
+import { GROQ_CHAT_MODEL_FAST as GROQ_MODEL } from "./groq-models";
 /** Modelo OpenRouter fallback */
 const OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 

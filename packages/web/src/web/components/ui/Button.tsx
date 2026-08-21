@@ -41,6 +41,7 @@ export function Button({
 }: ButtonProps) {
   return (
     <button
+      type="button"
       className={cn(
         "inline-flex items-center justify-center rounded-md font-medium transition-all duration-150 cursor-pointer",
         "disabled:opacity-40 disabled:cursor-not-allowed",

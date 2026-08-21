@@ -21,6 +21,8 @@ import {
 import { cn } from "../lib/utils";
 import { authClient, clearToken, getToken, useIsAdmin } from "../lib/auth";
 import { useQuery } from "@tanstack/react-query";
+import { RecordingBar } from "./RecordingBar";
+import { RecordingProvider } from "../lib/RecordingContext";
 
 const NAV_ITEMS = [
   { href: "/", label: "Visão Geral", icon: LayoutDashboard },
@@ -69,6 +71,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   }
 
   return (
+    <RecordingProvider>
     <div className="flex h-screen overflow-hidden" style={{ background: "var(--bg-base)" }}>
       {/* Sidebar */}
       <aside
@@ -207,10 +210,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto pb-24">
         {children}
       </main>
+      <RecordingBar />
     </div>
+    </RecordingProvider>
   );
 }
 

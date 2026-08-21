@@ -5,9 +5,15 @@ import path from "node:path";
 import { db } from "../database";
 import { ataVotes, atas, configuracoes, fracoes, user } from "../database/schema";
 import { requireAuth, requireAdmin } from "../middleware/auth";
-import { transcribeAudioWithGroq } from "../lib/stt";
+import { transcribeAudioFilePath } from "../lib/stt";
 import { gerarRascunhoAta } from "../lib/atas-llm";
 import { gerarAtaPdf } from "../lib/ata-pdf";
+import {
+  conteudoToMarkdown,
+  normalizeConteudo,
+  resolveConteudo,
+  serializeConteudo,
+} from "../lib/ata-conteudo";
 
 const UPLOAD_DIR = path.join(process.cwd(), "data", "assembleias");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -36,9 +42,48 @@ function sanitizeFilenamePart(input: string): string {
   return input.replace(/[^a-zA-Z0-9-_]/g, "_").slice(0, 80);
 }
 
+function deleteFileIfExists(relativeOrAbsolute: string) {
+  if (!relativeOrAbsolute || relativeOrAbsolute.includes("..")) return;
+  const absolutePath = path.isAbsolute(relativeOrAbsolute)
+    ? relativeOrAbsolute
+    : path.join(process.cwd(), relativeOrAbsolute);
+  try {
+    if (fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
+  } catch {
+    // Non-fatal
+  }
+}
+
+function deletePdfByUrl(pdfUrl: string | null | undefined) {
+  if (!pdfUrl) return;
+  const match = pdfUrl.match(/\/api\/atas\/pdf\/([^/?]+)/);
+  if (!match?.[1]) return;
+  deleteFileIfExists(path.join("data", "atas", match[1]));
+}
+
 function canReadAta(user: any, status: string): boolean {
   if (user?.role === "admin") return true;
   return ["aprovada", "rejeitada", "aguardando_votos"].includes(status);
+}
+
+function toPublicAtaRow(row: typeof atas.$inferSelect) {
+  return {
+    id: row.id,
+    titulo: row.titulo,
+    dataReuniao: row.dataReuniao,
+    status: row.status,
+    ataTexto: row.ataTexto,
+    conteudoJson: row.conteudoJson,
+    resumoDeliberacoes: row.resumoDeliberacoes,
+    pdfUrl: row.pdfUrl,
+    pdfFinalizedAt: row.pdfFinalizedAt,
+    approvalDeadlineAt: row.approvalDeadlineAt,
+    audioAvailableUntil: row.audioAvailableUntil,
+    approvedAt: row.approvedAt,
+    rejectedAt: row.rejectedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 async function tryAutoCloseVoting(ataRow: typeof atas.$inferSelect, force = false): Promise<typeof atas.$inferSelect> {
@@ -132,17 +177,21 @@ export const atasRoutes = new Hono()
       const relativePath = path.join("data", "assembleias", filename);
 
       const buffer = Buffer.from(await audioFile.arrayBuffer());
+      if (buffer.length === 0) {
+        return c.json({ message: "Ficheiro de áudio vazio." }, 400);
+      }
       fs.writeFileSync(absolutePath, buffer);
 
-      const transcricaoRaw = await transcribeAudioWithGroq(audioFile);
-      const ataTexto = await gerarRascunhoAta(transcricaoRaw, dataReuniao);
+      const transcricaoRaw = await transcribeAudioFilePath(absolutePath, filename);
+      const rascunho = await gerarRascunhoAta(transcricaoRaw, dataReuniao);
 
       const [created] = await db.insert(atas).values({
         titulo,
         dataReuniao,
         status: "rascunho",
         transcricaoRaw,
-        ataTexto,
+        ataTexto: rascunho.ataTexto,
+        conteudoJson: serializeConteudo(rascunho.conteudo),
         resumoDeliberacoes: null,
         audioPath: relativePath,
       }).returning();
@@ -172,6 +221,7 @@ export const atasRoutes = new Hono()
           dataReuniao: atas.dataReuniao,
           status: atas.status,
           ataTexto: atas.ataTexto,
+          conteudoJson: atas.conteudoJson,
           resumoDeliberacoes: atas.resumoDeliberacoes,
           pdfUrl: atas.pdfUrl,
           pdfFinalizedAt: atas.pdfFinalizedAt,
@@ -208,7 +258,7 @@ export const atasRoutes = new Hono()
               : [null];
             resolvedRows.push({
               id: closed.id, titulo: closed.titulo, dataReuniao: closed.dataReuniao,
-              status: closed.status, ataTexto: closed.ataTexto, resumoDeliberacoes: closed.resumoDeliberacoes,
+              status: closed.status, ataTexto: closed.ataTexto, conteudoJson: closed.conteudoJson, resumoDeliberacoes: closed.resumoDeliberacoes,
               pdfUrl: closed.pdfUrl, pdfFinalizedAt: closed.pdfFinalizedAt,
               approvalDeadlineAt: closed.approvalDeadlineAt, audioAvailableUntil: closed.audioAvailableUntil,
               approvedAt: closed.approvedAt, rejectedAt: closed.rejectedAt,
@@ -220,7 +270,7 @@ export const atasRoutes = new Hono()
         }
         resolvedRows.push({
           id: row.id, titulo: row.titulo, dataReuniao: row.dataReuniao,
-          status: row.status, ataTexto: row.ataTexto, resumoDeliberacoes: row.resumoDeliberacoes,
+          status: row.status, ataTexto: row.ataTexto, conteudoJson: row.conteudoJson, resumoDeliberacoes: row.resumoDeliberacoes,
           pdfUrl: row.pdfUrl, pdfFinalizedAt: row.pdfFinalizedAt,
           approvalDeadlineAt: row.approvalDeadlineAt, audioAvailableUntil: row.audioAvailableUntil,
           approvedAt: row.approvedAt, rejectedAt: row.rejectedAt,
@@ -232,11 +282,34 @@ export const atasRoutes = new Hono()
     }
 
     const allRows = await db
-      .select()
+      .select({
+        id: atas.id,
+        titulo: atas.titulo,
+        dataReuniao: atas.dataReuniao,
+        status: atas.status,
+        ataTexto: atas.ataTexto,
+        conteudoJson: atas.conteudoJson,
+        resumoDeliberacoes: atas.resumoDeliberacoes,
+        pdfUrl: atas.pdfUrl,
+        pdfFinalizedAt: atas.pdfFinalizedAt,
+        approvalDeadlineAt: atas.approvalDeadlineAt,
+        audioAvailableUntil: atas.audioAvailableUntil,
+        approvedAt: atas.approvedAt,
+        rejectedAt: atas.rejectedAt,
+        createdAt: atas.createdAt,
+        updatedAt: atas.updatedAt,
+      })
       .from(atas)
       .orderBy(desc(atas.dataReuniao), desc(atas.createdAt));
 
-    const resolved = await Promise.all(allRows.map(tryAutoCloseVoting));
+    const resolved = await Promise.all(
+      allRows.map(async (row) => {
+        const [fullRow] = await db.select().from(atas).where(eq(atas.id, row.id)).limit(1);
+        if (!fullRow) return row;
+        const closed = await tryAutoCloseVoting(fullRow);
+        return toPublicAtaRow(closed);
+      }),
+    );
     return c.json(resolved);
   })
   .get("/:id", async (c) => {
@@ -262,6 +335,7 @@ export const atasRoutes = new Hono()
         dataReuniao: row.dataReuniao,
         status: row.status,
         ataTexto: row.ataTexto,
+        conteudoJson: row.conteudoJson,
         resumoDeliberacoes: row.resumoDeliberacoes,
         approvedAt: row.approvedAt,
         rejectedAt: row.rejectedAt,
@@ -275,7 +349,7 @@ export const atasRoutes = new Hono()
         updatedAt: row.updatedAt,
       });
     }
-    return c.json(row);
+    return c.json(toPublicAtaRow(row));
   })
   .patch("/:id", requireAdmin, async (c) => {
     const id = c.req.param("id");
@@ -290,20 +364,33 @@ export const atasRoutes = new Hono()
 
     const patch: Partial<typeof atas.$inferInsert> = { updatedAt: new Date() };
     if (typeof body.titulo === "string") patch.titulo = body.titulo.trim();
-    if (typeof body.ataTexto === "string") patch.ataTexto = body.ataTexto;
     if (typeof body.transcricaoRaw === "string") patch.transcricaoRaw = body.transcricaoRaw;
     if (typeof body.resumoDeliberacoes === "string" || body.resumoDeliberacoes === null) {
       patch.resumoDeliberacoes = body.resumoDeliberacoes;
     }
+
+    let dataReuniao = existing.dataReuniao;
     if (typeof body.dataReuniao === "string") {
       const dt = new Date(body.dataReuniao);
       if (Number.isNaN(dt.getTime())) return c.json({ message: "Data da reunião inválida." }, 400);
       patch.dataReuniao = dt;
+      dataReuniao = dt;
+    }
+
+    if (body.conteudoJson && typeof body.conteudoJson === "object") {
+      const conteudo = normalizeConteudo(body.conteudoJson, new Date(dataReuniao));
+      conteudo.cabecalho.dataReuniao = new Date(dataReuniao).toISOString().slice(0, 10);
+      patch.conteudoJson = serializeConteudo(conteudo);
+      patch.ataTexto = conteudoToMarkdown(conteudo);
+    } else if (typeof body.ataTexto === "string") {
+      patch.ataTexto = body.ataTexto;
+      const conteudo = resolveConteudo(existing.conteudoJson, body.ataTexto, new Date(dataReuniao));
+      patch.conteudoJson = serializeConteudo(conteudo);
     }
 
     const [updated] = await db.update(atas).set(patch).where(eq(atas.id, id)).returning();
     if (!updated) return c.json({ message: "Ata não encontrada." }, 404);
-    return c.json(updated);
+    return c.json(toPublicAtaRow(updated));
   })
   .patch("/:id/aprovar", requireAdmin, async (c) => {
     const id = c.req.param("id");
@@ -345,11 +432,14 @@ export const atasRoutes = new Hono()
 
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     const buffer = Buffer.from(await audioFile.arrayBuffer());
+    if (buffer.length === 0) {
+      return c.json({ message: "Ficheiro de áudio vazio." }, 400);
+    }
     fs.writeFileSync(absolutePath, buffer);
 
     // Regerar draft (transcrição + markdown)
-    const transcricaoRaw = await transcribeAudioWithGroq(audioFile);
-    const ataTexto = await gerarRascunhoAta(transcricaoRaw, new Date(existing.dataReuniao));
+    const transcricaoRaw = await transcribeAudioFilePath(absolutePath, filename);
+    const rascunho = await gerarRascunhoAta(transcricaoRaw, new Date(existing.dataReuniao));
 
     // Mantém o áudio; só será disponibilizado ao portal durante a janela de votação.
     const [updated] = await db
@@ -357,7 +447,8 @@ export const atasRoutes = new Hono()
       .set({
         audioPath: relativePath,
         transcricaoRaw,
-        ataTexto,
+        ataTexto: rascunho.ataTexto,
+        conteudoJson: serializeConteudo(rascunho.conteudo),
         resumoDeliberacoes: null,
         status: "rascunho",
         pdfUrl: null,
@@ -487,6 +578,7 @@ export const atasRoutes = new Hono()
       titulo: ataRow.titulo,
       dataReuniao: ataRow.dataReuniao,
       ataTexto: ataRow.ataTexto,
+      conteudoJson: ataRow.conteudoJson,
       resumoDeliberacoes: ataRow.resumoDeliberacoes,
     });
 
@@ -511,7 +603,7 @@ export const atasRoutes = new Hono()
       rejectedAt: null,
     }).where(eq(atas.id, id)).returning();
 
-    return c.json(updated);
+    return c.json(toPublicAtaRow(updated));
   })
   // GET /api/atas/pdf/:filename → stream PDF
   .get("/pdf/:filename", async (c) => {
@@ -540,5 +632,18 @@ export const atasRoutes = new Hono()
     if (ataRow.status !== "aguardando_votos") return c.json({ message: "Votação não está aberta." }, 400);
 
     const updated = await tryAutoCloseVoting(ataRow, true);
-    return c.json(updated);
+    return c.json(toPublicAtaRow(updated));
+  })
+  .delete("/:id", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+
+    const [existing] = await db.select().from(atas).where(eq(atas.id, id)).limit(1);
+    if (!existing) return c.json({ message: "Ata não encontrada." }, 404);
+
+    if (existing.audioPath) deleteFileIfExists(existing.audioPath);
+    deletePdfByUrl(existing.pdfUrl);
+
+    await db.delete(atas).where(eq(atas.id, id));
+
+    return c.json({ ok: true, id });
   });

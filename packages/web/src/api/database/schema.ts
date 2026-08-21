@@ -289,9 +289,19 @@ export const reunioes = sqliteTable("reunioes", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   titulo: text("titulo").notNull(),
   data: integer("data", { mode: "timestamp" }).notNull(),
+  /** "interna" (administradores) | "fornecedor" */
+  tipo: text("tipo").notNull().default("interna"),
+  /** Nome do fornecedor (quando tipo === "fornecedor") */
+  fornecedorNome: text("fornecedor_nome"),
   participantes: text("participantes"),
   transcricao: text("transcricao"),
+  /** JSON estruturado da reunião conforme layout do tipo */
+  resumoJson: text("resumo_json"),
   resumo: text("resumo"),
+  /** "rascunho" | "aprovada" */
+  status: text("status").notNull().default("rascunho"),
+  pdfUrl: text("pdf_url"),
+  approvedAt: integer("approved_at", { mode: "timestamp" }),
   audioPath: text("audio_path"),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
@@ -309,6 +319,8 @@ export const atas = sqliteTable("atas", {
   status: text("status").notNull().default("rascunho"), // "rascunho" | "em_revisao" | "pdf_definitiva" | "aguardando_votos" | "aprovada" | "rejeitada"
   transcricaoRaw: text("transcricao_raw").notNull(),
   ataTexto: text("ata_texto").notNull(),
+  /** Structured ata content (header, pontos, discussão, votos) as JSON — source of truth for editor/PDF. */
+  conteudoJson: text("conteudo_json"),
   resumoDeliberacoes: text("resumo_deliberacoes"),
   // O áudio só deve ser disponibilizado ao portal dentro da janela de votação,
   // para depois ser removido (limpeza).

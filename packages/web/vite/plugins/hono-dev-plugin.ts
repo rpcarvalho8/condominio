@@ -31,7 +31,7 @@ async function loadApp(server: ViteDevServer) {
   return mod.default;
 }
 
-function toWebRequest(req: import("http").IncomingMessage): Request {
+async function toWebRequest(req: import("http").IncomingMessage): Promise<Request> {
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const headers = new Headers();
   for (const [key, val] of Object.entries(req.headers)) {
@@ -39,11 +39,18 @@ function toWebRequest(req: import("http").IncomingMessage): Request {
   }
 
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  let body: Buffer | undefined;
+  if (hasBody) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    body = Buffer.concat(chunks);
+  }
+
   return new Request(url, {
     method: req.method,
     headers,
-    body: hasBody ? (req as unknown as ReadableStream) : undefined,
-    // @ts-expect-error duplex needed for streaming request bodies
-    duplex: hasBody ? "half" : undefined,
+    ...(body && body.length > 0 ? { body: new Uint8Array(body) } : {}),
   });
 }

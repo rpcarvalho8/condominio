@@ -82,8 +82,18 @@ export async function transcribeAudioWithGroq(file: File): Promise<string> {
   const groqApiKey = process.env.GROQ_API_KEY;
   if (!groqApiKey) throw new Error("GROQ_API_KEY não configurada no servidor.");
 
-  if (file.size <= WHISPER_MAX_BYTES) {
-    const text = await transcribeChunk(file, file.name);
+  // Materializar bytes uma vez — alguns runtimes esvaziam o File após o 1.º arrayBuffer()
+  const buffer = Buffer.from(await file.arrayBuffer());
+  if (buffer.length === 0) {
+    throw new Error("Ficheiro de áudio vazio — não é possível transcrever.");
+  }
+
+  const mime = file.type || guessMimeFromName(file.name);
+  const safeName = file.name || `audio_${Date.now()}${extFromMime(mime)}`;
+  const fileForApi = new File([buffer], safeName, { type: mime });
+
+  if (buffer.length <= WHISPER_MAX_BYTES) {
+    const text = await transcribeChunk(fileForApi, safeName);
     if (!text) throw new Error("Transcrição vazia devolvida pelo STT.");
     return text;
   }
@@ -91,16 +101,14 @@ export async function transcribeAudioWithGroq(file: File): Promise<string> {
   // File too large — need chunking
   if (!hasFfmpeg()) {
     throw new Error(
-      `Ficheiro de áudio demasiado grande (${Math.round(file.size / (1024 * 1024))}MB) para o limite de 25MB do Whisper. ` +
+      `Ficheiro de áudio demasiado grande (${Math.round(buffer.length / (1024 * 1024))}MB) para o limite de 25MB do Whisper. ` +
       `Instale ffmpeg no servidor para dividir automaticamente, ou faça upload de um ficheiro mais curto.`
     );
   }
 
-  // Write to temp file
   const tmpDir = path.join(process.cwd(), "data", "tmp");
   fs.mkdirSync(tmpDir, { recursive: true });
-  const tmpFile = path.join(tmpDir, `stt_${Date.now()}_${file.name}`);
-  const buffer = Buffer.from(await file.arrayBuffer());
+  const tmpFile = path.join(tmpDir, `stt_${Date.now()}_${safeName.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
   fs.writeFileSync(tmpFile, buffer);
 
   try {
@@ -117,7 +125,6 @@ export async function transcribeAudioWithGroq(file: File): Promise<string> {
       if (text) transcriptions.push(text);
     }
 
-    // Cleanup chunks
     for (const cp of chunkPaths) {
       try { fs.unlinkSync(cp); } catch {}
     }
@@ -130,4 +137,35 @@ export async function transcribeAudioWithGroq(file: File): Promise<string> {
   } finally {
     try { fs.unlinkSync(tmpFile); } catch {}
   }
+}
+
+/** Transcreve a partir de um path já gravado em disco (evita re-ler File consumido). */
+export async function transcribeAudioFilePath(absolutePath: string, originalName?: string): Promise<string> {
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error("Ficheiro de áudio não encontrado no servidor.");
+  }
+  const buffer = fs.readFileSync(absolutePath);
+  if (buffer.length === 0) throw new Error("Ficheiro de áudio vazio — não é possível transcrever.");
+
+  const name = originalName || path.basename(absolutePath);
+  const mime = guessMimeFromName(name);
+  const file = new File([buffer], name, { type: mime });
+  return transcribeAudioWithGroq(file);
+}
+
+function guessMimeFromName(name: string): string {
+  const ext = path.extname(name).toLowerCase();
+  if (ext === ".mp3") return "audio/mpeg";
+  if (ext === ".wav") return "audio/wav";
+  if (ext === ".webm") return "audio/webm";
+  if (ext === ".m4a" || ext === ".mp4") return "audio/mp4";
+  return "application/octet-stream";
+}
+
+function extFromMime(mime: string): string {
+  if (mime.includes("mpeg") || mime.includes("mp3")) return ".mp3";
+  if (mime.includes("wav")) return ".wav";
+  if (mime.includes("webm")) return ".webm";
+  if (mime.includes("mp4") || mime.includes("m4a") || mime.includes("aac")) return ".m4a";
+  return ".bin";
 }
