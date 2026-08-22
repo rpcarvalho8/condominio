@@ -64,22 +64,32 @@ Assunto: ${input.subject}
 Corpo:
 ${(input.bodyText || "").slice(0, 6000)}`;
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${groqApiKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_CHAT_MODEL,
-      temperature: 0.3,
-      max_tokens: 1800,
-      messages: [
-        { role: "system", content: "Especialista em administração de condomínios. Responde só com JSON válido." },
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let response: Response;
+  try {
+    response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${groqApiKey}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_CHAT_MODEL,
+        temperature: 0.3,
+        max_tokens: 1800,
+        messages: [
+          { role: "system", content: "Especialista em administração de condomínios. Responde só com JSON válido." },
+          { role: "user", content: prompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } catch {
+    clearTimeout(timer);
+    return fallback(input.subject, input.bodyText);
+  }
+  clearTimeout(timer);
 
   if (!response.ok) return fallback(input.subject, input.bodyText);
 
