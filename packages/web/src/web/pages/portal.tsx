@@ -105,6 +105,12 @@ function tipoLabel(tipo: string) {
   return map[tipo] ?? tipo;
 }
 
+/** Botões com área de toque confortável em mobile */
+const BTN =
+  "rounded-lg font-medium transition disabled:opacity-40 py-3 px-4 text-base md:py-2 md:px-3 md:text-sm";
+const BTN_TAB =
+  "flex-1 py-3 px-2 text-base font-medium transition md:py-3 md:text-sm min-h-[44px]";
+
 function AtaAudioPlayer({
   ataId,
   canPlay,
@@ -145,8 +151,8 @@ function AtaAudioPlayer({
 
   return (
     <div className="mt-3">
-      {loading && <p className="text-xs text-gray-500">A carregar áudio...</p>}
-      {src ? <audio controls src={src} className="w-full" /> : !loading && canPlay ? <p className="text-xs text-gray-500">Áudio indisponível.</p> : null}
+      {loading && <p className="text-sm md:text-xs text-gray-500">A carregar áudio...</p>}
+      {src ? <audio controls src={src} className="w-full" /> : !loading && canPlay ? <p className="text-sm md:text-xs text-gray-500">Áudio indisponível.</p> : null}
     </div>
   );
 }
@@ -332,8 +338,8 @@ export default function PortalPage() {
             Olá{session?.user?.name ? `, ${session.user.name}` : ""}
           </h1>
           <p className="text-gray-400 mb-2">A sua conta está ativa, mas ainda não tem fração associada.</p>
-          <p className="text-gray-600 text-sm">Peça ao administrador do condomínio para ligar a sua fração à conta.</p>
-          <button onClick={handleLogout} className="mt-6 text-blue-400 hover:underline text-sm">
+          <p className="text-gray-600 text-base md:text-sm">Peça ao administrador do condomínio para ligar a sua fração à conta.</p>
+          <button onClick={handleLogout} className={`mt-6 text-blue-400 hover:underline ${BTN} bg-transparent text-blue-400`}>
             Sair
           </button>
         </div>
@@ -345,35 +351,35 @@ export default function PortalPage() {
   const anos = [...new Set(data.quotas.map(q => q.ano))].sort((a, b) => b - a);
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
+    <div className="min-h-screen bg-gray-950 text-white text-base md:text-sm">
       {/* Header */}
       <header className="border-b border-gray-800 bg-gray-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+        <div className="max-w-4xl mx-auto px-4 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+            <div className="w-10 h-10 md:w-8 md:h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
               <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
             </div>
             <div>
-              <p className="font-semibold text-sm">Gestão Condomínio</p>
-              <p className="text-gray-500 text-xs">Fração {data.fracao.numero}</p>
+              <p className="font-semibold text-base md:text-sm">Gestão Condomínio</p>
+              <p className="text-gray-500 text-sm md:text-xs">Fração {data.fracao.numero}</p>
             </div>
           </div>
-          <button onClick={handleLogout} className="text-gray-400 hover:text-white text-sm transition">
+          <button onClick={handleLogout} className={`self-start sm:self-auto text-gray-400 hover:text-white ${BTN} bg-transparent !py-2 !px-3`}>
             Sair
           </button>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+      <main className="max-w-4xl mx-auto px-4 py-6 md:py-8 space-y-6">
         {/* Welcome + Info */}
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-          <h1 className="text-xl font-semibold mb-1">
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 md:p-6">
+          <h1 className="text-xl md:text-xl font-semibold mb-1">
             Olá, {data.fracao.proprietarioNome ?? session?.user?.name}
           </h1>
-          <p className="text-gray-400 text-sm">Fração {data.fracao.numero} · Permilagem: {data.fracao.permilagem?.toFixed(1) ?? "—"}‰</p>
-          <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+          <p className="text-gray-400 text-base md:text-sm">Fração {data.fracao.numero} · Permilagem: {data.fracao.permilagem?.toFixed(1) ?? "—"}‰</p>
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-3 text-base md:text-sm">
             {data.fracao.proprietarioEmail && (
               <div>
                 <span className="text-gray-500">Email</span>
@@ -390,24 +396,24 @@ export default function PortalPage() {
         </div>
 
         {/* Summary cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <p className="text-gray-500 text-xs uppercase tracking-wider mb-1">Quota Mensal</p>
-            <p className="text-lg font-bold text-white">{formatEur(data.fracao.quotaMensal)}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 md:p-4">
+            <p className="text-gray-500 text-sm md:text-xs uppercase tracking-wider mb-1">Quota Mensal</p>
+            <p className="text-xl md:text-lg font-bold text-white">{formatEur(data.fracao.quotaMensal)}</p>
           </div>
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <p className="text-gray-500 text-xs uppercase tracking-wider mb-1">Em Dívida</p>
-            <p className={`text-lg font-bold ${data.resumo.totalDívida > 0 ? "text-red-400" : "text-green-400"}`}>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 md:p-4">
+            <p className="text-gray-500 text-sm md:text-xs uppercase tracking-wider mb-1">Em Dívida</p>
+            <p className={`text-xl md:text-lg font-bold ${data.resumo.totalDívida > 0 ? "text-red-400" : "text-green-400"}`}>
               {formatEur(data.resumo.totalDívida)}
             </p>
           </div>
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <p className="text-gray-500 text-xs uppercase tracking-wider mb-1">Total Pago</p>
-            <p className="text-lg font-bold text-green-400">{formatEur(data.resumo.totalPago)}</p>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 md:p-4">
+            <p className="text-gray-500 text-sm md:text-xs uppercase tracking-wider mb-1">Total Pago</p>
+            <p className="text-xl md:text-lg font-bold text-green-400">{formatEur(data.resumo.totalPago)}</p>
           </div>
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <p className="text-gray-500 text-xs uppercase tracking-wider mb-1">Pendentes</p>
-            <p className={`text-lg font-bold ${data.resumo.quotasPendentes > 0 ? "text-amber-400" : "text-gray-400"}`}>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 md:p-4">
+            <p className="text-gray-500 text-sm md:text-xs uppercase tracking-wider mb-1">Pendentes</p>
+            <p className={`text-xl md:text-lg font-bold ${data.resumo.quotasPendentes > 0 ? "text-amber-400" : "text-gray-400"}`}>
               {data.resumo.quotasPendentes}
             </p>
           </div>
@@ -415,44 +421,44 @@ export default function PortalPage() {
 
         {/* Tabs */}
         <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
-          <div className="flex border-b border-gray-800">
+          <div className="flex flex-col sm:flex-row border-b border-gray-800">
             <button
               onClick={() => setTab("quotas")}
-              className={`flex-1 py-3 text-sm font-medium transition ${tab === "quotas" ? "text-white border-b-2 border-blue-500" : "text-gray-500 hover:text-gray-300"}`}
+              className={`${BTN_TAB} ${tab === "quotas" ? "text-white border-b-2 border-blue-500 bg-gray-950/50 sm:bg-transparent" : "text-gray-500 hover:text-gray-300"}`}
             >
               Quotas
             </button>
             <button
               onClick={() => setTab("recibos")}
-              className={`flex-1 py-3 text-sm font-medium transition ${tab === "recibos" ? "text-white border-b-2 border-blue-500" : "text-gray-500 hover:text-gray-300"}`}
+              className={`${BTN_TAB} ${tab === "recibos" ? "text-white border-b-2 border-blue-500 bg-gray-950/50 sm:bg-transparent" : "text-gray-500 hover:text-gray-300"}`}
             >
               Recibos
             </button>
             <button
               onClick={() => setTab("atas")}
-              className={`flex-1 py-3 text-sm font-medium transition ${tab === "atas" ? "text-white border-b-2 border-blue-500" : "text-gray-500 hover:text-gray-300"}`}
+              className={`${BTN_TAB} ${tab === "atas" ? "text-white border-b-2 border-blue-500 bg-gray-950/50 sm:bg-transparent" : "text-gray-500 hover:text-gray-300"}`}
             >
               Atas
             </button>
             <button
               onClick={() => setTab("pedidos")}
-              className={`flex-1 py-3 text-sm font-medium transition ${tab === "pedidos" ? "text-white border-b-2 border-blue-500" : "text-gray-500 hover:text-gray-300"}`}
+              className={`${BTN_TAB} ${tab === "pedidos" ? "text-white border-b-2 border-blue-500 bg-gray-950/50 sm:bg-transparent" : "text-gray-500 hover:text-gray-300"}`}
             >
               Pedidos
             </button>
           </div>
 
           {tab === "quotas" && (
-            <div className="p-4">
+            <div className="p-4 md:p-4">
               {/* Year filter */}
-              <div className="flex items-center gap-2 mb-4">
-                <span className="text-gray-500 text-sm">Ano:</span>
-                <div className="flex gap-1">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center mb-4">
+                <span className="text-gray-500 text-base md:text-sm">Ano:</span>
+                <div className="flex flex-wrap gap-2">
                   {anos.map(ano => (
                     <button
                       key={ano}
                       onClick={() => setAnoFiltro(ano)}
-                      className={`px-3 py-1 rounded-lg text-sm transition ${anoFiltro === ano ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-400 hover:text-white"}`}
+                      className={`${BTN} ${anoFiltro === ano ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-400 hover:text-white"}`}
                     >
                       {ano}
                     </button>
@@ -460,31 +466,34 @@ export default function PortalPage() {
                 </div>
               </div>
 
-              {/* Quotas grid */}
-              <div className="space-y-2">
+              {/* Quotas — cards empilhados em mobile */}
+              <div className="space-y-3 md:space-y-2">
                 {quotasDoAno.length === 0 ? (
-                  <p className="text-gray-500 text-sm text-center py-6">Sem quotas para {anoFiltro}</p>
+                  <p className="text-gray-500 text-base md:text-sm text-center py-6">Sem quotas para {anoFiltro}</p>
                 ) : (
                   quotasDoAno.map(q => (
-                    <div key={q.id} className="flex items-center justify-between py-3 border-b border-gray-800 last:border-0">
+                    <div
+                      key={q.id}
+                      className="rounded-xl border border-gray-800 bg-gray-950/40 p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:py-3 md:px-0 md:border-0 md:border-b md:border-gray-800 md:rounded-none md:bg-transparent md:last:border-0"
+                    >
                       <div className="flex items-center gap-3">
-                        <div className={`w-2 h-2 rounded-full ${q.pago ? "bg-green-400" : "bg-amber-400"}`} />
+                        <div className={`w-3 h-3 md:w-2 md:h-2 rounded-full shrink-0 ${q.pago ? "bg-green-400" : "bg-amber-400"}`} />
                         <div>
-                          <p className="text-sm font-medium">{MESES[q.mes - 1]} {q.ano}</p>
-                          <p className="text-xs text-gray-500">{tipoLabel(q.tipo)}</p>
+                          <p className="text-base md:text-sm font-medium">{MESES[q.mes - 1]} {q.ano}</p>
+                          <p className="text-sm md:text-xs text-gray-500">{tipoLabel(q.tipo)}</p>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <p className={`text-sm font-semibold ${q.pago ? "text-green-400" : "text-amber-400"}`}>
+                      <div className="flex items-center justify-between gap-3 md:block md:text-right pl-6 md:pl-0">
+                        <p className={`text-lg md:text-sm font-semibold ${q.pago ? "text-green-400" : "text-amber-400"}`}>
                           {formatEur(q.valor)}
                         </p>
                         {q.pago && q.dataPagamento && (
-                          <p className="text-xs text-gray-500">
+                          <p className="text-sm md:text-xs text-gray-500">
                             Pago em {new Date(q.dataPagamento).toLocaleDateString("pt-PT")}
                           </p>
                         )}
                         {!q.pago && (
-                          <p className="text-xs text-amber-500/70">Pendente</p>
+                          <p className="text-sm md:text-xs text-amber-500/70">Pendente</p>
                         )}
                       </div>
                     </div>
@@ -497,25 +506,33 @@ export default function PortalPage() {
           {tab === "recibos" && (
             <div className="p-4">
               {data.recibos.length === 0 ? (
-                <p className="text-gray-500 text-sm text-center py-6">Sem recibos emitidos</p>
+                <p className="text-gray-500 text-base md:text-sm text-center py-6">Sem recibos emitidos</p>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-3 md:space-y-2">
                   {data.recibos.map(r => (
-                    <div key={r.id} className="flex items-center justify-between py-3 border-b border-gray-800 last:border-0">
+                    <div
+                      key={r.id}
+                      className="rounded-xl border border-gray-800 bg-gray-950/40 p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:py-3 md:px-0 md:border-0 md:border-b md:border-gray-800 md:rounded-none md:bg-transparent md:last:border-0"
+                    >
                       <div>
-                        <p className="text-sm font-medium">{r.numeroRecibo ?? "—"}</p>
-                        <p className="text-xs text-gray-500">
+                        <p className="text-base md:text-sm font-medium">{r.numeroRecibo ?? "—"}</p>
+                        <p className="text-sm md:text-xs text-gray-500">
                           {new Date(r.createdAt).toLocaleDateString("pt-PT")}
                         </p>
                       </div>
-                      <div className="flex items-center gap-3">
-                        <p className="text-sm font-semibold text-green-400">{formatEur(r.valor)}</p>
+                      <div className="flex items-center justify-between gap-3 md:justify-end">
+                        <p className="text-lg md:text-sm font-semibold text-green-400">{formatEur(r.valor)}</p>
                         {r.pdfUrl && (
-                          <a href={r.pdfUrl} target="_blank" rel="noopener noreferrer"
-                            className="text-blue-400 hover:text-blue-300 transition">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <a
+                            href={r.pdfUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className={`inline-flex items-center gap-2 text-blue-400 hover:text-blue-300 ${BTN} bg-blue-600/10 !py-2`}
+                          >
+                            <svg className="w-5 h-5 md:w-4 md:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                             </svg>
+                            PDF
                           </a>
                         )}
                       </div>
@@ -529,22 +546,22 @@ export default function PortalPage() {
           {tab === "atas" && (
             <div className="p-4">
               {atas.length === 0 ? (
-                <p className="text-gray-500 text-sm text-center py-6">Sem atas publicadas ainda.</p>
+                <p className="text-gray-500 text-base md:text-sm text-center py-6">Sem atas publicadas ainda.</p>
               ) : (
                 <div className="space-y-4">
                   {atas.map((ata) => (
-                    <div key={ata.id} className="rounded-xl border border-gray-800 p-4 bg-gray-950/50">
-                      <div className="flex items-start justify-between gap-2">
+                    <div key={ata.id} className="rounded-xl border border-gray-800 p-4 md:p-4 bg-gray-950/50">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
                         <div>
-                          <h3 className="text-sm font-semibold">{ata.titulo}</h3>
-                          <span className="text-xs text-gray-500">
+                          <h3 className="text-base md:text-sm font-semibold">{ata.titulo}</h3>
+                          <span className="text-sm md:text-xs text-gray-500">
                             {new Date(ata.dataReuniao).toLocaleDateString("pt-PT")}
                           </span>
                         </div>
-                        <span className="text-xs text-gray-500">{ata.status}</span>
+                        <span className="text-sm md:text-xs text-gray-500 self-start">{ata.status}</span>
                       </div>
                       {ata.resumoDeliberacoes && (
-                        <p className="text-xs text-gray-400 mt-2 whitespace-pre-wrap">{ata.resumoDeliberacoes}</p>
+                        <p className="text-sm md:text-xs text-gray-400 mt-2 whitespace-pre-wrap">{ata.resumoDeliberacoes}</p>
                       )}
 
                       {ata.pdfUrl && (
@@ -553,7 +570,7 @@ export default function PortalPage() {
                             href={ata.pdfUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-blue-400 hover:text-blue-300 transition text-sm"
+                            className={`inline-block text-blue-400 hover:text-blue-300 ${BTN} bg-transparent !px-0 !py-2 text-base md:text-sm`}
                           >
                             Abrir PDF definitivo
                           </a>
@@ -562,14 +579,14 @@ export default function PortalPage() {
 
                       {ata.status === "aguardando_votos" && ata.approvalDeadlineAt && (
                         <div className="mt-3">
-                          <p className="text-xs text-amber-300">
+                          <p className="text-sm md:text-xs text-amber-300">
                             Votação termina em{" "}
                             {Math.max(0, Math.ceil((new Date(ata.approvalDeadlineAt).getTime() - Date.now()) / 60000))} min
                           </p>
 
-                          <div className="flex flex-wrap gap-2 mt-2">
+                          <div className="flex flex-col sm:flex-row flex-wrap gap-2 mt-2">
                             <button
-                              className="px-3 py-1.5 rounded-md text-sm"
+                              className={`${BTN} md:py-1.5 md:px-3`}
                               style={{
                                 background: ata.userVote === "approve" ? "var(--green-subtle)" : "var(--blue-primary)",
                                 color: ata.userVote === "approve" ? "var(--green)" : "white",
@@ -585,7 +602,7 @@ export default function PortalPage() {
                               Aprovar
                             </button>
                             <button
-                              className="px-3 py-1.5 rounded-md text-sm"
+                              className={`${BTN} md:py-1.5 md:px-3`}
                               style={{
                                 background: ata.userVote === "reject" ? "var(--red-subtle)" : "var(--bg-secondary)",
                                 color: ata.userVote === "reject" ? "var(--red)" : "var(--text-primary)",
@@ -611,13 +628,13 @@ export default function PortalPage() {
                       )}
 
                       {ata.status === "aprovada" && (
-                        <p className="mt-3 text-xs text-green-300">Aprovada e publicada.</p>
+                        <p className="mt-3 text-sm md:text-xs text-green-300">Aprovada e publicada.</p>
                       )}
                       {ata.status === "rejeitada" && (
-                        <p className="mt-3 text-xs text-red-300">Rejeitada.</p>
+                        <p className="mt-3 text-sm md:text-xs text-red-300">Rejeitada.</p>
                       )}
 
-                      <pre className="mt-3 text-xs text-gray-200 whitespace-pre-wrap font-sans leading-relaxed">
+                      <pre className="mt-3 text-sm md:text-xs text-gray-200 whitespace-pre-wrap font-sans leading-relaxed">
                         {ata.ataTexto}
                       </pre>
                     </div>
@@ -630,59 +647,59 @@ export default function PortalPage() {
           {tab === "pedidos" && (
             <div className="p-4 space-y-6">
               <div className="rounded-xl border border-gray-800 p-4 bg-gray-950/40 space-y-3">
-                <h3 className="text-sm font-semibold">Novo pedido</h3>
-                <p className="text-xs text-gray-500">
+                <h3 className="text-base md:text-sm font-semibold">Novo pedido</h3>
+                <p className="text-sm md:text-xs text-gray-500">
                   Ex.: lâmpada fundida, elevador, barulho, dúvida sobre quotas.
                 </p>
                 <input
-                  className="w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm"
+                  className="w-full rounded-lg bg-gray-900 border border-gray-700 px-4 py-3 md:px-3 md:py-2 text-base md:text-sm"
                   placeholder="Título"
                   value={novoTitulo}
                   onChange={(e) => setNovoTitulo(e.target.value)}
                 />
                 <textarea
-                  className="w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm min-h-[90px]"
+                  className="w-full rounded-lg bg-gray-900 border border-gray-700 px-4 py-3 md:px-3 md:py-2 text-base md:text-sm min-h-[120px] md:min-h-[90px]"
                   placeholder="Descreva o pedido com o máximo de detalhe possível"
                   value={novaDescricao}
                   onChange={(e) => setNovaDescricao(e.target.value)}
                 />
-                <label className="block text-xs text-gray-500">
+                <label className="block text-sm md:text-xs text-gray-500">
                   Anexos opcionais (imagens ou vídeos, máx. 5)
                   <input
                     type="file"
                     accept="image/*,video/*"
                     multiple
-                    className="mt-1 block w-full text-xs text-gray-400"
+                    className="mt-2 block w-full text-sm md:text-xs text-gray-400 py-2"
                     onChange={(e) => setNovosAnexos(e.target.files)}
                   />
                 </label>
                 <button
-                  className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white disabled:opacity-40"
+                  className={`w-full sm:w-auto ${BTN} bg-blue-600 text-white`}
                   disabled={ticketBusy || !novoTitulo.trim() || !novaDescricao.trim()}
                   onClick={createTicket}
                 >
                   {ticketBusy ? "A enviar…" : "Enviar pedido"}
                 </button>
-                {ticketMsg && <p className="text-xs text-amber-300">{ticketMsg}</p>}
+                {ticketMsg && <p className="text-sm md:text-xs text-amber-300">{ticketMsg}</p>}
               </div>
 
               <div className="space-y-2">
-                <h3 className="text-sm font-semibold">Os seus pedidos</h3>
+                <h3 className="text-base md:text-sm font-semibold">Os seus pedidos</h3>
                 {tickets.length === 0 ? (
-                  <p className="text-gray-500 text-sm text-center py-4">Ainda não tem pedidos.</p>
+                  <p className="text-gray-500 text-base md:text-sm text-center py-4">Ainda não tem pedidos.</p>
                 ) : (
                   tickets.map((t) => (
                     <button
                       key={t.id}
                       type="button"
                       onClick={() => loadTicketDetail(t.id)}
-                      className={`w-full text-left rounded-xl border p-3 ${selectedTicketId === t.id ? "border-blue-500 bg-gray-950" : "border-gray-800 bg-gray-950/40"}`}
+                      className={`w-full text-left rounded-xl border p-4 md:p-3 min-h-[44px] ${selectedTicketId === t.id ? "border-blue-500 bg-gray-950" : "border-gray-800 bg-gray-950/40"}`}
                     >
-                      <div className="flex justify-between gap-2">
-                        <span className="text-sm font-medium">{t.titulo}</span>
-                        <span className="text-xs text-gray-500">{TICKET_STATUS[t.status] ?? t.status}</span>
+                      <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:gap-2">
+                        <span className="text-base md:text-sm font-medium">{t.titulo}</span>
+                        <span className="text-sm md:text-xs text-gray-500">{TICKET_STATUS[t.status] ?? t.status}</span>
                       </div>
-                      <p className="text-xs text-gray-500 mt-1">
+                      <p className="text-sm md:text-xs text-gray-500 mt-1">
                         {new Date(t.updatedAt).toLocaleString("pt-PT")} · {t.categoria} · {t.urgencia}
                       </p>
                     </button>
@@ -692,9 +709,9 @@ export default function PortalPage() {
 
               {ticketDetail && (
                 <div className="rounded-xl border border-gray-800 p-4 bg-gray-950/50 space-y-3">
-                  <h3 className="text-sm font-semibold">{ticketDetail.titulo}</h3>
+                  <h3 className="text-base md:text-sm font-semibold">{ticketDetail.titulo}</h3>
                   {ticketDetail.llmResumo && (
-                    <p className="text-xs text-gray-400">{ticketDetail.llmResumo}</p>
+                    <p className="text-sm md:text-xs text-gray-400">{ticketDetail.llmResumo}</p>
                   )}
                   {(ticketDetail.attachments?.length ?? 0) > 0 && (
                     <div className="grid gap-2 sm:grid-cols-2">
@@ -715,8 +732,8 @@ export default function PortalPage() {
                   )}
                   <div className="space-y-2 max-h-64 overflow-y-auto">
                     {(ticketDetail.messages ?? []).map((m) => (
-                      <div key={m.id} className="text-sm border-b border-gray-800 pb-2">
-                        <p className="text-xs text-gray-500">
+                      <div key={m.id} className="text-base md:text-sm border-b border-gray-800 pb-2">
+                        <p className="text-sm md:text-xs text-gray-500">
                           {m.authorRole === "system" ? "Sistema" : m.authorName ?? m.authorRole}
                           {" · "}
                           {new Date(m.createdAt).toLocaleString("pt-PT")}
@@ -728,7 +745,7 @@ export default function PortalPage() {
                   {!["resolvido", "cancelado"].includes(ticketDetail.status) && (
                     <div className="space-y-2">
                       <textarea
-                        className="w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm min-h-[70px]"
+                        className="w-full rounded-lg bg-gray-900 border border-gray-700 px-4 py-3 md:px-3 md:py-2 text-base md:text-sm min-h-[100px] md:min-h-[70px]"
                         placeholder="Escrever mensagem…"
                         value={ticketReply}
                         onChange={(e) => setTicketReply(e.target.value)}
@@ -737,11 +754,11 @@ export default function PortalPage() {
                         type="file"
                         accept="image/*,video/*"
                         multiple
-                        className="block w-full text-xs text-gray-400"
+                        className="block w-full text-sm md:text-xs text-gray-400 py-2"
                         onChange={(e) => setTicketReplyFiles(e.target.files)}
                       />
                       <button
-                        className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white disabled:opacity-40"
+                        className={`w-full sm:w-auto ${BTN} bg-blue-600 text-white`}
                         disabled={ticketBusy || (!ticketReply.trim() && !ticketReplyFiles?.length)}
                         onClick={sendTicketReply}
                       >
@@ -756,7 +773,7 @@ export default function PortalPage() {
         </div>
 
         {/* Note */}
-        <p className="text-center text-gray-600 text-xs">
+        <p className="text-center text-gray-600 text-sm md:text-xs px-2">
           Para questões sobre pagamentos contacte a administração do condomínio — ou use a aba Pedidos.
         </p>
       </main>
