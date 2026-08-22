@@ -328,7 +328,10 @@ export function scheduleEmailInboxSync() {
   }
   const FIVE_MIN = 5 * 60 * 1000;
   console.log(`[email-inbox] Sync Gmail activo para ${CONDOMINIO.email} (cada 5 min)`);
+  let running = false;
   const run = async () => {
+    if (running) return;
+    running = true;
     try {
       const res = await syncGmailInbox();
       if (res.created > 0 || res.errors.length > 0) {
@@ -336,6 +339,8 @@ export function scheduleEmailInboxSync() {
       }
     } catch (e) {
       console.error("[email-inbox] sync erro:", e);
+    } finally {
+      running = false;
     }
   };
   // primeira passagem após 30s (não bloquear arranque)
