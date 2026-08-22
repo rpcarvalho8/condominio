@@ -1,3 +1,17 @@
+/**
+ * IMAP Gmail — requer GMAIL_APP_PASSWORD no .env
+ * Se não configurado, o módulo fica desactivado
+ * automaticamente (sem erros, sem cron).
+ *
+ * Para activar:
+ * 1. Google Account → Segurança → Palavras-passe de app
+ * 2. Gera uma palavra-passe para "Correio" / "Mac"
+ * 3. Remove espaços e coloca em GMAIL_APP_PASSWORD=...
+ *
+ * Alternativa futura: substituir IMAP por webhook
+ * do Gmail (Google Pub/Sub) para não depender de
+ * polling e evitar limites de taxa.
+ */
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import { CONDOMINIO } from "./condominio";
@@ -43,6 +57,8 @@ export async function fetchNewGmailMessages(opts: {
     secure: true,
     auth: { user: creds.user, pass: creds.pass },
     logger: false,
+    connectionTimeout: 15_000, // 15s para conectar
+    socketTimeout: 30_000, // 30s sem dados → erro
   });
 
   const results: FetchedEmail[] = [];
