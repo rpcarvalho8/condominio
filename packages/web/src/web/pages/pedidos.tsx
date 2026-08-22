@@ -16,6 +16,7 @@ type TicketListItem = {
   categoria: string;
   urgencia: string;
   status: string;
+  origem?: string;
   llmResumo: string | null;
   llmSugestaoResposta: string | null;
   llmFeedbackRating?: string | null;
@@ -24,6 +25,7 @@ type TicketListItem = {
 };
 
 type TicketDetail = TicketListItem & {
+  origem?: string;
   llmCategoria: string | null;
   llmUrgencia: string | null;
   llmNotasInternas?: string | null;
@@ -61,6 +63,7 @@ const STATUS_LABEL: Record<string, string> = {
   aberto: "Aberto",
   em_curso: "Em curso",
   aguarda_condomino: "Aguarda condómino",
+  pendente_aprovacao: "Pendente aprovação",
   resolvido: "Resolvido",
   cancelado: "Cancelado",
 };
@@ -78,6 +81,7 @@ export default function PedidosPage() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [origemFilter, setOrigemFilter] = useState("");
   const [reply, setReply] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -85,8 +89,19 @@ export default function PedidosPage() {
   const [feedbackComment, setFeedbackComment] = useState("");
 
   const { data: tickets = [], isLoading } = useQuery<TicketListItem[]>({
-    queryKey: ["tickets", statusFilter],
-    queryFn: () => apiFetch(`/api/tickets${statusFilter ? `?status=${statusFilter}` : ""}`),
+    queryKey: ["tickets", statusFilter, origemFilter],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (statusFilter) params.set("status", statusFilter);
+      if (origemFilter) params.set("origem", origemFilter);
+      const q = params.toString();
+      return apiFetch(`/api/tickets${q ? `?${q}` : ""}`);
+    },
+  });
+
+  const { data: emailPendingTickets = [] } = useQuery<TicketListItem[]>({
+    queryKey: ["tickets", "pendente_aprovacao", "email"],
+    queryFn: () => apiFetch("/api/tickets?status=pendente_aprovacao&origem=email"),
   });
 
   const { data: detail } = useQuery<TicketDetail>({
@@ -119,10 +134,20 @@ export default function PedidosPage() {
     return () => { cancelled = true; };
   }, [detail?.id, detail?.attachments]);
 
+  useEffect(() => {
+    if (detail?.llmSugestaoResposta && detail.status === "pendente_aprovacao") {
+      setReply(detail.llmSugestaoResposta);
+    }
+  }, [detail?.id, detail?.status, detail?.llmSugestaoResposta]);
+
   const openCount = useMemo(
-    () => tickets.filter((t) => !["resolvido", "cancelado"].includes(t.status)).length,
+    () => tickets.filter((t) => !["resolvido", "cancelado", "pendente_aprovacao"].includes(t.status)).length,
     [tickets],
   );
+
+  const emailPendingCount = emailPendingTickets.length;
+
+  const isEmailPending = detail?.origem === "email" && detail?.status === "pendente_aprovacao";
 
   const patchMutation = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
@@ -166,6 +191,40 @@ export default function PedidosPage() {
     onError: (e: any) => setError(e.message),
   });
 
+  const approveEmailMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/tickets/${selectedId}/aprovar-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: reply }),
+      }),
+    onSuccess: () => {
+      setSuccess("Resposta enviada por email e pedido marcado como resolvido.");
+      setError("");
+      void qc.invalidateQueries({ queryKey: ["tickets"] });
+      void qc.invalidateQueries({ queryKey: ["ticket", selectedId] });
+      void qc.invalidateQueries({ queryKey: ["tickets", "pendente_aprovacao", "email"] });
+    },
+    onError: (e: any) => setError(e.message),
+  });
+
+  const rejectEmailMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/tickets/${selectedId}/rejeitar-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    onSuccess: () => {
+      setSuccess("Pedido rejeitado e email arquivado como spam.");
+      setError("");
+      void qc.invalidateQueries({ queryKey: ["tickets"] });
+      void qc.invalidateQueries({ queryKey: ["ticket", selectedId] });
+      void qc.invalidateQueries({ queryKey: ["tickets", "pendente_aprovacao", "email"] });
+    },
+    onError: (e: any) => setError(e.message),
+  });
+
   const feedbackMutation = useMutation({
     mutationFn: (payload: { rating: "positive" | "negative"; comment?: string }) =>
       apiFetch(`/api/tickets/${selectedId}/feedback`, {
@@ -201,7 +260,7 @@ export default function PedidosPage() {
     <>
       <PageHeader
         title="Pedidos"
-        subtitle="Fila de pedidos dos condóminos com triagem automática"
+        subtitle="Fila de pedidos dos condóminos e acções pendentes de email (triagem LLM)"
         breadcrumb={["Gestão Condomínio", "Administração", "Pedidos"]}
       />
       <div className="p-6 space-y-6">
@@ -226,12 +285,25 @@ export default function PedidosPage() {
             </CardHeader>
             <CardContent className="space-y-3">
               <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant={statusFilter === "pendente_aprovacao" && origemFilter === "email" ? "primary" : "secondary"}
+                  onClick={() => {
+                    setStatusFilter("pendente_aprovacao");
+                    setOrigemFilter("email");
+                  }}
+                >
+                  Email pendentes{emailPendingCount > 0 ? ` (${emailPendingCount})` : ""}
+                </Button>
                 {["", "aberto", "em_curso", "aguarda_condomino", "resolvido"].map((s) => (
                   <Button
                     key={s || "all"}
                     size="sm"
-                    variant={statusFilter === s ? "primary" : "secondary"}
-                    onClick={() => setStatusFilter(s)}
+                    variant={statusFilter === s && !origemFilter ? "primary" : "secondary"}
+                    onClick={() => {
+                      setStatusFilter(s);
+                      setOrigemFilter("");
+                    }}
                   >
                     {s ? STATUS_LABEL[s] : "Todos"}
                   </Button>
@@ -257,6 +329,7 @@ export default function PedidosPage() {
                       <div className="font-semibold" style={{ color: "var(--text-primary)" }}>{t.titulo}</div>
                       <div className="text-xs" style={{ color: "var(--text-muted)" }}>
                         Fração {t.fracaoNumero ?? "?"} · {CATEGORIA_LABEL[t.categoria] ?? t.categoria} · {STATUS_LABEL[t.status] ?? t.status}
+                        {t.origem === "email" ? " · Email" : ""}
                         {t.urgencia === "urgente" || t.urgencia === "alta" ? ` · ${t.urgencia}` : ""}
                       </div>
                     </button>
@@ -277,8 +350,18 @@ export default function PedidosPage() {
                     <h3 className="font-semibold" style={{ color: "var(--text-primary)" }}>{detail.titulo}</h3>
                     <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
                       Fração {detail.fracaoNumero} · {new Date(detail.createdAt).toLocaleString("pt-PT")}
+                      {detail.origem === "email" ? " · Origem: email" : ""}
                     </p>
                   </div>
+
+                  {isEmailPending && (
+                    <div
+                      className="rounded-lg border px-3 py-2 text-sm"
+                      style={{ borderColor: "var(--amber)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}
+                    >
+                      Pedido gerado automaticamente a partir de email — revê a sugestão LLM antes de aprovar.
+                    </div>
+                  )}
 
                   <div className="grid gap-3 sm:grid-cols-3">
                     <label className="text-xs space-y-1">
@@ -375,22 +458,51 @@ export default function PedidosPage() {
                     ))}
                   </div>
 
-                  <Textarea label="Resposta ao condómino" value={reply} onChange={(e) => setReply(e.target.value)} rows={8} />
+                  <Textarea
+                    label={isEmailPending ? "Resposta por email (editável)" : "Resposta ao condómino"}
+                    value={reply}
+                    onChange={(e) => setReply(e.target.value)}
+                    rows={8}
+                  />
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={() => replyMutation.mutate()} loading={replyMutation.isPending} disabled={!reply.trim()}>
-                      Enviar
-                    </Button>
-                    <Button variant="secondary" onClick={useSuggestion} disabled={!detail.llmSugestaoResposta}>
-                      Usar sugestão LLM
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => triageMutation.mutate()}
-                      loading={triageMutation.isPending}
-                      title="Volta a analisar o pedido + histórico e gera novo resumo, notas e sugestão de resposta"
-                    >
-                      Atualizar triagem LLM
-                    </Button>
+                    {isEmailPending ? (
+                      <>
+                        <Button
+                          onClick={() => approveEmailMutation.mutate()}
+                          loading={approveEmailMutation.isPending}
+                          disabled={!reply.trim()}
+                        >
+                          Aprovar e enviar email
+                        </Button>
+                        <Button
+                          variant="danger"
+                          onClick={() => rejectEmailMutation.mutate()}
+                          loading={rejectEmailMutation.isPending}
+                        >
+                          Rejeitar / Spam
+                        </Button>
+                        <Button variant="secondary" onClick={useSuggestion} disabled={!detail.llmSugestaoResposta}>
+                          Usar sugestão LLM
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button onClick={() => replyMutation.mutate()} loading={replyMutation.isPending} disabled={!reply.trim()}>
+                          Enviar
+                        </Button>
+                        <Button variant="secondary" onClick={useSuggestion} disabled={!detail.llmSugestaoResposta}>
+                          Usar sugestão LLM
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          onClick={() => triageMutation.mutate()}
+                          loading={triageMutation.isPending}
+                          title="Volta a analisar o pedido + histórico e gera novo resumo, notas e sugestão de resposta"
+                        >
+                          Atualizar triagem LLM
+                        </Button>
+                      </>
+                    )}
                   </div>
 
                   {detail.llmSugestaoResposta && (
