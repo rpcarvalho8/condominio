@@ -5,88 +5,54 @@ import { emailInbox, fracoes, tickets, ticketMessages } from "../database/schema
 import { requireAdmin, requireAuth } from "../middleware/auth";
 import { CONDOMINIO } from "../lib/condominio";
 import { triarEmailInbox } from "../lib/email-llm";
-import { fetchNewGmailMessages, isGmailImapConfigured, type FetchedEmail } from "../lib/gmail-imap";
+import { matchFracaoByEmail, runEmailTicketPipeline } from "../lib/email-ticket-pipeline";
+import { fetchNewGmailMessages, formatImapError, isGmailImapConfigured, type FetchedEmail } from "../lib/gmail-imap";
 import { sendPlainEmail } from "../lib/ticket-email";
 
-const STATUS_OK = new Set(["novo", "em_analise", "respondido", "convertido_pedido", "ignorado", "spam"]);
+const STATUS_OK = new Set(["novo", "em_analise", "respondido", "convertido_pedido", "ignorado", "spam", "processado"]);
 const CATEGORIA_OK = new Set([
   "manutencao", "ruido", "financeiro", "juridico", "administrativo", "fornecedor", "spam", "outro",
 ]);
 const URGENCIA_OK = new Set(["baixa", "normal", "alta", "urgente"]);
 
-async function matchFracaoByEmail(fromEmail: string) {
-  const email = fromEmail.trim().toLowerCase();
-  if (!email) return null;
-  const rows = await db.select().from(fracoes).where(eq(fracoes.ativo, true));
-  const hit = rows.find((f) => (f.proprietarioEmail || "").trim().toLowerCase() === email);
-  return hit ?? null;
-}
-
+/** @deprecated Use runEmailTicketPipeline — mantido para compatibilidade de imports */
 export async function ingestFetchedEmail(mail: FetchedEmail): Promise<{
   created: boolean;
   row: typeof emailInbox.$inferSelect;
 }> {
-  const existing = await db
-    .select()
-    .from(emailInbox)
-    .where(eq(emailInbox.externalId, mail.externalId))
-    .limit(1);
-  if (existing[0]) return { created: false, row: existing[0] };
-
-  const fracao = await matchFracaoByEmail(mail.fromEmail);
-  const triage = await triarEmailInbox({
-    fromEmail: mail.fromEmail,
-    fromName: mail.fromName,
-    subject: mail.subject,
-    bodyText: mail.bodyText,
-    fracaoNumero: fracao?.numero ?? null,
-  }).catch(() => null);
-
-  const status = triage?.isSpam ? "spam" : "novo";
-
-  const [row] = await db.insert(emailInbox).values({
-    externalId: mail.externalId,
-    fromEmail: mail.fromEmail,
-    fromName: mail.fromName,
-    toEmail: mail.toEmail || CONDOMINIO.email,
-    subject: mail.subject,
-    bodyText: mail.bodyText,
-    bodyHtml: mail.bodyHtml,
-    receivedAt: mail.receivedAt,
-    fracaoId: fracao?.id ?? null,
-    categoria: triage?.categoria ?? "outro",
-    urgencia: triage?.urgencia ?? "normal",
-    llmResumo: triage?.resumo ?? null,
-    llmSugestaoResposta: triage?.sugestaoResposta ?? null,
-    llmNotasInternas: triage?.notasInternas ?? null,
-    status,
-  }).returning();
-
-  return { created: true, row };
+  const res = await runEmailTicketPipeline(mail);
+  return { created: res.created, row: res.email };
 }
 
-export async function syncGmailInbox(): Promise<{ fetched: number; created: number; errors: string[] }> {
+export async function syncGmailInbox(): Promise<{
+  fetched: number;
+  created: number;
+  tickets: number;
+  errors: string[];
+}> {
   if (!isGmailImapConfigured()) {
-    return { fetched: 0, created: 0, errors: ["GMAIL_APP_PASSWORD não configurada."] };
+    return { fetched: 0, created: 0, tickets: 0, errors: ["GMAIL_APP_PASSWORD não configurada."] };
   }
   const errors: string[] = [];
   let created = 0;
+  let ticketsCreated = 0;
   let fetched = 0;
   try {
-    const mails = await fetchNewGmailMessages({ limit: 25 });
+    const mails = await fetchNewGmailMessages({ limit: 10 });
     fetched = mails.length;
     for (const mail of mails) {
       try {
-        const res = await ingestFetchedEmail(mail);
+        const res = await runEmailTicketPipeline(mail);
         if (res.created) created++;
+        if (res.ticketId) ticketsCreated++;
       } catch (e: any) {
         errors.push(`${mail.externalId}: ${String(e?.message ?? e)}`);
       }
     }
   } catch (e: any) {
-    errors.push(String(e?.message ?? e));
+    errors.push(formatImapError(e));
   }
-  return { fetched, created, errors };
+  return { fetched, created, tickets: ticketsCreated, errors };
 }
 
 export const emailInboxRoutes = new Hono()
@@ -115,7 +81,7 @@ export const emailInboxRoutes = new Hono()
       receivedAt: body.receivedAt ? new Date(body.receivedAt) : new Date(),
     };
 
-    const res = await ingestFetchedEmail(mail);
+    const res = await runEmailTicketPipeline(mail);
     return c.json(res, res.created ? 201 : 200);
   })
   .use(requireAuth)
@@ -220,6 +186,7 @@ export const emailInboxRoutes = new Hono()
         llmSugestaoResposta: triage.sugestaoResposta,
         llmNotasInternas: triage.notasInternas,
         status: triage.isSpam ? "spam" : existing.status === "spam" ? "novo" : existing.status,
+        processedAt: triage.isSpam ? new Date() : existing.processedAt,
         updatedAt: new Date(),
       }).where(eq(emailInbox.id, id)).returning();
       return c.json(updated);
@@ -258,6 +225,7 @@ export const emailInboxRoutes = new Hono()
       replyBody: reply,
       repliedAt: new Date(),
       status: "respondido",
+      processedAt: new Date(),
       updatedAt: new Date(),
     }).where(eq(emailInbox.id, id)).returning();
 
@@ -295,7 +263,8 @@ export const emailInboxRoutes = new Hono()
       descricao,
       categoria: ticketCategoria,
       urgencia: existing.urgencia,
-      status: "aberto",
+      status: "pendente_aprovacao",
+      origem: "email",
       llmCategoria: ticketCategoria,
       llmUrgencia: existing.urgencia,
       llmResumo: existing.llmResumo,
@@ -314,6 +283,7 @@ export const emailInboxRoutes = new Hono()
       ticketId: ticket.id,
       fracaoId,
       status: "convertido_pedido",
+      processedAt: new Date(),
       updatedAt: new Date(),
     }).where(eq(emailInbox.id, id)).returning();
 
@@ -334,8 +304,10 @@ export function scheduleEmailInboxSync() {
     running = true;
     try {
       const res = await syncGmailInbox();
-      if (res.created > 0 || res.errors.length > 0) {
-        console.log(`[email-inbox] sync: fetched=${res.fetched} created=${res.created} errors=${res.errors.length}`);
+      if (res.created > 0 || res.tickets > 0 || res.errors.length > 0) {
+        console.log(
+          `[email-inbox] sync: fetched=${res.fetched} emails=${res.created} tickets=${res.tickets} errors=${res.errors.length}`,
+        );
       }
     } catch (e) {
       console.error("[email-inbox] sync erro:", e);
@@ -343,6 +315,5 @@ export function scheduleEmailInboxSync() {
       running = false;
     }
   };
-  // primeira passagem após 30s (não bloquear arranque)
   setTimeout(() => { void run(); setInterval(run, FIVE_MIN); }, 30_000);
 }
