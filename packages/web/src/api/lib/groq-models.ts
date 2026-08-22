@@ -1,5 +1,10 @@
 /**
- * Modelos Groq (chat). llama-3.3-70b-versatile foi descontinuado em 2026-08-16.
+ * Modelos Groq (chat).
+ * Override via .env: GROQ_CHAT_MODEL / GROQ_CHAT_MODEL_FAST
+ *
+ * Defaults: modelos de produção Groq (2026).
+ * Llama 3.x foi descontinuado — usar gpt-oss ou override no .env.
+ * @see https://console.groq.com/docs/models
  * @see https://console.groq.com/docs/deprecations
  */
 export const GROQ_CHAT_MODEL =
