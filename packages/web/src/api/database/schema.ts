@@ -493,8 +493,10 @@ export const tickets = sqliteTable("tickets", {
   categoria: text("categoria").notNull().default("outro"),
   /** baixa | normal | alta | urgente */
   urgencia: text("urgencia").notNull().default("normal"),
-  /** aberto | em_curso | aguarda_condomino | resolvido | cancelado */
+  /** aberto | em_curso | aguarda_condomino | pendente_aprovacao | resolvido | cancelado */
   status: text("status").notNull().default("aberto"),
+  /** portal | email */
+  origem: text("origem").notNull().default("portal"),
   llmCategoria: text("llm_categoria"),
   llmUrgencia: text("llm_urgencia"),
   llmResumo: text("llm_resumo"),
@@ -598,8 +600,9 @@ export const emailInbox = sqliteTable("email_inbox", {
   llmResumo: text("llm_resumo"),
   llmSugestaoResposta: text("llm_sugestao_resposta"),
   llmNotasInternas: text("llm_notas_internas"),
-  /** novo | em_analise | respondido | convertido_pedido | ignorado | spam */
+  /** novo | em_analise | respondido | convertido_pedido | ignorado | spam | processado */
   status: text("status").notNull().default("novo"),
+  processedAt: integer("processed_at", { mode: "timestamp" }),
   replyBody: text("reply_body"),
   repliedAt: integer("replied_at", { mode: "timestamp" }),
   createdAt: integer("created_at", { mode: "timestamp" })
