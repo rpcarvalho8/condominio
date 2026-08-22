@@ -17,6 +17,8 @@ import {
   FileText,
   Landmark,
   Mic,
+  MessageSquare,
+  Mail,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { authClient, clearToken, getToken, useIsAdmin } from "../lib/auth";
@@ -37,6 +39,8 @@ const NAV_ITEMS = [
 ];
 
 const ADMIN_ITEMS = [
+  { href: "/pedidos", label: "Pedidos", icon: MessageSquare },
+  { href: "/emails", label: "Emails", icon: Mail },
   { href: "/atas", label: "Atas", icon: FileText },
   { href: "/reunioes", label: "Reuniões", icon: Mic },
   { href: "/utilizadores", label: "Utilizadores", icon: UserCog },

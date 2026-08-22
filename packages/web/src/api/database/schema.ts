@@ -477,3 +477,135 @@ export const saldosReferencia = sqliteTable("saldos_referencia", {
   notas: text("notas"),
   createdAt: integer("created_at"),
 });
+
+// --- PEDIDOS / TICKETS (portal ↔ admin, com triagem LLM) ---
+export const tickets = sqliteTable("tickets", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  fracaoId: text("fracao_id")
+    .notNull()
+    .references(() => fracoes.id),
+  createdByUserId: text("created_by_user_id")
+    .notNull()
+    .references(() => user.id),
+  titulo: text("titulo").notNull(),
+  descricao: text("descricao").notNull(),
+  /** manutencao | ruido | financeiro | juridico | administrativo | outro */
+  categoria: text("categoria").notNull().default("outro"),
+  /** baixa | normal | alta | urgente */
+  urgencia: text("urgencia").notNull().default("normal"),
+  /** aberto | em_curso | aguarda_condomino | resolvido | cancelado */
+  status: text("status").notNull().default("aberto"),
+  llmCategoria: text("llm_categoria"),
+  llmUrgencia: text("llm_urgencia"),
+  llmResumo: text("llm_resumo"),
+  llmSugestaoResposta: text("llm_sugestao_resposta"),
+  /** Notas internas geradas pela LLM (só admin) */
+  llmNotasInternas: text("llm_notas_internas"),
+  /** Último feedback: positive | negative | null */
+  llmFeedbackRating: text("llm_feedback_rating"),
+  llmFeedbackAt: integer("llm_feedback_at", { mode: "timestamp" }),
+  resolvedAt: integer("resolved_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const ticketMessages = sqliteTable("ticket_messages", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  ticketId: text("ticket_id")
+    .notNull()
+    .references(() => tickets.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id),
+  /** admin | condomino | system */
+  authorRole: text("author_role").notNull(),
+  body: text("body").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const ticketAttachments = sqliteTable("ticket_attachments", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  ticketId: text("ticket_id")
+    .notNull()
+    .references(() => tickets.id, { onDelete: "cascade" }),
+  messageId: text("message_id").references(() => ticketMessages.id, { onDelete: "set null" }),
+  uploadedByUserId: text("uploaded_by_user_id")
+    .notNull()
+    .references(() => user.id),
+  /** image | video */
+  kind: text("kind").notNull(),
+  mimeType: text("mime_type").notNull(),
+  originalName: text("original_name").notNull(),
+  filename: text("filename").notNull(),
+  sizeBytes: integer("size_bytes").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+/** Feedback humano sobre triagem/sugestão LLM — memória de aprendizagem por área */
+export const ticketLlmFeedback = sqliteTable("ticket_llm_feedback", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  ticketId: text("ticket_id")
+    .notNull()
+    .references(() => tickets.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id),
+  /** positive | negative */
+  rating: text("rating").notNull(),
+  /** sugestao | categoria | urgencia | geral */
+  target: text("target").notNull().default("geral"),
+  comment: text("comment"),
+  /** Valores correctos quando o admin corrige (aprendizagem) */
+  correctedCategoria: text("corrected_categoria"),
+  correctedUrgencia: text("corrected_urgencia"),
+  correctedResposta: text("corrected_resposta"),
+  /** Snapshot do que a LLM tinha proposto */
+  llmCategoria: text("llm_categoria"),
+  llmUrgencia: text("llm_urgencia"),
+  llmSugestaoResposta: text("llm_sugestao_resposta"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// --- EMAIL INBOX (urbanizacaofonte@gmail.com → triagem LLM → resposta humana) ---
+export const emailInbox = sqliteTable("email_inbox", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  /** ID único do provedor (Gmail Message-ID / IMAP uid) para dedupe */
+  externalId: text("external_id").notNull().unique(),
+  fromEmail: text("from_email").notNull(),
+  fromName: text("from_name"),
+  toEmail: text("to_email").notNull().default("urbanizacaofonte@gmail.com"),
+  subject: text("subject").notNull().default(""),
+  bodyText: text("body_text"),
+  bodyHtml: text("body_html"),
+  receivedAt: integer("received_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  fracaoId: text("fracao_id").references(() => fracoes.id),
+  ticketId: text("ticket_id").references(() => tickets.id),
+  /** manutencao | ruido | financeiro | juridico | administrativo | fornecedor | spam | outro */
+  categoria: text("categoria").notNull().default("outro"),
+  urgencia: text("urgencia").notNull().default("normal"),
+  llmResumo: text("llm_resumo"),
+  llmSugestaoResposta: text("llm_sugestao_resposta"),
+  llmNotasInternas: text("llm_notas_internas"),
+  /** novo | em_analise | respondido | convertido_pedido | ignorado | spam */
+  status: text("status").notNull().default("novo"),
+  replyBody: text("reply_body"),
+  repliedAt: integer("replied_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});

@@ -56,7 +56,40 @@ type AtaPortal = {
   userVotedAt: string | null;
 };
 
+type TicketPortal = {
+  id: string;
+  titulo: string;
+  descricao: string;
+  categoria: string;
+  urgencia: string;
+  status: string;
+  llmResumo: string | null;
+  createdAt: string;
+  updatedAt: string;
+  messages?: Array<{
+    id: string;
+    authorRole: string;
+    body: string;
+    createdAt: string;
+    authorName: string | null;
+  }>;
+  attachments?: Array<{
+    id: string;
+    kind: string;
+    originalName: string;
+    url: string;
+  }>;
+};
+
 const MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+
+const TICKET_STATUS: Record<string, string> = {
+  aberto: "Aberto",
+  em_curso: "Em curso",
+  aguarda_condomino: "Aguarda a sua resposta",
+  resolvido: "Resolvido",
+  cancelado: "Cancelado",
+};
 
 function formatEur(v: number) {
   return v.toLocaleString("pt-PT", { style: "currency", currency: "EUR" });
@@ -123,9 +156,20 @@ export default function PortalPage() {
   const { data: session, isPending } = authClient.useSession();
   const [data, setData] = useState<PortalData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"quotas" | "recibos" | "atas">("quotas");
+  const [tab, setTab] = useState<"quotas" | "recibos" | "atas" | "pedidos">("quotas");
   const [anoFiltro, setAnoFiltro] = useState(new Date().getFullYear());
   const [atas, setAtas] = useState<AtaPortal[]>([]);
+  const [tickets, setTickets] = useState<TicketPortal[]>([]);
+  const [selectedTicketId, setSelectedTicketId] = useState("");
+  const [ticketDetail, setTicketDetail] = useState<TicketPortal | null>(null);
+  const [novoTitulo, setNovoTitulo] = useState("");
+  const [novaDescricao, setNovaDescricao] = useState("");
+  const [novosAnexos, setNovosAnexos] = useState<FileList | null>(null);
+  const [ticketReply, setTicketReply] = useState("");
+  const [ticketReplyFiles, setTicketReplyFiles] = useState<FileList | null>(null);
+  const [ticketMsg, setTicketMsg] = useState("");
+  const [ticketBusy, setTicketBusy] = useState(false);
+  const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({});
   const token = localStorage.getItem("bm_token") ?? "";
 
   useEffect(() => {
@@ -142,9 +186,10 @@ export default function PortalPage() {
       const headers = {
         Authorization: `Bearer ${localStorage.getItem("bm_token") ?? ""}`,
       };
-      const [resFracao, resAtas] = await Promise.all([
+      const [resFracao, resAtas, resTickets] = await Promise.all([
         fetch("/api/portal/minha-fracao", { headers }),
         fetch("/api/atas", { headers }),
+        fetch("/api/tickets", { headers }),
       ]);
       if (resFracao.ok) {
         const d = await resFracao.json();
@@ -154,8 +199,98 @@ export default function PortalPage() {
         const listaAtas = await resAtas.json() as AtaPortal[];
         setAtas(listaAtas);
       }
+      if (resTickets.ok) {
+        setTickets(await resTickets.json());
+      }
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadTicketDetail(id: string) {
+    setSelectedTicketId(id);
+    const res = await fetch(`/api/tickets/${id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) {
+      const detail = await res.json() as TicketPortal & {
+        attachments?: Array<{ id: string; kind: string; originalName: string; url: string }>;
+      };
+      setTicketDetail(detail);
+      // Carregar anexos com token (img/video não enviam Authorization)
+      for (const a of detail.attachments ?? []) {
+        if (mediaUrls[a.id]) continue;
+        try {
+          const fr = await fetch(a.url, { headers: { Authorization: `Bearer ${token}` } });
+          if (!fr.ok) continue;
+          const blob = await fr.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          setMediaUrls((prev) => ({ ...prev, [a.id]: objectUrl }));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  async function createTicket() {
+    setTicketBusy(true);
+    setTicketMsg("");
+    try {
+      const form = new FormData();
+      form.append("titulo", novoTitulo);
+      form.append("descricao", novaDescricao);
+      if (novosAnexos) {
+        Array.from(novosAnexos).slice(0, 5).forEach((f) => form.append("files", f));
+      }
+      const res = await fetch("/api/tickets", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.message ?? "Erro ao criar pedido.");
+      setNovoTitulo("");
+      setNovaDescricao("");
+      setNovosAnexos(null);
+      setTicketMsg(
+        body.emailConfirmacao
+          ? `Pedido criado. Confirmação enviada para ${body.emailConfirmacao}.`
+          : "Pedido criado. Sem email na fração — confirmação não enviada (verifique proprietario_email).",
+      );
+      await loadData();
+      await loadTicketDetail(body.id);
+    } catch (e: any) {
+      setTicketMsg(e.message ?? "Erro ao criar pedido.");
+    } finally {
+      setTicketBusy(false);
+    }
+  }
+
+  async function sendTicketReply() {
+    if (!selectedTicketId || (!ticketReply.trim() && !ticketReplyFiles?.length)) return;
+    setTicketBusy(true);
+    try {
+      const form = new FormData();
+      form.append("body", ticketReply);
+      if (ticketReplyFiles) {
+        Array.from(ticketReplyFiles).slice(0, 5).forEach((f) => form.append("files", f));
+      }
+      const res = await fetch(`/api/tickets/${selectedTicketId}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.message ?? "Erro ao enviar mensagem.");
+      setTicketReply("");
+      setTicketReplyFiles(null);
+      await loadTicketDetail(selectedTicketId);
+      await loadData();
+    } catch (e: any) {
+      setTicketMsg(e.message ?? "Erro ao enviar.");
+    } finally {
+      setTicketBusy(false);
     }
   }
 
@@ -298,6 +433,12 @@ export default function PortalPage() {
               className={`flex-1 py-3 text-sm font-medium transition ${tab === "atas" ? "text-white border-b-2 border-blue-500" : "text-gray-500 hover:text-gray-300"}`}
             >
               Atas
+            </button>
+            <button
+              onClick={() => setTab("pedidos")}
+              className={`flex-1 py-3 text-sm font-medium transition ${tab === "pedidos" ? "text-white border-b-2 border-blue-500" : "text-gray-500 hover:text-gray-300"}`}
+            >
+              Pedidos
             </button>
           </div>
 
@@ -485,11 +626,138 @@ export default function PortalPage() {
               )}
             </div>
           )}
+
+          {tab === "pedidos" && (
+            <div className="p-4 space-y-6">
+              <div className="rounded-xl border border-gray-800 p-4 bg-gray-950/40 space-y-3">
+                <h3 className="text-sm font-semibold">Novo pedido</h3>
+                <p className="text-xs text-gray-500">
+                  Ex.: lâmpada fundida, elevador, barulho, dúvida sobre quotas.
+                </p>
+                <input
+                  className="w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm"
+                  placeholder="Título"
+                  value={novoTitulo}
+                  onChange={(e) => setNovoTitulo(e.target.value)}
+                />
+                <textarea
+                  className="w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm min-h-[90px]"
+                  placeholder="Descreva o pedido com o máximo de detalhe possível"
+                  value={novaDescricao}
+                  onChange={(e) => setNovaDescricao(e.target.value)}
+                />
+                <label className="block text-xs text-gray-500">
+                  Anexos opcionais (imagens ou vídeos, máx. 5)
+                  <input
+                    type="file"
+                    accept="image/*,video/*"
+                    multiple
+                    className="mt-1 block w-full text-xs text-gray-400"
+                    onChange={(e) => setNovosAnexos(e.target.files)}
+                  />
+                </label>
+                <button
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white disabled:opacity-40"
+                  disabled={ticketBusy || !novoTitulo.trim() || !novaDescricao.trim()}
+                  onClick={createTicket}
+                >
+                  {ticketBusy ? "A enviar…" : "Enviar pedido"}
+                </button>
+                {ticketMsg && <p className="text-xs text-amber-300">{ticketMsg}</p>}
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-sm font-semibold">Os seus pedidos</h3>
+                {tickets.length === 0 ? (
+                  <p className="text-gray-500 text-sm text-center py-4">Ainda não tem pedidos.</p>
+                ) : (
+                  tickets.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => loadTicketDetail(t.id)}
+                      className={`w-full text-left rounded-xl border p-3 ${selectedTicketId === t.id ? "border-blue-500 bg-gray-950" : "border-gray-800 bg-gray-950/40"}`}
+                    >
+                      <div className="flex justify-between gap-2">
+                        <span className="text-sm font-medium">{t.titulo}</span>
+                        <span className="text-xs text-gray-500">{TICKET_STATUS[t.status] ?? t.status}</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">
+                        {new Date(t.updatedAt).toLocaleString("pt-PT")} · {t.categoria} · {t.urgencia}
+                      </p>
+                    </button>
+                  ))
+                )}
+              </div>
+
+              {ticketDetail && (
+                <div className="rounded-xl border border-gray-800 p-4 bg-gray-950/50 space-y-3">
+                  <h3 className="text-sm font-semibold">{ticketDetail.titulo}</h3>
+                  {ticketDetail.llmResumo && (
+                    <p className="text-xs text-gray-400">{ticketDetail.llmResumo}</p>
+                  )}
+                  {(ticketDetail.attachments?.length ?? 0) > 0 && (
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {ticketDetail.attachments!.map((a) => (
+                        <div key={a.id} className="rounded-lg border border-gray-800 p-2">
+                          {mediaUrls[a.id] ? (
+                            a.kind === "image" ? (
+                              <img src={mediaUrls[a.id]} alt={a.originalName} className="w-full max-h-48 object-cover rounded" />
+                            ) : (
+                              <video src={mediaUrls[a.id]} controls className="w-full max-h-48 rounded" />
+                            )
+                          ) : (
+                            <p className="text-xs text-gray-500">A carregar {a.originalName}…</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {(ticketDetail.messages ?? []).map((m) => (
+                      <div key={m.id} className="text-sm border-b border-gray-800 pb-2">
+                        <p className="text-xs text-gray-500">
+                          {m.authorRole === "system" ? "Sistema" : m.authorName ?? m.authorRole}
+                          {" · "}
+                          {new Date(m.createdAt).toLocaleString("pt-PT")}
+                        </p>
+                        <p className="text-gray-200 whitespace-pre-wrap">{m.body}</p>
+                      </div>
+                    ))}
+                  </div>
+                  {!["resolvido", "cancelado"].includes(ticketDetail.status) && (
+                    <div className="space-y-2">
+                      <textarea
+                        className="w-full rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-sm min-h-[70px]"
+                        placeholder="Escrever mensagem…"
+                        value={ticketReply}
+                        onChange={(e) => setTicketReply(e.target.value)}
+                      />
+                      <input
+                        type="file"
+                        accept="image/*,video/*"
+                        multiple
+                        className="block w-full text-xs text-gray-400"
+                        onChange={(e) => setTicketReplyFiles(e.target.files)}
+                      />
+                      <button
+                        className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white disabled:opacity-40"
+                        disabled={ticketBusy || (!ticketReply.trim() && !ticketReplyFiles?.length)}
+                        onClick={sendTicketReply}
+                      >
+                        Enviar mensagem
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Note */}
         <p className="text-center text-gray-600 text-xs">
-          Para questões sobre pagamentos contacte a administração do condomínio.
+          Para questões sobre pagamentos contacte a administração do condomínio — ou use a aba Pedidos.
         </p>
       </main>
     </div>

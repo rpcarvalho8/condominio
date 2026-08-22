@@ -18,6 +18,8 @@ import RelatoriosPage from "./pages/relatorios";
 import MovimentosBancariosPage from "./pages/movimentos-bancarios";
 import AtasPage from "./pages/atas";
 import ReunioesPage from "./pages/reunioes";
+import PedidosPage from "./pages/pedidos";
+import EmailsPage from "./pages/emails";
 
 export default function App() {
   return (
@@ -56,6 +58,8 @@ export default function App() {
               <Route path="/movimentos-bancarios" component={MovimentosBancariosPage} />
               <Route path="/atas" component={AtasPage} />
               <Route path="/reunioes" component={ReunioesPage} />
+              <Route path="/pedidos" component={PedidosPage} />
+              <Route path="/emails" component={EmailsPage} />
             </Switch>
           </Layout>
         </ProtectedRoute>

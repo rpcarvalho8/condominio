@@ -8,4 +8,5 @@ export const CONDOMINIO = {
   localReuniao: "sala do condomínio",
   nif: "901932027",
   iban: "PT50001800034978380602065",
+  email: "urbanizacaofonte@gmail.com",
 } as const;
