@@ -10,6 +10,7 @@ import {
   ticketMessages,
   tickets,
   user,
+  emailInbox,
 } from "../database/schema";
 import { requireAuth, requireAdmin } from "../middleware/auth";
 import { triarPedidoTicket } from "../lib/ticket-llm";
@@ -17,9 +18,12 @@ import {
   enviarConfirmacaoPedidoRecebido,
   notificarAdminNovoPedido,
   resolverEmailFracao,
+  sendPlainEmail,
 } from "../lib/ticket-email";
 
-const STATUS_OK = new Set(["aberto", "em_curso", "aguarda_condomino", "resolvido", "cancelado"]);
+const STATUS_OK = new Set([
+  "aberto", "em_curso", "aguarda_condomino", "pendente_aprovacao", "resolvido", "cancelado",
+]);
 const CATEGORIA_OK = new Set(["manutencao", "ruido", "financeiro", "juridico", "administrativo", "outro"]);
 const URGENCIA_OK = new Set(["baixa", "normal", "alta", "urgente"]);
 
@@ -41,6 +45,7 @@ async function loadTicketOr404(id: string) {
 }
 
 function canAccessTicket(u: any, ticket: typeof tickets.$inferSelect) {
+  if (ticket.status === "pendente_aprovacao" && !isAdmin(u)) return false;
   if (isAdmin(u)) return true;
   return Boolean(u?.fracaoId && u.fracaoId === ticket.fracaoId);
 }
@@ -190,6 +195,7 @@ export const ticketsRoutes = new Hono()
   .get("/", async (c) => {
     const u = c.get("user") as any;
     const statusFilter = c.req.query("status");
+    const origemFilter = c.req.query("origem");
 
     let rows;
     if (isAdmin(u)) {
@@ -204,6 +210,7 @@ export const ticketsRoutes = new Hono()
           categoria: tickets.categoria,
           urgencia: tickets.urgencia,
           status: tickets.status,
+          origem: tickets.origem,
           llmResumo: tickets.llmResumo,
           llmSugestaoResposta: tickets.llmSugestaoResposta,
           llmNotasInternas: tickets.llmNotasInternas,
@@ -229,6 +236,7 @@ export const ticketsRoutes = new Hono()
           categoria: tickets.categoria,
           urgencia: tickets.urgencia,
           status: tickets.status,
+          origem: tickets.origem,
           llmResumo: tickets.llmResumo,
           llmSugestaoResposta: tickets.llmSugestaoResposta,
           llmNotasInternas: tickets.llmNotasInternas,
@@ -240,13 +248,16 @@ export const ticketsRoutes = new Hono()
         })
         .from(tickets)
         .leftJoin(fracoes, eq(tickets.fracaoId, fracoes.id))
-        .where(eq(tickets.fracaoId, u.fracaoId))
+        .where(and(
+          eq(tickets.fracaoId, u.fracaoId),
+          ne(tickets.status, "pendente_aprovacao"),
+        ))
         .orderBy(desc(tickets.updatedAt));
     }
 
-    const filtered = statusFilter
-      ? rows.filter((r) => r.status === statusFilter)
-      : rows;
+    let filtered = rows;
+    if (statusFilter) filtered = filtered.filter((r) => r.status === statusFilter);
+    if (origemFilter) filtered = filtered.filter((r) => r.origem === origemFilter);
     return c.json(filtered);
   })
   .get("/attachments/:attachmentId", async (c) => {
@@ -513,6 +524,103 @@ export const ticketsRoutes = new Hono()
     if (typeof body.llmSugestaoResposta === "string") patch.llmSugestaoResposta = body.llmSugestaoResposta;
 
     const [updated] = await db.update(tickets).set(patch).where(eq(tickets.id, id)).returning();
+    return c.json(updated);
+  })
+  .post("/:id/aprovar-email", requireAdmin, async (c) => {
+    const u = c.get("user") as any;
+    const id = c.req.param("id");
+    const ticket = await loadTicketOr404(id);
+    if (!ticket) return c.json({ message: "Pedido não encontrado." }, 404);
+    if (ticket.origem !== "email") return c.json({ message: "Apenas pedidos com origem email." }, 400);
+    if (ticket.status !== "pendente_aprovacao") {
+      return c.json({ message: "Pedido não está pendente de aprovação." }, 400);
+    }
+
+    const [inbox] = await db.select().from(emailInbox).where(eq(emailInbox.ticketId, id)).limit(1);
+    if (!inbox) return c.json({ message: "Email de origem não encontrado." }, 404);
+
+    const body = await c.req.json().catch(() => ({} as any));
+    const reply =
+      (typeof body.body === "string" && body.body.trim())
+      || ticket.llmSugestaoResposta?.trim()
+      || "";
+    if (!reply) return c.json({ message: "Resposta vazia." }, 400);
+
+    const subject = inbox.subject.startsWith("Re:") ? inbox.subject : `Re: ${inbox.subject}`;
+
+    try {
+      await sendPlainEmail({
+        to: inbox.fromEmail,
+        subject,
+        html: reply.replace(/\n/g, "<br>\n"),
+      });
+    } catch (e: any) {
+      return c.json({ message: `Falha ao enviar email: ${String(e?.message ?? e)}` }, 500);
+    }
+
+    const now = new Date();
+    await db.update(emailInbox).set({
+      replyBody: reply,
+      repliedAt: now,
+      status: "respondido",
+      processedAt: now,
+      updatedAt: now,
+    }).where(eq(emailInbox.id, inbox.id));
+
+    await db.insert(ticketMessages).values({
+      ticketId: id,
+      userId: u.id,
+      authorRole: "admin",
+      body: reply,
+    });
+
+    const [updated] = await db.update(tickets).set({
+      status: "resolvido",
+      resolvedAt: now,
+      updatedAt: now,
+      llmSugestaoResposta: reply,
+    }).where(eq(tickets.id, id)).returning();
+
+    return c.json(updated);
+  })
+  .post("/:id/rejeitar-email", requireAdmin, async (c) => {
+    const u = c.get("user") as any;
+    const id = c.req.param("id");
+    const ticket = await loadTicketOr404(id);
+    if (!ticket) return c.json({ message: "Pedido não encontrado." }, 404);
+    if (ticket.origem !== "email") return c.json({ message: "Apenas pedidos com origem email." }, 400);
+    if (ticket.status !== "pendente_aprovacao") {
+      return c.json({ message: "Pedido não está pendente de aprovação." }, 400);
+    }
+
+    const body = await c.req.json().catch(() => ({} as any));
+    const motivo = typeof body.motivo === "string" ? body.motivo.trim() : "";
+
+    const now = new Date();
+    const [inbox] = await db.select().from(emailInbox).where(eq(emailInbox.ticketId, id)).limit(1);
+    if (inbox) {
+      await db.update(emailInbox).set({
+        status: "spam",
+        categoria: "spam",
+        processedAt: now,
+        updatedAt: now,
+      }).where(eq(emailInbox.id, inbox.id));
+    }
+
+    await db.insert(ticketMessages).values({
+      ticketId: id,
+      userId: u.id,
+      authorRole: "system",
+      body: motivo
+        ? `Pedido de email rejeitado/arquivado como spam. Motivo: ${motivo}`
+        : "Pedido de email rejeitado/arquivado como spam.",
+    });
+
+    const [updated] = await db.update(tickets).set({
+      status: "cancelado",
+      updatedAt: now,
+    }).where(eq(tickets.id, id)).returning();
+
     return c.json(updated);
   })
   .post("/:id/messages", async (c) => {
