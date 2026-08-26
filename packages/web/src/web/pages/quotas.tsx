@@ -1,7 +1,7 @@
 import { useState, useEffect, Component, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { useIsAdmin } from "../lib/auth";
+import { useIsAdmin, getToken } from "../lib/auth";
 import { PageHeader } from "../components/Layout";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -9,6 +9,7 @@ import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { Select, Input } from "../components/ui/Input";
 import { formatEuro, formatDate, getMesNome, METODOS_PAGAMENTO } from "../lib/utils";
+import { apiFetch as sharedApiFetch } from "../lib/api-client";
 import {
   CheckCircle2, XCircle, RefreshCw, Zap, CreditCard,
   ChevronLeft, ChevronRight, Plus, Tag, Layers, AlertCircle,
@@ -90,7 +91,14 @@ function QuotasPageInner() {
 
   const pagarMut = useMutation({
     mutationFn: async ({ id, metodoPagamento }: any) =>
-      (await api.quotas[":id"].pagar.$patch({ param: { id }, json: { metodoPagamento } })).json(),
+      sharedApiFetch(`/api/quotas/${id}/pagar`, {
+        method: "PATCH",
+        token: getToken(),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metodoPagamento }),
+        idempotent: true,
+        retries: 2,
+      }),
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["quotas"] }),

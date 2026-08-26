@@ -7,6 +7,7 @@ import { Button } from "../components/ui/Button";
 import { Select } from "../components/ui/Input";
 import { formatEuro, getMesNome } from "../lib/utils";
 import { getToken } from "../lib/auth";
+import { apiFetch as sharedApiFetch, humanizeNetworkError } from "../lib/api-client";
 import {
   FileText, Mail, Download, RefreshCw, Zap,
   ChevronLeft, ChevronRight, CheckCircle2, Clock,
@@ -41,6 +42,7 @@ export default function RecibosPage() {
   const [mes, setMes] = useState(agora.getMonth() + 1);
   const [ano, setAno] = useState(agora.getFullYear());
   const [gerarResult, setGerarResult] = useState<{ gerados: number; ignorados: number; erros: string[] } | null>(null);
+  const [gerarError, setGerarError] = useState("");
 
   // List recibos (all, filtered client-side by mes+ano)
   const { data: todosRecibos = [], isLoading } = useQuery<any[]>({
@@ -56,11 +58,22 @@ export default function RecibosPage() {
   const enviados = recibos.filter((r: any) => r.enviadoEmail).length;
 
   const gerarMut = useMutation({
-    mutationFn: () => apiFetch("/api/recibos/gerar", { method: "POST", body: JSON.stringify({ mes, ano }) }),
+    mutationFn: () =>
+      sharedApiFetch<{ gerados: number; ignorados: number; erros: string[] }>("/api/recibos/gerar", {
+        method: "POST",
+        token: getToken(),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mes, ano }),
+        idempotent: true,
+        retries: 2,
+        timeoutMs: 120_000,
+      }),
     onSuccess: (result) => {
+      setGerarError("");
       setGerarResult(result);
       qc.invalidateQueries({ queryKey: ["recibos"] });
     },
+    onError: (e) => setGerarError(humanizeNetworkError(e)),
   });
 
   const emailMut = useMutation({
@@ -165,6 +178,12 @@ export default function RecibosPage() {
                 {gerarResult.erros.map((e, i) => <li key={i}>{e}</li>)}
               </ul>
             )}
+          </div>
+        )}
+
+        {gerarError && (
+          <div className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>
+            {gerarError}
           </div>
         )}
 

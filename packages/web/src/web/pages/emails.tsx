@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Mail } from "lucide-react";
+import { Mail, RefreshCw } from "lucide-react";
 import { PageHeader } from "../components/Layout";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Textarea } from "../components/ui/Input";
 import { getToken } from "../lib/auth";
@@ -12,11 +11,9 @@ type EmailListItem = {
   fromEmail: string;
   fromName: string | null;
   subject: string;
-  categoria: string;
-  urgencia: string;
   status: string;
   llmResumo: string | null;
-  fracaoId: string | null;
+  gmailLabel: string | null;
   fracaoNumero: string | null;
   ticketId: string | null;
   receivedAt: string;
@@ -25,9 +22,7 @@ type EmailListItem = {
 type EmailDetail = EmailListItem & {
   bodyText: string | null;
   llmSugestaoResposta: string | null;
-  llmNotasInternas: string | null;
   replyBody: string | null;
-  toEmail: string;
 };
 
 async function apiFetch(path: string, init?: RequestInit) {
@@ -44,20 +39,27 @@ async function apiFetch(path: string, init?: RequestInit) {
   return data;
 }
 
-const STATUS_LABEL: Record<string, string> = {
-  novo: "Novo",
-  em_analise: "Em análise",
-  respondido: "Respondido",
-  convertido_pedido: "Pedido",
-  ignorado: "Ignorado",
-  spam: "Spam",
-};
+function formatWhen(iso: string) {
+  try {
+    return new Date(iso).toLocaleString("pt-PT", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
 
 export default function EmailsPage() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState("");
-  const [statusFilter, setStatusFilter] = useState("novo");
+  const [labelFilter, setLabelFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("a_tratar");
   const [reply, setReply] = useState("");
+  const [showReply, setShowReply] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -66,9 +68,17 @@ export default function EmailsPage() {
     queryFn: () => apiFetch("/api/email-inbox/stats"),
   });
 
+  const listQs = useMemo(() => {
+    const p = new URLSearchParams();
+    if (statusFilter) p.set("status", statusFilter);
+    if (labelFilter) p.set("label", labelFilter);
+    const q = p.toString();
+    return q ? `?${q}` : "";
+  }, [statusFilter, labelFilter]);
+
   const { data: emails = [], isLoading } = useQuery<EmailListItem[]>({
-    queryKey: ["email-inbox", statusFilter],
-    queryFn: () => apiFetch(`/api/email-inbox${statusFilter ? `?status=${statusFilter}` : ""}`),
+    queryKey: ["email-inbox", statusFilter, labelFilter],
+    queryFn: () => apiFetch(`/api/email-inbox${listQs}`),
   });
 
   const { data: detail } = useQuery<EmailDetail>({
@@ -80,45 +90,31 @@ export default function EmailsPage() {
   useEffect(() => {
     if (detail) {
       setReply(detail.replyBody || detail.llmSugestaoResposta || "");
+      setShowReply(false);
     }
   }, [detail?.id]);
 
-  const novos = useMemo(() => Number(stats?.novos ?? 0), [stats]);
+  const labels: { label: string; count: number }[] = stats?.labels ?? [];
+  const novos = Number(stats?.novos ?? 0);
+
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: ["email-inbox"] });
+    void qc.invalidateQueries({ queryKey: ["email-inbox-stats"] });
+    if (selectedId) void qc.invalidateQueries({ queryKey: ["email-inbox-item", selectedId] });
+  };
 
   const syncMutation = useMutation({
     mutationFn: () => apiFetch("/api/email-inbox/sync", { method: "POST" }),
     onSuccess: (res) => {
-      setSuccess(`Sync Gmail: ${res.fetched} lidos, ${res.created} novos.${res.errors?.length ? ` Erros: ${res.errors.join("; ")}` : ""}`);
-      void qc.invalidateQueries({ queryKey: ["email-inbox"] });
-      void qc.invalidateQueries({ queryKey: ["email-inbox-stats"] });
+      setError("");
+      setSuccess(
+        res.fetched
+          ? `Sincronizado: ${res.fetched} lidos, ${res.created} novos.`
+          : (res.errors?.[0] ?? "Nada de novo no Gmail."),
+      );
+      invalidate();
     },
-    onError: (e: any) => setError(e.message),
-  });
-
-  const patchMutation = useMutation({
-    mutationFn: (body: Record<string, unknown>) =>
-      apiFetch(`/api/email-inbox/${selectedId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }),
-    onSuccess: () => {
-      setSuccess("Email atualizado.");
-      void qc.invalidateQueries({ queryKey: ["email-inbox"] });
-      void qc.invalidateQueries({ queryKey: ["email-inbox-item", selectedId] });
-      void qc.invalidateQueries({ queryKey: ["email-inbox-stats"] });
-    },
-    onError: (e: any) => setError(e.message),
-  });
-
-  const triageMutation = useMutation({
-    mutationFn: () => apiFetch(`/api/email-inbox/${selectedId}/triage`, { method: "POST" }),
-    onSuccess: () => {
-      setSuccess("Triagem LLM atualizada.");
-      void qc.invalidateQueries({ queryKey: ["email-inbox-item", selectedId] });
-      void qc.invalidateQueries({ queryKey: ["email-inbox"] });
-    },
-    onError: (e: any) => setError(e.message),
+    onError: (e: any) => { setSuccess(""); setError(e.message); },
   });
 
   const replyMutation = useMutation({
@@ -130,20 +126,33 @@ export default function EmailsPage() {
       }),
     onSuccess: () => {
       setSuccess("Resposta enviada.");
-      void qc.invalidateQueries({ queryKey: ["email-inbox"] });
-      void qc.invalidateQueries({ queryKey: ["email-inbox-item", selectedId] });
-      void qc.invalidateQueries({ queryKey: ["email-inbox-stats"] });
+      setShowReply(false);
+      invalidate();
     },
     onError: (e: any) => setError(e.message),
   });
 
   const ticketMutation = useMutation({
     mutationFn: () => apiFetch(`/api/email-inbox/${selectedId}/criar-pedido`, { method: "POST" }),
-    onSuccess: (res) => {
-      setSuccess(`Pedido criado (${res.ticket?.id?.slice(0, 8)}…).`);
-      void qc.invalidateQueries({ queryKey: ["email-inbox"] });
-      void qc.invalidateQueries({ queryKey: ["email-inbox-item", selectedId] });
+    onSuccess: () => {
+      setSuccess("Pedido criado a partir deste email.");
+      invalidate();
       void qc.invalidateQueries({ queryKey: ["tickets"] });
+    },
+    onError: (e: any) => setError(e.message),
+  });
+
+  const ignoreMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/email-inbox/${selectedId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "ignorado" }),
+      }),
+    onSuccess: () => {
+      setSuccess("Email ignorado.");
+      setSelectedId("");
+      invalidate();
     },
     onError: (e: any) => setError(e.message),
   });
@@ -152,166 +161,225 @@ export default function EmailsPage() {
     <>
       <PageHeader
         title="Emails"
-        subtitle={`Caixa ${stats?.inboxAddress ?? "urbanizacaofonte@gmail.com"} — triagem LLM, resposta humana`}
+        subtitle={stats?.inboxAddress ?? "urbanizacaofonte@gmail.com"}
         breadcrumb={["Gestão Condomínio", "Administração", "Emails"]}
       />
-      <div className="p-6 space-y-6">
-        {error && (
-          <div className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)", background: "var(--red-subtle)" }}>
-            {error}
-          </div>
-        )}
-        {success && (
-          <div className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--green)", color: "var(--green)", background: "var(--green-subtle)" }}>
-            {success}
+
+      <div className="p-4 md:p-6 space-y-4">
+        {(error || success) && (
+          <div
+            className="rounded-lg border px-4 py-3 text-sm"
+            style={{
+              borderColor: error ? "var(--red)" : "var(--green)",
+              color: error ? "var(--red)" : "var(--green)",
+              background: error ? "var(--red-subtle)" : "var(--green-subtle)",
+            }}
+          >
+            {error || success}
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => syncMutation.mutate()} loading={syncMutation.isPending} disabled={!stats?.gmailConfigured}>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            onClick={() => { setError(""); setSuccess(""); syncMutation.mutate(); }}
+            loading={syncMutation.isPending}
+            disabled={!stats?.gmailConfigured}
+          >
+            <RefreshCw size={14} className="mr-1.5" />
             Sincronizar Gmail
           </Button>
-          {!stats?.gmailConfigured && (
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Configure GMAIL_APP_PASSWORD no .env (palavra-passe de aplicação Google) para sincronizar.
-            </span>
-          )}
-          <span className="text-xs" style={{ color: "var(--text-muted)" }}>{novos} novos</span>
+          <span className="text-sm" style={{ color: "var(--text-muted)" }}>
+            {novos > 0 ? `${novos} por tratar` : "Em dia"}
+          </span>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Mail size={16} /> Inbox
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex flex-wrap gap-2">
-                {["", "novo", "em_analise", "respondido", "convertido_pedido", "spam", "ignorado"].map((s) => (
-                  <Button
-                    key={s || "all"}
-                    size="sm"
-                    variant={statusFilter === s ? "primary" : "secondary"}
-                    onClick={() => setStatusFilter(s)}
-                  >
-                    {s ? STATUS_LABEL[s] : "Todos"}
-                  </Button>
-                ))}
-              </div>
+        <div className="grid gap-4 lg:grid-cols-[200px_1fr_1.2fr]">
+          {/* Marcadores */}
+          <aside
+            className="rounded-xl border p-3 space-y-1 h-fit"
+            style={{ borderColor: "var(--border)", background: "var(--bg-elevated)" }}
+          >
+            <p className="text-xs font-semibold px-2 mb-2" style={{ color: "var(--text-muted)" }}>
+              Marcadores
+            </p>
+            <button
+              type="button"
+              className="w-full text-left rounded-lg px-2 py-1.5 text-sm"
+              style={{
+                background: !labelFilter ? "var(--bg-secondary)" : "transparent",
+                color: "var(--text-primary)",
+              }}
+              onClick={() => setLabelFilter("")}
+            >
+              Todos
+            </button>
+            {labels.map((l) => (
+              <button
+                type="button"
+                key={l.label}
+                className="w-full text-left rounded-lg px-2 py-1.5 text-sm flex justify-between gap-2"
+                style={{
+                  background: labelFilter === l.label ? "var(--bg-secondary)" : "transparent",
+                  color: "var(--text-primary)",
+                }}
+                onClick={() => setLabelFilter(l.label)}
+              >
+                <span className="truncate">{l.label}</span>
+                <span style={{ color: "var(--text-muted)" }}>{l.count}</span>
+              </button>
+            ))}
+            {labels.length === 0 && (
+              <p className="text-xs px-2" style={{ color: "var(--text-muted)" }}>
+                Sincronize para ver marcadores.
+              </p>
+            )}
+          </aside>
+
+          {/* Lista */}
+          <section
+            className="rounded-xl border overflow-hidden"
+            style={{ borderColor: "var(--border)", background: "var(--bg-elevated)" }}
+          >
+            <div className="flex gap-2 p-3 border-b" style={{ borderColor: "var(--border)" }}>
+              {[
+                { id: "a_tratar", label: "Por tratar" },
+                { id: "", label: "Todos" },
+                { id: "arquivo", label: "Arquivo" },
+              ].map((t) => (
+                <button
+                  key={t.id || "all"}
+                  type="button"
+                  className="rounded-full px-3 py-1 text-xs font-medium"
+                  style={{
+                    background: statusFilter === t.id ? "var(--blue-primary)" : "var(--bg-secondary)",
+                    color: statusFilter === t.id ? "#fff" : "var(--text-secondary)",
+                  }}
+                  onClick={() => setStatusFilter(t.id)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="max-h-[70vh] overflow-y-auto divide-y" style={{ borderColor: "var(--border)" }}>
               {isLoading ? (
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>A carregar…</p>
+                <p className="p-4 text-sm" style={{ color: "var(--text-muted)" }}>A carregar…</p>
               ) : emails.length === 0 ? (
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>Sem emails neste filtro.</p>
+                <p className="p-4 text-sm" style={{ color: "var(--text-muted)" }}>
+                  Sem emails neste filtro. Clique em Sincronizar Gmail.
+                </p>
               ) : (
-                <div className="space-y-2 max-h-[70vh] overflow-y-auto">
-                  {emails.map((e) => (
-                    <button
-                      type="button"
-                      key={e.id}
-                      onClick={() => { setSelectedId(e.id); setError(""); setSuccess(""); }}
-                      className="w-full text-left rounded-lg border px-3 py-2 text-sm"
-                      style={{
-                        borderColor: selectedId === e.id ? "var(--blue-primary)" : "var(--border)",
-                        background: "var(--bg-elevated)",
-                      }}
-                    >
-                      <div className="font-semibold" style={{ color: "var(--text-primary)" }}>{e.subject}</div>
-                      <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                        {e.fromName ? `${e.fromName} · ` : ""}{e.fromEmail}
-                        {e.fracaoNumero ? ` · Fr. ${e.fracaoNumero}` : ""}
-                        {" · "}{STATUS_LABEL[e.status] ?? e.status}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader><CardTitle>Detalhe</CardTitle></CardHeader>
-            <CardContent className="space-y-4">
-              {!detail ? (
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>Selecione um email.</p>
-              ) : (
-                <>
-                  <div>
-                    <h3 className="font-semibold" style={{ color: "var(--text-primary)" }}>{detail.subject}</h3>
-                    <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                      De {detail.fromEmail} · {new Date(detail.receivedAt).toLocaleString("pt-PT")}
-                      {detail.fracaoNumero ? ` · Fração ${detail.fracaoNumero}` : " · Fração não associada"}
+                emails.map((e) => (
+                  <button
+                    type="button"
+                    key={e.id}
+                    onClick={() => { setSelectedId(e.id); setError(""); setSuccess(""); }}
+                    className="w-full text-left px-4 py-3 transition-colors"
+                    style={{
+                      background: selectedId === e.id ? "var(--bg-secondary)" : "transparent",
+                      borderLeft: selectedId === e.id ? "3px solid var(--blue-primary)" : "3px solid transparent",
+                    }}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="font-medium text-sm line-clamp-1" style={{ color: "var(--text-primary)" }}>
+                        {e.subject || "(sem assunto)"}
+                      </p>
+                      <span className="text-[11px] shrink-0" style={{ color: "var(--text-muted)" }}>
+                        {formatWhen(e.receivedAt)}
+                      </span>
+                    </div>
+                    <p className="text-xs mt-0.5 truncate" style={{ color: "var(--text-muted)" }}>
+                      {e.fromName || e.fromEmail}
+                      {e.gmailLabel ? ` · ${e.gmailLabel}` : ""}
                     </p>
-                  </div>
+                    {e.llmResumo && !/Content-Transfer-Encoding/i.test(e.llmResumo) && (
+                      <p className="text-xs mt-1 line-clamp-2" style={{ color: "var(--text-secondary)" }}>
+                        {e.llmResumo}
+                      </p>
+                    )}
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
 
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <label className="text-xs space-y-1">
-                      <span style={{ color: "var(--text-muted)" }}>Estado</span>
-                      <select
-                        className="w-full rounded-md border px-2 py-2 text-sm"
-                        style={{ background: "var(--bg-elevated)", borderColor: "var(--border)", color: "var(--text-primary)" }}
-                        value={detail.status}
-                        onChange={(e) => patchMutation.mutate({ status: e.target.value })}
-                      >
-                        {Object.entries(STATUS_LABEL).map(([k, v]) => (
-                          <option key={k} value={k}>{v}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="text-xs space-y-1">
-                      <span style={{ color: "var(--text-muted)" }}>Categoria</span>
-                      <select
-                        className="w-full rounded-md border px-2 py-2 text-sm"
-                        style={{ background: "var(--bg-elevated)", borderColor: "var(--border)", color: "var(--text-primary)" }}
-                        value={detail.categoria}
-                        onChange={(e) => patchMutation.mutate({ categoria: e.target.value })}
-                      >
-                        {["manutencao", "ruido", "financeiro", "juridico", "administrativo", "fornecedor", "spam", "outro"].map((k) => (
-                          <option key={k} value={k}>{k}</option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
+          {/* Detalhe */}
+          <section
+            className="rounded-xl border p-4 space-y-4 min-h-[320px]"
+            style={{ borderColor: "var(--border)", background: "var(--bg-elevated)" }}
+          >
+            {!detail ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 py-16" style={{ color: "var(--text-muted)" }}>
+                <Mail size={28} />
+                <p className="text-sm">Escolha um email à esquerda</p>
+              </div>
+            ) : (
+              <>
+                <div>
+                  <h2 className="text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
+                    {detail.subject}
+                  </h2>
+                  <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
+                    De {detail.fromName ? `${detail.fromName} <${detail.fromEmail}>` : detail.fromEmail}
+                  </p>
+                  <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                    {formatWhen(detail.receivedAt)}
+                    {detail.gmailLabel ? ` · ${detail.gmailLabel}` : ""}
+                    {detail.fracaoNumero ? ` · Fração ${detail.fracaoNumero}` : ""}
+                  </p>
+                </div>
 
-                  {detail.llmResumo && (
-                    <div className="rounded-lg border p-3 text-sm" style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}>
-                      <p className="text-xs font-semibold mb-1" style={{ color: "var(--text-muted)" }}>Resumo LLM</p>
-                      <p style={{ color: "var(--text-primary)" }}>{detail.llmResumo}</p>
-                    </div>
-                  )}
-                  {detail.llmNotasInternas && (
-                    <div className="rounded-lg border p-3 text-sm" style={{ borderColor: "var(--border)" }}>
-                      <p className="text-xs font-semibold mb-1" style={{ color: "var(--text-muted)" }}>Notas internas</p>
-                      <p style={{ color: "var(--text-primary)", whiteSpace: "pre-wrap" }}>{detail.llmNotasInternas}</p>
-                    </div>
-                  )}
+                <div
+                  className="rounded-lg border p-3 text-sm max-h-[40vh] overflow-y-auto whitespace-pre-wrap leading-relaxed"
+                  style={{ borderColor: "var(--border)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}
+                >
+                  {detail.bodyText || "(sem texto)"}
+                </div>
 
-                  <div className="rounded-lg border p-3 text-sm max-h-48 overflow-y-auto" style={{ borderColor: "var(--border)", whiteSpace: "pre-wrap", color: "var(--text-primary)" }}>
-                    {detail.bodyText || "(sem texto)"}
-                  </div>
-
-                  <Textarea label="Rascunho de resposta" value={reply} onChange={(e) => setReply(e.target.value)} rows={8} />
+                {!showReply ? (
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={() => replyMutation.mutate()} loading={replyMutation.isPending} disabled={!reply.trim()}>
-                      Enviar resposta
-                    </Button>
-                    <Button variant="secondary" onClick={() => setReply(detail.llmSugestaoResposta || "")} disabled={!detail.llmSugestaoResposta}>
-                      Usar sugestão LLM
-                    </Button>
-                    <Button variant="secondary" onClick={() => triageMutation.mutate()} loading={triageMutation.isPending}>
-                      Atualizar triagem
-                    </Button>
-                    <Button variant="secondary" onClick={() => ticketMutation.mutate()} loading={ticketMutation.isPending} disabled={Boolean(detail.ticketId)}>
+                    <Button onClick={() => setShowReply(true)}>Responder</Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => ticketMutation.mutate()}
+                      loading={ticketMutation.isPending}
+                      disabled={Boolean(detail.ticketId)}
+                    >
                       {detail.ticketId ? "Já é pedido" : "Criar pedido"}
                     </Button>
-                    <Button variant="ghost" onClick={() => patchMutation.mutate({ status: "ignorado" })}>
+                    <Button
+                      variant="ghost"
+                      onClick={() => ignoreMutation.mutate()}
+                      loading={ignoreMutation.isPending}
+                    >
                       Ignorar
                     </Button>
                   </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
+                ) : (
+                  <div className="space-y-3">
+                    <Textarea
+                      label="Resposta"
+                      value={reply}
+                      onChange={(e) => setReply(e.target.value)}
+                      rows={6}
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        onClick={() => replyMutation.mutate()}
+                        loading={replyMutation.isPending}
+                        disabled={!reply.trim()}
+                      >
+                        Enviar
+                      </Button>
+                      <Button variant="ghost" onClick={() => setShowReply(false)}>
+                        Cancelar
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
         </div>
       </div>
     </>

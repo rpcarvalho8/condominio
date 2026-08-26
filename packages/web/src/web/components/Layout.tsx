@@ -24,6 +24,7 @@ import { cn } from "../lib/utils";
 import { authClient, clearToken, getToken, useIsAdmin } from "../lib/auth";
 import { useQuery } from "@tanstack/react-query";
 import { RecordingBar } from "./RecordingBar";
+import { NetworkStatusBanner } from "./NetworkStatusBanner";
 import { RecordingProvider } from "../lib/RecordingContext";
 
 const NAV_ITEMS = [
@@ -217,6 +218,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <main className="flex-1 overflow-y-auto pb-24">
         {children}
       </main>
+      <NetworkStatusBanner />
       <RecordingBar />
     </div>
     </RecordingProvider>

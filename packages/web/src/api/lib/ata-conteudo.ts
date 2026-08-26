@@ -123,9 +123,14 @@ export function normalizeConteudo(raw: unknown, dataReuniao: Date): AtaConteudo 
   if (!raw || typeof raw !== "object") return emptyConteudo(dataReuniao);
 
   const obj = raw as Partial<AtaConteudo>;
-  const cab = obj.cabecalho && typeof obj.cabecalho === "object"
-    ? { ...defaultCabecalho(dataReuniao), ...obj.cabecalho }
-    : defaultCabecalho(dataReuniao);
+  const base = defaultCabecalho(dataReuniao);
+  const incoming = obj.cabecalho && typeof obj.cabecalho === "object" ? obj.cabecalho : {};
+  const cab: AtaCabecalho = { ...base };
+  for (const key of Object.keys(base) as (keyof AtaCabecalho)[]) {
+    const v = (incoming as Record<string, unknown>)[key];
+    if (v == null) continue;
+    cab[key] = typeof v === "string" ? v : String(v);
+  }
 
   const pontos = Array.isArray(obj.pontos)
     ? obj.pontos.map((p, i) => normalizePonto(p as Partial<AtaPonto>, i))
@@ -135,10 +140,13 @@ export function normalizeConteudo(raw: unknown, dataReuniao: Date): AtaConteudo 
 }
 
 export function parseConteudoJson(
-  raw: string | null | undefined,
+  raw: string | object | null | undefined,
   dataReuniao: Date,
 ): AtaConteudo | null {
-  if (!raw?.trim()) return null;
+  if (raw && typeof raw === "object") {
+    return normalizeConteudo(raw, dataReuniao);
+  }
+  if (typeof raw !== "string" || !raw.trim()) return null;
   try {
     return normalizeConteudo(JSON.parse(raw), dataReuniao);
   } catch {
@@ -151,13 +159,13 @@ export function serializeConteudo(conteudo: AtaConteudo): string {
 }
 
 export function resolveConteudo(
-  conteudoJson: string | null | undefined,
-  ataTexto: string,
+  conteudoJson: string | object | null | undefined,
+  ataTexto: string | null | undefined,
   dataReuniao: Date,
 ): AtaConteudo {
   const parsed = parseConteudoJson(conteudoJson, dataReuniao);
   if (parsed) return parsed;
-  return conteudoFromLegacyMarkdown(ataTexto, dataReuniao);
+  return conteudoFromLegacyMarkdown(String(ataTexto ?? ""), dataReuniao);
 }
 
 export function conteudoFromLegacyMarkdown(ataTexto: string, dataReuniao: Date): AtaConteudo {

@@ -20,10 +20,11 @@ import { configuracoesRoutes } from "./routes/configuracoes";
 import { relatorioRoutes, scheduleRelatoriosCron } from "./routes/relatorio";
 import { avisosRoutes, scheduleAvisosCron, gerarAvisosCobranca, enviarLoteUnificado } from "./routes/avisos";
 import { identityRoutes } from "./routes/identity";
-import { atasRoutes } from "./routes/atas";
-import { reunioesRoutes } from "./routes/reunioes";
+import { atasRoutes, atasPdfRoutes } from "./routes/atas";
+import { reunioesRoutes, reunioesPdfRoutes } from "./routes/reunioes";
 import { ticketsRoutes } from "./routes/tickets";
 import { emailInboxRoutes, scheduleEmailInboxSync } from "./routes/email-inbox";
+import { uploadsRoutes } from "./routes/uploads";
 import { rehydrateDividasFromDB } from "./lib/identity-matrix";
 
 // ─── Sync imediato no arranque do servidor ────────────────────────────────────
@@ -203,10 +204,14 @@ const app = new Hono()
   .route("/relatorio", relatorioRoutes)
   .route("/avisos", avisosRoutes)
   .route("/identity", identityRoutes)
+  // PDFs públicos (auth é Bearer em localStorage — <a href> não envia o header)
+  .route("/atas/pdf", atasPdfRoutes)
+  .route("/reunioes/pdf", reunioesPdfRoutes)
   .route("/atas", atasRoutes)
   .route("/reunioes", reunioesRoutes)
   .route("/tickets", ticketsRoutes)
-  .route("/email-inbox", emailInboxRoutes);
+  .route("/email-inbox", emailInboxRoutes)
+  .route("/uploads", uploadsRoutes);
 
 scheduleEmailInboxSync();
 

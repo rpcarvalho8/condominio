@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Link } from "wouter";
-import { Mic, Pause, Play, Square, ExternalLink } from "lucide-react";
+import { Mic, Pause, Play, Square, ExternalLink, HardDrive } from "lucide-react";
 import { Button } from "./ui/Button";
 import {
+  formatBytes,
   formatElapsed,
   recordingLabel,
   recordingReturnPath,
@@ -20,14 +21,80 @@ export function RecordingBar() {
     completedFile,
     completedTarget,
     supportsPause,
+    persistedBytes,
+    recoverable,
     pause,
     resume,
     stop,
     clearError,
+    restoreRecoverable,
+    discardRecoverable,
   } = useRecording();
   const [readyBannerHidden, setReadyBannerHidden] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const readyTarget = completedTarget ?? (status === "idle" && completedFile ? sessionTarget : null);
+
+  // Recuperação após crash / fecho de aba
+  if (status === "idle" && !completedFile && recoverable.length > 0) {
+    const top = recoverable[0];
+    return (
+      <div
+        className="fixed bottom-4 left-1/2 z-50 w-[min(520px,calc(100vw-2rem))] -translate-x-1/2 rounded-xl border shadow-xl px-4 py-3"
+        style={{ background: "var(--bg-elevated)", borderColor: "var(--amber)" }}
+        role="status"
+      >
+        <p className="text-sm font-semibold" style={{ color: "var(--amber)" }}>
+          Gravação recuperável neste dispositivo
+        </p>
+        <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+          {recordingLabel(top.session.target)}
+          {top.session.draft.titulo ? ` · ${top.session.draft.titulo}` : ""}
+          {" · "}
+          {formatBytes(top.file.size)}
+          {recoverable.length > 1 ? ` · +${recoverable.length - 1} outra(s)` : ""}
+        </p>
+        <div className="flex flex-wrap gap-2 mt-3">
+          <Button
+            size="sm"
+            loading={busyId === top.session.id}
+            onClick={async () => {
+              setBusyId(top.session.id);
+              try {
+                await restoreRecoverable(top.session.id);
+              } finally {
+                setBusyId(null);
+              }
+            }}
+          >
+            Recuperar
+          </Button>
+          <Link
+            href={recordingReturnPath(top.session.target)}
+            className="inline-flex items-center rounded-md px-3 py-1.5 text-xs font-medium"
+            style={{ border: "1px solid var(--border-strong)", color: "var(--text-primary)" }}
+          >
+            Abrir página
+          </Link>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={async () => {
+              if (!confirm("Apagar esta gravação guardada localmente? Não dá para desfazer.")) return;
+              setBusyId(top.session.id);
+              try {
+                await discardRecoverable(top.session.id);
+              } finally {
+                setBusyId(null);
+              }
+            }}
+          >
+            Apagar
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (status === "idle" && completedFile && readyTarget && !readyBannerHidden) {
     const returnPath = recordingReturnPath(readyTarget);
@@ -44,7 +111,7 @@ export function RecordingBar() {
             </p>
             <p className="text-xs" style={{ color: "var(--text-muted)" }}>
               {recordingLabel(readyTarget)}
-              {draft?.titulo ? ` · ${draft.titulo}` : ""} · {completedFile.name}
+              {draft?.titulo ? ` · ${draft.titulo}` : ""} · {formatBytes(completedFile.size)}
             </p>
           </div>
           <Link
@@ -134,6 +201,12 @@ export function RecordingBar() {
             {recordingLabel(target)}
             {draft?.titulo ? ` · ${draft.titulo}` : ""}
           </p>
+          {persistedBytes > 0 && (
+            <p className="text-[11px] mt-0.5 flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
+              <HardDrive size={10} />
+              Guardado localmente: {formatBytes(persistedBytes)}
+            </p>
+          )}
           {error && (
             <p className="text-xs mt-0.5" style={{ color: "var(--red)" }}>{error}</p>
           )}
@@ -169,7 +242,7 @@ export function RecordingBar() {
         </div>
       </div>
       <p className="px-4 pb-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
-        Pode navegar na app normalmente. A gravação continua em segundo plano.
+        Áudio guardado neste iPad a cada segundo. Pode navegar na app — se a aba fechar, recupera ao voltar.
       </p>
     </div>
   );

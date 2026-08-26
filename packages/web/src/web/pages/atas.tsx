@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../components/Layout";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input, Textarea } from "../components/ui/Input";
 import { getToken } from "../lib/auth";
 import { formatElapsed, useRecording } from "../lib/RecordingContext";
+import { useDraftAutosave } from "../hooks/useDraftAutosave";
+import { uploadFileResumable } from "../lib/resumable-upload";
+import { apiFetch as sharedApiFetch, humanizeNetworkError } from "../lib/api-client";
 import {
   type AtaConteudo,
   type AtaPonto,
@@ -20,9 +24,17 @@ type Ata = {
   id: string;
   titulo: string;
   dataReuniao: string;
-  status: "rascunho" | "em_revisao" | "pdf_definitiva" | "aguardando_votos" | "aprovada" | "rejeitada";
+  status:
+    | "rascunho"
+    | "processando_audio"
+    | "erro_audio"
+    | "em_revisao"
+    | "pdf_definitiva"
+    | "aguardando_votos"
+    | "aprovada"
+    | "rejeitada";
   ataTexto: string;
-  conteudoJson: string | null;
+  conteudoJson: string | object | null;
   resumoDeliberacoes: string | null;
   approvedAt: string | null;
   rejectedAt: string | null;
@@ -30,6 +42,8 @@ type Ata = {
   pdfFinalizedAt: string | null;
   approvalDeadlineAt: string | null;
   audioAvailableUntil: string | null;
+  hasAudio?: boolean;
+  processing?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -61,13 +75,44 @@ async function apiFetch(path: string, init?: RequestInit) {
   }
 }
 
-function loadEditState(ata: Ata) {
-  const dataReuniao = new Date(ata.dataReuniao);
+function safeIsoDate(value: unknown): string {
+  try {
+    const d = value instanceof Date ? value : new Date(String(value ?? ""));
+    if (Number.isNaN(d.getTime())) return new Date().toISOString().slice(0, 10);
+    return d.toISOString().slice(0, 10);
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function loadEditState(ata: Ata): {
+  titulo: string;
+  data: string;
+  resumo: string;
+  conteudo: AtaConteudo;
+} {
+  const dataReuniao = (() => {
+    try {
+      const d = new Date(ata.dataReuniao);
+      return Number.isNaN(d.getTime()) ? new Date() : d;
+    } catch {
+      return new Date();
+    }
+  })();
+
+  let conteudo: AtaConteudo;
+  try {
+    conteudo = resolveConteudo(ata.conteudoJson, ata.ataTexto, dataReuniao);
+  } catch (e) {
+    console.error("[atas] resolveConteudo falhou:", e);
+    conteudo = emptyConteudo(dataReuniao);
+  }
+
   return {
-    titulo: ata.titulo,
-    data: dataReuniao.toISOString().slice(0, 10),
-    resumo: ata.resumoDeliberacoes ?? "",
-    conteudo: resolveConteudo(ata.conteudoJson, ata.ataTexto, dataReuniao),
+    titulo: String(ata.titulo ?? ""),
+    data: safeIsoDate(dataReuniao),
+    resumo: typeof ata.resumoDeliberacoes === "string" ? ata.resumoDeliberacoes : "",
+    conteudo,
   };
 }
 
@@ -84,6 +129,7 @@ export default function AtasPage() {
   const [dataReuniao, setDataReuniao] = useState("");
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const loadedAtaIdRef = useRef<string>("");
+  const prevStatusRef = useRef<string>("");
   const baselineRef = useRef<EditState | null>(null);
   const [error, setError] = useState<string>("");
   const [success, setSuccess] = useState<string>("");
@@ -92,26 +138,71 @@ export default function AtasPage() {
   const [editResumo, setEditResumo] = useState("");
   const [editConteudo, setEditConteudo] = useState<AtaConteudo>(() => emptyConteudo(new Date()));
   const [showPreview, setShowPreview] = useState(true);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [editHydrated, setEditHydrated] = useState(false);
 
   const recording = useRecording();
   const isThisRecording = recording.target === "ata" && recording.status !== "idle";
   const isAnyRecording = recording.status !== "idle";
   const hasPendingSession = recording.sessionTarget === "ata";
 
-  const previewTexto = useMemo(
-    () => conteudoToTextoFormal(normalizeConteudo(editConteudo, new Date(editData || Date.now()))),
-    [editConteudo, editData],
-  );
+  const createDraft = useDraftAutosave({
+    scope: "ata:create",
+    value: { titulo, dataReuniao },
+    onRestore: (d) => {
+      setTitulo(d.titulo || "");
+      setDataReuniao(d.dataReuniao || "");
+    },
+    isEmpty: (d) => !d.titulo?.trim() && !d.dataReuniao,
+  });
 
   const { data: atas = [], isLoading } = useQuery<Ata[]>({
     queryKey: ["atas"],
     queryFn: () => apiFetch("/api/atas"),
+    refetchInterval: (query) => {
+      const rows = query.state.data as Ata[] | undefined;
+      return rows?.some((r) => r.status === "processando_audio") ? 2_500 : false;
+    },
   });
 
   const selectedAta = useMemo(
     () => atas.find((ata) => ata.id === selectedAtaId) ?? null,
     [atas, selectedAtaId],
   );
+  const isProcessing = selectedAta?.status === "processando_audio";
+  const isAudioError = selectedAta?.status === "erro_audio";
+  const hasAudio = Boolean(selectedAta?.hasAudio);
+
+  const editDraftValue = useMemo(
+    () => ({ editTitulo, editData, editResumo, editConteudo }),
+    [editTitulo, editData, editResumo, editConteudo],
+  );
+
+  const editDraft = useDraftAutosave({
+    scope: selectedAtaId ? `ata:edit:${selectedAtaId}` : null,
+    value: editDraftValue,
+    enabled: Boolean(selectedAtaId) && editHydrated && selectedAta?.status !== "processando_audio",
+    isServerHydrated: editHydrated,
+    onRestore: (d) => {
+      // Não restaurar draft local se o servidor já tem conteúdo gerado pela IA
+      if (selectedAta?.conteudoJson || (selectedAta?.ataTexto && selectedAta.status === "rascunho")) {
+        return;
+      }
+      setEditTitulo(d.editTitulo || "");
+      setEditData(d.editData || "");
+      setEditResumo(d.editResumo || "");
+      if (d.editConteudo) setEditConteudo(d.editConteudo);
+    },
+  });
+
+  const previewTexto = useMemo(() => {
+    try {
+      return conteudoToTextoFormal(normalizeConteudo(editConteudo, new Date(editData || Date.now())));
+    } catch (e) {
+      console.error("[atas] previewTexto falhou:", e);
+      return typeof editConteudo === "string" ? editConteudo : "";
+    }
+  }, [editConteudo, editData]);
 
   function patchAtaInCache(updated: Ata) {
     queryClient.setQueryData<Ata[]>(["atas"], (old) =>
@@ -127,32 +218,126 @@ export default function AtasPage() {
   }
 
   function setBaselineFromAta(ata: Ata) {
-    const state = loadEditState(ata);
-    baselineRef.current = cloneEditState(state);
-    applyEditState(state);
+    try {
+      const state = loadEditState(ata);
+      baselineRef.current = cloneEditState(state);
+      applyEditState(state);
+    } catch (e) {
+      console.error("[atas] setBaselineFromAta falhou:", e);
+      const fallback = emptyConteudo(new Date());
+      baselineRef.current = {
+        titulo: String(ata?.titulo ?? ""),
+        data: safeIsoDate(ata?.dataReuniao),
+        resumo: "",
+        conteudo: fallback,
+      };
+      applyEditState(baselineRef.current);
+      setError("Não foi possível carregar a visualização deste rascunho.");
+    }
   }
 
   const createMutation = useMutation({
     mutationFn: async () => {
       if (!audioFile) throw new Error("Selecione um ficheiro de áudio.");
+      setUploadProgress("A enviar áudio…");
+      const uploaded = await uploadFileResumable({
+        file: audioFile,
+        target: "ata",
+        filename: audioFile.name,
+        onProgress: (p) => {
+          const pct = p.totalBytes ? Math.round((100 * p.sentBytes) / p.totalBytes) : 0;
+          setUploadProgress(`A enviar áudio… ${pct}% (${p.sentChunks}/${p.totalChunks})`);
+        },
+      });
+      setUploadProgress("A transcrever áudio e a gerar ata com IA…");
       const form = new FormData();
-      form.append("file", audioFile);
+      form.append("uploadId", uploaded.uploadId);
+      form.append("audioPath", uploaded.audioPath);
       form.append("titulo", titulo);
       form.append("dataReuniao", dataReuniao);
-      return apiFetch("/api/atas", { method: "POST", body: form });
+      return sharedApiFetch("/api/atas", {
+        method: "POST",
+        token: getToken(),
+        body: form,
+        timeoutMs: 300_000,
+        retries: 0,
+      });
     },
-    onSuccess: async (created: Ata) => {
-      setSuccess("Ata criada em rascunho com transcrição e texto inicial.");
-      setError("");
-      setTitulo("");
-      setDataReuniao("");
-      setAudioFile(null);
-      recording.clearSession();
-      setSelectedAtaId(created.id);
+    onSuccess: (created: Ata) => {
+      try {
+        if (!created?.id) throw new Error("Resposta inválida do servidor.");
+        setUploadProgress(null);
+        const ready = created.status === "rascunho" && Boolean(created.conteudoJson || created.ataTexto);
+        setSuccess(
+          ready
+            ? "Ata criada com transcrição e rascunho gerados pela IA."
+            : created.status === "erro_audio"
+              ? "Ata criada, mas a geração automática falhou. Pode tentar novamente."
+              : "Ata criada.",
+        );
+        setError(
+          created.status === "erro_audio"
+            ? (typeof created.ataTexto === "string" ? created.ataTexto : "Falha ao gerar ata.")
+            : "",
+        );
+        setTitulo("");
+        setDataReuniao("");
+        setAudioFile(null);
+        createDraft.clear();
+        recording.clearSession();
+        queryClient.setQueryData<Ata[]>(["atas"], (old) => {
+          const list = old ?? [];
+          if (list.some((a) => a.id === created.id)) {
+            return list.map((a) => (a.id === created.id ? { ...a, ...created } : a));
+          }
+          return [created, ...list];
+        });
+        setSelectedAtaId(created.id);
+        loadedAtaIdRef.current = "";
+        prevStatusRef.current = "";
+        setEditHydrated(false);
+        setBaselineFromAta(created);
+        editDraft.clear();
+        setTimeout(() => setEditHydrated(true), 0);
+        void queryClient.invalidateQueries({ queryKey: ["atas"] });
+      } catch (e: any) {
+        setUploadProgress(null);
+        setError(e?.message ?? "Não foi possível carregar a visualização deste rascunho.");
+        setSuccess("");
+      }
+    },
+    onError: (e: any) => {
+      setUploadProgress(null);
+      setError(humanizeNetworkError(e));
+      setSuccess("");
+    },
+  });
+
+  const reprocessMutation = useMutation({
+    mutationFn: () =>
+      sharedApiFetch(`/api/atas/${selectedAtaId}/reprocessar`, {
+        method: "POST",
+        token: getToken(),
+        timeoutMs: 300_000,
+        retries: 0,
+      }),
+    onSuccess: (updated: Ata) => {
+      if (updated.status === "erro_audio") {
+        setError(updated.ataTexto || "Falha ao regenerar a ata.");
+        setSuccess("");
+      } else {
+        setSuccess("Transcrição e ata regeneradas a partir do áudio.");
+        setError("");
+      }
+      patchAtaInCache(updated);
+      loadedAtaIdRef.current = "";
+      prevStatusRef.current = "";
+      setBaselineFromAta(updated);
+      editDraft.clear();
       void queryClient.invalidateQueries({ queryKey: ["atas"] });
     },
     onError: (e: any) => {
-      setError(e.message ?? "Erro ao criar ata.");
+      setError(humanizeNetworkError(e));
       setSuccess("");
     },
   });
@@ -176,11 +361,12 @@ export default function AtasPage() {
     onSuccess: (updated: Ata) => {
       setSuccess("Rascunho atualizado.");
       setError("");
+      editDraft.clear();
       patchAtaInCache(updated);
       setBaselineFromAta(updated);
     },
     onError: (e: any) => {
-      setError(e.message ?? "Erro ao guardar alterações.");
+      setError(humanizeNetworkError(e));
       setSuccess("");
     },
   });
@@ -342,19 +528,59 @@ export default function AtasPage() {
   useEffect(() => {
     if (!selectedAtaId) {
       loadedAtaIdRef.current = "";
+      prevStatusRef.current = "";
       baselineRef.current = null;
+      setEditHydrated(false);
       return;
     }
     if (!selectedAta) return;
-    if (loadedAtaIdRef.current === selectedAtaId) return;
+
+    const idChanged = loadedAtaIdRef.current !== selectedAtaId;
+    const finishedProcessing =
+      prevStatusRef.current === "processando_audio" && selectedAta.status !== "processando_audio";
+    prevStatusRef.current = selectedAta.status;
+
+    if (!idChanged && !finishedProcessing) return;
+
     loadedAtaIdRef.current = selectedAtaId;
+    setEditHydrated(false);
     setBaselineFromAta(selectedAta);
-  }, [selectedAtaId, selectedAta]);
+    if (finishedProcessing && selectedAta.status === "rascunho") {
+      setSuccess("Transcrição e ata geradas. Pode rever e editar.");
+      setError("");
+      editDraft.clear();
+    }
+    if (finishedProcessing && selectedAta.status === "erro_audio") {
+      setError(selectedAta.ataTexto || "Falha ao gerar a ata a partir do áudio.");
+      setSuccess("");
+    }
+    const t = setTimeout(() => setEditHydrated(true), 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hidrata só em mudança de id ou fim do processamento
+  }, [
+    selectedAtaId,
+    selectedAta?.status,
+    selectedAta?.conteudoJson,
+    selectedAta?.ataTexto,
+    selectedAta?.resumoDeliberacoes,
+  ]);
 
   const canCreate = Boolean(titulo.trim() && dataReuniao && audioFile);
 
+  const reloadSelectedDraft = () => {
+    if (!selectedAta) return;
+    loadedAtaIdRef.current = "";
+    prevStatusRef.current = "";
+    setBaselineFromAta(selectedAta);
+    setEditHydrated(true);
+    setError("");
+  };
+
   return (
-    <>
+    <ErrorBoundary
+      title="Não foi possível carregar a visualização deste rascunho"
+      onReset={reloadSelectedDraft}
+    >
       <PageHeader
         title="Atas de Assembleia"
         subtitle="Upload de áudio, rascunho automático e aprovação"
@@ -370,6 +596,34 @@ export default function AtasPage() {
           <div className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--green)", color: "var(--green)", background: "var(--green-subtle)" }}>
             {success}
           </div>
+        )}
+        {uploadProgress && (
+          <div className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--blue-primary)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}>
+            {uploadProgress}
+          </div>
+        )}
+        {isProcessing && (
+          <div className="rounded-lg border px-4 py-3 text-sm animate-pulse" style={{ borderColor: "var(--blue-primary)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}>
+            A transcrever áudio e a gerar ata com IA… Isto pode demorar alguns minutos.
+          </div>
+        )}
+        {isAudioError && hasAudio && (
+          <div className="rounded-lg border px-4 py-3 text-sm flex flex-wrap items-center gap-3" style={{ borderColor: "var(--amber)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}>
+            <span>A geração automática falhou. O áudio está guardado.</span>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => reprocessMutation.mutate()}
+              loading={reprocessMutation.isPending}
+            >
+              Tentar novamente gerar ata
+            </Button>
+          </div>
+        )}
+        {(createDraft.statusLabel || editDraft.statusLabel) && (
+          <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+            {editDraft.statusLabel || createDraft.statusLabel}
+          </p>
         )}
 
         <Card>
@@ -481,15 +735,21 @@ export default function AtasPage() {
         </Card>
 
         {selectedAta && (() => {
-          const editable = ["rascunho", "rejeitada"].includes(selectedAta.status);
-          const h = editConteudo.cabecalho;
+          const editable = ["rascunho", "rejeitada", "erro_audio"].includes(selectedAta.status);
+          const h = editConteudo?.cabecalho ?? emptyConteudo(new Date()).cabecalho;
+          const pontos = Array.isArray(editConteudo?.pontos) ? editConteudo.pontos : [];
           return (
           <Card>
             <CardHeader><CardTitle>Revisão e aprovação</CardTitle></CardHeader>
             <CardContent className="space-y-4">
-              {!editable && (
+              {!editable && selectedAta.status !== "processando_audio" && (
                 <div className="rounded-lg border px-4 py-2 text-xs" style={{ borderColor: "var(--border)", color: "var(--text-muted)", background: "var(--bg-secondary)" }}>
                   Edição bloqueada — estado actual: <strong>{selectedAta.status}</strong>
+                </div>
+              )}
+              {selectedAta.status === "processando_audio" && (
+                <div className="rounded-lg border px-4 py-2 text-xs" style={{ borderColor: "var(--blue-primary)", color: "var(--text-muted)", background: "var(--bg-secondary)" }}>
+                  Edição temporariamente bloqueada enquanto o áudio é processado.
                 </div>
               )}
 
@@ -534,14 +794,14 @@ export default function AtasPage() {
                   )}
                 </div>
 
-                {editConteudo.pontos.length === 0 ? (
+                {pontos.length === 0 ? (
                   <p className="text-sm" style={{ color: "var(--text-muted)" }}>Sem pontos. Adicione ou regenere o rascunho.</p>
                 ) : (
-                  editConteudo.pontos.map((ponto, index) => (
+                  pontos.map((ponto, index) => (
                     <div key={ponto.id} className="rounded-lg border p-4 space-y-3" style={{ borderColor: "var(--border)", background: "var(--bg-elevated)" }}>
                       <div className="flex items-start justify-between gap-2">
                         <span className="text-xs font-semibold" style={{ color: "var(--text-muted)" }}>Ponto {index + 1}</span>
-                        {editable && editConteudo.pontos.length > 1 && (
+                        {editable && pontos.length > 1 && (
                           <Button variant="ghost" size="sm" onClick={() => removePonto(index)}>
                             Remover
                           </Button>
@@ -566,7 +826,7 @@ export default function AtasPage() {
                           label="Votos a favor"
                           type="number"
                           min={0}
-                          value={String(ponto.votos.favor)}
+                          value={String(ponto.votos?.favor ?? 0)}
                           onChange={(e) => updatePontoVotos(index, "favor", Number(e.target.value) || 0)}
                           disabled={!editable}
                         />
@@ -574,7 +834,7 @@ export default function AtasPage() {
                           label="Votos contra"
                           type="number"
                           min={0}
-                          value={String(ponto.votos.contra)}
+                          value={String(ponto.votos?.contra ?? 0)}
                           onChange={(e) => updatePontoVotos(index, "contra", Number(e.target.value) || 0)}
                           disabled={!editable}
                         />
@@ -582,12 +842,12 @@ export default function AtasPage() {
                           label="Abstenções"
                           type="number"
                           min={0}
-                          value={String(ponto.votos.abstencao)}
+                          value={String(ponto.votos?.abstencao ?? 0)}
                           onChange={(e) => updatePontoVotos(index, "abstencao", Number(e.target.value) || 0)}
                           disabled={!editable}
                         />
                       </div>
-                      {ponto.votos.source === "ata_votes" && (
+                      {ponto.votos?.source === "ata_votes" && (
                         <p className="text-xs" style={{ color: "var(--text-muted)" }}>
                           Votos preenchidos automaticamente (integração futura com votação no portal).
                         </p>
@@ -642,12 +902,22 @@ export default function AtasPage() {
                   </>
                 )}
 
+                {hasAudio && selectedAta.status !== "aprovada" && selectedAta.status !== "processando_audio" && (
+                  <Button
+                    variant="secondary"
+                    onClick={() => reprocessMutation.mutate()}
+                    loading={reprocessMutation.isPending}
+                  >
+                    {isAudioError ? "Tentar novamente gerar ata" : "Regenerar ata a partir do áudio"}
+                  </Button>
+                )}
+
                 {(selectedAta.status === "rascunho" || selectedAta.status === "em_revisao" || selectedAta.status === "pdf_definitiva" || selectedAta.status === "rejeitada") && (
                   <Button
                     variant="secondary"
                     onClick={() => publicarMutation.mutate()}
                     loading={publicarMutation.isPending}
-                    disabled={updateMutation.isPending}
+                    disabled={updateMutation.isPending || isProcessing}
                   >
                     {publicarMutation.isPending ? "A gerar PDF…" : "Publicar e abrir votação"}
                   </Button>
@@ -677,6 +947,6 @@ export default function AtasPage() {
           );
         })()}
       </div>
-    </>
+    </ErrorBoundary>
   );
 }

@@ -24,6 +24,7 @@
     "seed:gdpr-config": "bun --env-file=../../.env run src/api/database/seed-gdpr-config.ts",
     "seed:ancora": "bun --env-file=../../.env run src/api/database/seed-ancora.ts",
     "smoke:db": "bun --env-file=../../.env run scripts/smoke-db-check.ts",
+    "test:imap": "bun --env-file=../../.env run scripts/test-imap.ts",
     "postinstall": "bun scripts/ensure-puppeteer-chrome.ts",
     "pdf:install-browser": "bun scripts/ensure-puppeteer-chrome.ts"
   },

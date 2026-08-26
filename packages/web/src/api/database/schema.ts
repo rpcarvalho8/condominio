@@ -298,8 +298,7 @@ export const reunioes = sqliteTable("reunioes", {
   /** JSON estruturado da reunião conforme layout do tipo */
   resumoJson: text("resumo_json"),
   resumo: text("resumo"),
-  /** "rascunho" | "aprovada" */
-  status: text("status").notNull().default("rascunho"),
+  status: text("status").notNull().default("rascunho"), // "rascunho" | "processando_audio" | "erro_audio" | "aprovada"
   pdfUrl: text("pdf_url"),
   approvedAt: integer("approved_at", { mode: "timestamp" }),
   audioPath: text("audio_path"),
@@ -316,7 +315,7 @@ export const atas = sqliteTable("atas", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   titulo: text("titulo").notNull(),
   dataReuniao: integer("data_reuniao", { mode: "timestamp" }).notNull(),
-  status: text("status").notNull().default("rascunho"), // "rascunho" | "em_revisao" | "pdf_definitiva" | "aguardando_votos" | "aprovada" | "rejeitada"
+  status: text("status").notNull().default("rascunho"), // "rascunho" | "processando_audio" | "erro_audio" | "em_revisao" | "pdf_definitiva" | "aguardando_votos" | "aprovada" | "rejeitada"
   transcricaoRaw: text("transcricao_raw").notNull(),
   ataTexto: text("ata_texto").notNull(),
   /** Structured ata content (header, pontos, discussão, votos) as JSON — source of truth for editor/PDF. */
@@ -589,6 +588,8 @@ export const emailInbox = sqliteTable("email_inbox", {
   subject: text("subject").notNull().default(""),
   bodyText: text("body_text"),
   bodyHtml: text("body_html"),
+  /** Marcador Gmail (INBOX ou label custom, ex. Elevadores) */
+  gmailLabel: text("gmail_label"),
   receivedAt: integer("received_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -611,4 +612,19 @@ export const emailInbox = sqliteTable("email_inbox", {
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
+});
+
+/** Chaves de idempotência HTTP (retries sem duplicar emails / pagamentos). */
+export const idempotencyKeys = sqliteTable("idempotency_keys", {
+  id: text("id").primaryKey(), // scope::key
+  scope: text("scope").notNull(),
+  key: text("key").notNull(),
+  status: text("status").notNull().default("pending"), // pending | completed
+  responseStatus: integer("response_status"),
+  responseBody: text("response_body"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  completedAt: integer("completed_at", { mode: "timestamp" }),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
 });

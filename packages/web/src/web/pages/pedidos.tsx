@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card"
 import { Button } from "../components/ui/Button";
 import { Textarea } from "../components/ui/Input";
 import { getToken } from "../lib/auth";
+import { apiFetch as sharedApiFetch, humanizeNetworkError } from "../lib/api-client";
 
 type TicketListItem = {
   id: string;
@@ -193,10 +194,14 @@ export default function PedidosPage() {
 
   const approveEmailMutation = useMutation({
     mutationFn: () =>
-      apiFetch(`/api/tickets/${selectedId}/aprovar-email`, {
+      sharedApiFetch(`/api/tickets/${selectedId}/aprovar-email`, {
         method: "POST",
+        token: getToken(),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body: reply }),
+        idempotent: true,
+        retries: 2,
+        timeoutMs: 60_000,
       }),
     onSuccess: () => {
       setSuccess("Resposta enviada por email e pedido marcado como resolvido.");
@@ -205,15 +210,18 @@ export default function PedidosPage() {
       void qc.invalidateQueries({ queryKey: ["ticket", selectedId] });
       void qc.invalidateQueries({ queryKey: ["tickets", "pendente_aprovacao", "email"] });
     },
-    onError: (e: any) => setError(e.message),
+    onError: (e: any) => setError(humanizeNetworkError(e)),
   });
 
   const rejectEmailMutation = useMutation({
     mutationFn: () =>
-      apiFetch(`/api/tickets/${selectedId}/rejeitar-email`, {
+      sharedApiFetch(`/api/tickets/${selectedId}/rejeitar-email`, {
         method: "POST",
+        token: getToken(),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
+        idempotent: true,
+        retries: 2,
       }),
     onSuccess: () => {
       setSuccess("Pedido rejeitado e email arquivado como spam.");
@@ -222,7 +230,7 @@ export default function PedidosPage() {
       void qc.invalidateQueries({ queryKey: ["ticket", selectedId] });
       void qc.invalidateQueries({ queryKey: ["tickets", "pendente_aprovacao", "email"] });
     },
-    onError: (e: any) => setError(e.message),
+    onError: (e: any) => setError(humanizeNetworkError(e)),
   });
 
   const feedbackMutation = useMutation({

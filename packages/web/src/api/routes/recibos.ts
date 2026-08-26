@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { exec } from "node:child_process";
 import { htmlToPdf } from "../lib/html-to-pdf";
+import { withIdempotency } from "../lib/idempotency";
 
 // ─── Logo base64 (embedded for PDF generation) ──────────────────────────────
 const LOGO_PATH = path.join(process.cwd(), "public", "logo_condominio.png");
@@ -604,8 +605,13 @@ export const recibosRoutes = new Hono()
       return c.json({ error: "mes/ano inválidos" }, 400);
     }
 
-    const result = await gerarRecibosParaMes(mes, ano);
-    return c.json({ gerados: result.gerados, ignorados: result.ignorados, erros: result.erros });
+    return withIdempotency(c, `recibos:gerar:${ano}-${mes}`, async () => {
+      const result = await gerarRecibosParaMes(mes, ano);
+      return {
+        status: 200,
+        body: { gerados: result.gerados, ignorados: result.ignorados, erros: result.erros },
+      };
+    });
   })
 
   // GET /api/recibos  → lista

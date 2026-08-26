@@ -6,7 +6,7 @@ import { requireAdmin, requireAuth } from "../middleware/auth";
 import { CONDOMINIO } from "../lib/condominio";
 import { triarEmailInbox } from "../lib/email-llm";
 import { matchFracaoByEmail, runEmailTicketPipeline } from "../lib/email-ticket-pipeline";
-import { fetchNewGmailMessages, formatImapError, isGmailImapConfigured, type FetchedEmail } from "../lib/gmail-imap";
+import { fetchNewGmailMessages, formatImapError, isGmailImapConfigured, isImapSessionBusy, sanitizeStoredBody, type FetchedEmail } from "../lib/gmail-imap";
 import { sendPlainEmail } from "../lib/ticket-email";
 
 const STATUS_OK = new Set(["novo", "em_analise", "respondido", "convertido_pedido", "ignorado", "spam", "processado"]);
@@ -38,7 +38,7 @@ export async function syncGmailInbox(): Promise<{
   let ticketsCreated = 0;
   let fetched = 0;
   try {
-    const mails = await fetchNewGmailMessages({ limit: 10 });
+    const mails = await fetchNewGmailMessages({ limit: 8 });
     fetched = mails.length;
     for (const mail of mails) {
       try {
@@ -79,6 +79,7 @@ export const emailInboxRoutes = new Hono()
       bodyText,
       bodyHtml: body.bodyHtml ? String(body.bodyHtml) : null,
       receivedAt: body.receivedAt ? new Date(body.receivedAt) : new Date(),
+      gmailLabel: body.gmailLabel ? String(body.gmailLabel) : "Caixa de entrada",
     };
 
     const res = await runEmailTicketPipeline(mail);
@@ -88,6 +89,7 @@ export const emailInboxRoutes = new Hono()
   .use(requireAdmin)
   .get("/", async (c) => {
     const status = c.req.query("status");
+    const label = c.req.query("label");
     const rows = await db
       .select({
         id: emailInbox.id,
@@ -98,6 +100,7 @@ export const emailInboxRoutes = new Hono()
         urgencia: emailInbox.urgencia,
         status: emailInbox.status,
         llmResumo: emailInbox.llmResumo,
+        gmailLabel: emailInbox.gmailLabel,
         fracaoId: emailInbox.fracaoId,
         fracaoNumero: fracoes.numero,
         ticketId: emailInbox.ticketId,
@@ -109,7 +112,18 @@ export const emailInboxRoutes = new Hono()
       .orderBy(desc(emailInbox.receivedAt))
       .limit(200);
 
-    return c.json(status ? rows.filter((r) => r.status === status) : rows);
+    let filtered = rows;
+    if (status === "a_tratar") {
+      filtered = filtered.filter((r) => r.status === "novo" || r.status === "em_analise");
+    } else if (status === "arquivo") {
+      filtered = filtered.filter((r) => !["novo", "em_analise"].includes(r.status));
+    } else if (status) {
+      filtered = filtered.filter((r) => r.status === status);
+    }
+    if (label) {
+      filtered = filtered.filter((r) => (r.gmailLabel || "Caixa de entrada") === label);
+    }
+    return c.json(filtered);
   })
   .get("/stats", async (c) => {
     const [row] = await db
@@ -118,14 +132,36 @@ export const emailInboxRoutes = new Hono()
         novos: sql<number>`sum(case when ${emailInbox.status} = 'novo' then 1 else 0 end)`,
       })
       .from(emailInbox);
+    const labelRows = await db
+      .select({
+        label: emailInbox.gmailLabel,
+        n: sql<number>`count(*)`,
+      })
+      .from(emailInbox)
+      .groupBy(emailInbox.gmailLabel);
+    const labels = labelRows
+      .map((r) => ({
+        label: r.label || "Caixa de entrada",
+        count: Number(r.n ?? 0),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label, "pt"));
     return c.json({
       total: Number(row?.total ?? 0),
       novos: Number(row?.novos ?? 0),
       gmailConfigured: isGmailImapConfigured(),
       inboxAddress: CONDOMINIO.email,
+      labels,
     });
   })
   .post("/sync", async (c) => {
+    if (isImapSessionBusy()) {
+      return c.json({
+        fetched: 0,
+        created: 0,
+        tickets: 0,
+        errors: ["Sync IMAP já em curso — aguarde."],
+      }, 409);
+    }
     const result = await syncGmailInbox();
     return c.json(result);
   })
@@ -141,7 +177,15 @@ export const emailInboxRoutes = new Hono()
       .where(eq(emailInbox.id, id))
       .limit(1);
     if (!row) return c.json({ message: "Email não encontrado." }, 404);
-    return c.json({ ...row.email, fracaoNumero: row.fracaoNumero });
+    const email = row.email;
+    return c.json({
+      ...email,
+      fracaoNumero: row.fracaoNumero,
+      bodyText: sanitizeStoredBody(email.bodyText),
+      llmResumo: email.llmResumo && /Content-Transfer-Encoding/i.test(email.llmResumo)
+        ? null
+        : email.llmResumo,
+    });
   })
   .patch("/:id", async (c) => {
     const id = c.req.param("id");

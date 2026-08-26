@@ -1,11 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageHeader } from "../components/Layout";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input, Textarea } from "../components/ui/Input";
 import { getToken } from "../lib/auth";
 import { formatElapsed, useRecording } from "../lib/RecordingContext";
+import { useDraftAutosave } from "../hooks/useDraftAutosave";
+import { uploadFileResumable } from "../lib/resumable-upload";
+import { humanizeNetworkError } from "../lib/api-client";
 
 type Reuniao = {
   id: string;
@@ -15,14 +19,16 @@ type Reuniao = {
   fornecedorNome: string | null;
   participantes: string | null;
   transcricao: string | null;
-  resumoJson: string | null;
+  resumoJson: string | object | null;
   resumo: string | null;
-  status: "rascunho" | "aprovada";
+  status: "rascunho" | "processando_audio" | "erro_audio" | "aprovada";
   pdfUrl: string | null;
   approvedAt: string | null;
   audioPath: string | null;
   createdAt: string;
   updatedAt: string;
+  processing?: boolean;
+  warning?: string;
 };
 
 async function apiFetch(path: string, init?: RequestInit, timeoutMs = 60_000) {
@@ -58,18 +64,31 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function ListItems({ items }: { items: string[] }) {
-  const filtered = items.filter(Boolean);
-  if (filtered.length === 0) return <span style={{ color: "var(--text-muted)" }}>—</span>;
+function asText(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
+}
+
+function ListItems({ items }: { items: unknown }) {
+  const list = Array.isArray(items) ? items.map(asText).filter(Boolean) : [];
+  if (list.length === 0) return <span style={{ color: "var(--text-muted)" }}>—</span>;
   return (
     <ul className="list-disc pl-5 space-y-0.5">
-      {filtered.map((item, i) => <li key={i}>{item}</li>)}
+      {list.map((item, i) => <li key={i}>{item}</li>)}
     </ul>
   );
 }
 
-function ActionTable({ actions }: { actions: Array<{ acao?: string; decisao?: string; responsavel: string; prazo: string }> }) {
-  if (actions.length === 0) return <span style={{ color: "var(--text-muted)" }}>Sem ações registadas.</span>;
+function ActionTable({ actions }: { actions: unknown }) {
+  const rows = Array.isArray(actions) ? actions : [];
+  if (rows.length === 0) return <span style={{ color: "var(--text-muted)" }}>Sem ações registadas.</span>;
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs border-collapse">
@@ -81,13 +100,16 @@ function ActionTable({ actions }: { actions: Array<{ acao?: string; decisao?: st
           </tr>
         </thead>
         <tbody>
-          {actions.map((a, i) => (
-            <tr key={i}>
-              <td className="p-1 border-b" style={{ borderColor: "var(--border)" }}>{a.acao || a.decisao || "—"}</td>
-              <td className="p-1 border-b" style={{ borderColor: "var(--border)" }}>{a.responsavel || "—"}</td>
-              <td className="p-1 border-b" style={{ borderColor: "var(--border)" }}>{a.prazo || "—"}</td>
-            </tr>
-          ))}
+          {rows.map((raw, i) => {
+            const a = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+            return (
+              <tr key={i}>
+                <td className="p-1 border-b" style={{ borderColor: "var(--border)" }}>{asText(a.acao || a.decisao) || "—"}</td>
+                <td className="p-1 border-b" style={{ borderColor: "var(--border)" }}>{asText(a.responsavel) || "—"}</td>
+                <td className="p-1 border-b" style={{ borderColor: "var(--border)" }}>{asText(a.prazo) || "—"}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -258,11 +280,19 @@ function ReuniaoFornecedorView({ content }: { content: any }) {
 function StructuredView({ reuniao }: { reuniao: Reuniao }) {
   if (!reuniao.resumoJson) return null;
   try {
-    const content = JSON.parse(reuniao.resumoJson);
-    if (content.tipo === "fornecedor") return <ReuniaoFornecedorView content={content} />;
+    const raw = reuniao.resumoJson;
+    const content = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!content || typeof content !== "object") return null;
+    if ((content as { tipo?: string }).tipo === "fornecedor") {
+      return <ReuniaoFornecedorView content={content} />;
+    }
     return <ReuniaoInternaView content={content} />;
   } catch {
-    return null;
+    return (
+      <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+        Não foi possível interpretar o resumo estruturado.
+      </p>
+    );
   }
 }
 
@@ -281,63 +311,168 @@ export default function ReunioesPage() {
   const [editTranscricao, setEditTranscricao] = useState("");
   const [editResumo, setEditResumo] = useState("");
   const [showTranscricao, setShowTranscricao] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [editHydrated, setEditHydrated] = useState(false);
 
   const recording = useRecording();
   const isThisRecording = recording.target === "reuniao" && recording.status !== "idle";
   const isAnyRecording = recording.status !== "idle";
   const hasPendingSession = recording.sessionTarget === "reuniao";
 
+  const createDraft = useDraftAutosave({
+    scope: "reuniao:create",
+    value: { titulo, dataReuniao, participantes },
+    onRestore: (d) => {
+      setTitulo(d.titulo || "");
+      setDataReuniao(d.dataReuniao || "");
+      setParticipantes(d.participantes || "");
+    },
+    isEmpty: (d) => !d.titulo?.trim() && !d.dataReuniao && !d.participantes?.trim(),
+  });
+
   const { data: reunioes = [], isLoading } = useQuery<Reuniao[]>({
     queryKey: ["reunioes"],
     queryFn: () => apiFetch("/api/reunioes"),
+    refetchInterval: (query) => {
+      const rows = query.state.data as Reuniao[] | undefined;
+      const busy = rows?.some((r) => r.status === "processando_audio");
+      return busy ? 2_500 : false;
+    },
   });
 
   const selected = reunioes.find((r) => r.id === selectedId) ?? null;
+  const isProcessing = selected?.status === "processando_audio";
+  const isAudioError = selected?.status === "erro_audio";
+
+  const editDraft = useDraftAutosave({
+    scope: selectedId ? `reuniao:edit:${selectedId}` : null,
+    value: {
+      editTitulo,
+      editData,
+      editParticipantes,
+      editTranscricao,
+      editResumo,
+    },
+    enabled: Boolean(selectedId) && editHydrated && selected?.status !== "processando_audio",
+    isServerHydrated: editHydrated,
+    onRestore: (d) => {
+      if (selected?.transcricao && selected.status === "rascunho") return;
+      setEditTitulo(d.editTitulo || "");
+      setEditData(d.editData || "");
+      setEditParticipantes(d.editParticipantes || "");
+      setEditTranscricao(d.editTranscricao || "");
+      setEditResumo(d.editResumo || "");
+    },
+  });
 
   const createMutation = useMutation({
     mutationFn: async () => {
+      let uploadId: string | undefined;
+      let audioPath: string | undefined;
+      if (audioFile) {
+        setUploadProgress("A enviar áudio…");
+        const uploaded = await uploadFileResumable({
+          file: audioFile,
+          target: "reuniao",
+          filename: audioFile.name,
+          onProgress: (p) => {
+            const pct = p.totalBytes ? Math.round((100 * p.sentBytes) / p.totalBytes) : 0;
+            setUploadProgress(`A enviar áudio… ${pct}% (${p.sentChunks}/${p.totalChunks})`);
+          },
+        });
+        uploadId = uploaded.uploadId;
+        audioPath = uploaded.audioPath;
+        setUploadProgress("A transcrever áudio e a gerar notas com IA…");
+      }
       const form = new FormData();
       form.append("titulo", titulo);
       form.append("data", dataReuniao);
       form.append("participantes", participantes);
-      if (audioFile) form.append("file", audioFile);
-      // STT + LLM podem demorar vários minutos
+      if (uploadId) form.append("uploadId", uploadId);
+      if (audioPath) form.append("audioPath", audioPath);
       return apiFetch("/api/reunioes", { method: "POST", body: form }, 300_000);
     },
-    onSuccess: (created: Reuniao & { warning?: string }) => {
-      if (created.warning) {
+    onSuccess: (created: Reuniao) => {
+      try {
+        if (!created?.id) throw new Error("Resposta inválida do servidor.");
+        setUploadProgress(null);
+        const ready = Boolean(created.transcricao) && created.status === "rascunho";
+        setSuccess(
+          ready
+            ? "Reunião criada com transcrição e notas geradas pela IA."
+            : created.status === "erro_audio"
+              ? "Reunião criada, mas a geração automática falhou. Pode tentar novamente."
+              : "Reunião criada.",
+        );
+        setError(
+          created.status === "erro_audio"
+            ? (typeof created.resumo === "string" ? created.resumo : "Falha ao gerar.")
+            : "",
+        );
+        setTitulo("");
+        setDataReuniao("");
+        setParticipantes("");
+        setAudioFile(null);
+        createDraft.clear();
+        recording.clearSession();
+        queryClient.setQueryData<Reuniao[]>(["reunioes"], (old) => {
+          const list = old ?? [];
+          if (list.some((r) => r.id === created.id)) {
+            return list.map((r) => (r.id === created.id ? { ...r, ...created } : r));
+          }
+          return [created, ...list];
+        });
+        setSelectedId(created.id);
+        setShowTranscricao(Boolean(created.transcricao));
+        setEditTitulo(String(created.titulo ?? ""));
+        try {
+          const d = new Date(created.data);
+          setEditData(Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10));
+        } catch {
+          setEditData("");
+        }
+        setEditParticipantes(created.participantes ?? "");
+        setEditTranscricao(typeof created.transcricao === "string" ? created.transcricao : "");
+        setEditResumo(typeof created.resumo === "string" ? created.resumo : "");
+        editDraft.clear();
+        setEditHydrated(true);
+        void queryClient.invalidateQueries({ queryKey: ["reunioes"] });
+      } catch (e: any) {
+        setUploadProgress(null);
+        setError(e?.message ?? "Não foi possível carregar a visualização deste rascunho.");
         setSuccess("");
-        setError(created.warning);
-      } else {
-        setSuccess(audioFile ? "Reunião criada com transcrição automática." : "Reunião criada.");
-        setError("");
       }
-      setTitulo("");
-      setDataReuniao("");
-      setParticipantes("");
-      setAudioFile(null);
-      recording.clearSession();
-      setSelectedId(created.id);
-      setShowTranscricao(true);
-      void queryClient.invalidateQueries({ queryKey: ["reunioes"] });
     },
-    onError: (e: any) => { setError(e.message); setSuccess(""); },
+    onError: (e: any) => {
+      setUploadProgress(null);
+      setError(humanizeNetworkError(e));
+      setSuccess("");
+    },
   });
 
   const reprocessMutation = useMutation({
     mutationFn: () => apiFetch(`/api/reunioes/${selectedId}/reprocessar`, { method: "POST" }, 300_000),
     onSuccess: (updated: Reuniao & { warning?: string }) => {
-      if (updated.warning) {
-        setError(updated.warning);
-        setSuccess("Transcrição regenerada (com aviso no resumo).");
+      if (updated.status === "erro_audio" || updated.warning) {
+        setError(updated.warning || updated.resumo || "Falha ao regenerar.");
+        setSuccess("");
       } else {
         setSuccess("Transcrição e resumo regenerados a partir do áudio.");
         setError("");
       }
-      setShowTranscricao(true);
+      setShowTranscricao(Boolean(updated.transcricao));
+      setEditTranscricao(updated.transcricao ?? "");
+      setEditResumo(updated.resumo ?? "");
+      editDraft.clear();
+      queryClient.setQueryData<Reuniao[]>(["reunioes"], (old) =>
+        old?.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)) ?? old,
+      );
       void queryClient.invalidateQueries({ queryKey: ["reunioes"] });
     },
-    onError: (e: any) => { setError(e.message); setSuccess(""); },
+    onError: (e: any) => {
+      setError(humanizeNetworkError(e));
+      setSuccess("");
+    },
   });
 
   const updateMutation = useMutation({
@@ -356,9 +491,10 @@ export default function ReunioesPage() {
     onSuccess: () => {
       setSuccess("Notas atualizadas.");
       setError("");
+      editDraft.clear();
       void queryClient.invalidateQueries({ queryKey: ["reunioes"] });
     },
-    onError: (e: any) => { setError(e.message); setSuccess(""); },
+    onError: (e: any) => { setError(humanizeNetworkError(e)); setSuccess(""); },
   });
 
   const approveMutation = useMutation({
@@ -417,24 +553,69 @@ export default function ReunioesPage() {
     recording.updateDraft({ titulo, data: dataReuniao, participantes });
   }, [titulo, dataReuniao, participantes, isThisRecording, hasPendingSession]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const loadedIdRef = useRef("");
+  const prevStatusRef = useRef("");
+
   useEffect(() => {
     if (recording.error && (isThisRecording || hasPendingSession)) setError(recording.error);
   }, [recording.error, isThisRecording, hasPendingSession]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected) {
+      loadedIdRef.current = "";
+      prevStatusRef.current = "";
+      setEditHydrated(false);
+      return;
+    }
+    const idChanged = loadedIdRef.current !== selected.id;
+    const finishedProcessing =
+      prevStatusRef.current === "processando_audio" && selected.status !== "processando_audio";
+    prevStatusRef.current = selected.status;
+
+    if (!idChanged && !finishedProcessing) return;
+
+    loadedIdRef.current = selected.id;
+    setEditHydrated(false);
     setEditTitulo(selected.titulo);
     setEditData(new Date(selected.data).toISOString().slice(0, 10));
     setEditParticipantes(selected.participantes ?? "");
     setEditTranscricao(selected.transcricao ?? "");
     setEditResumo(selected.resumo ?? "");
-    setShowTranscricao(Boolean(selected.transcricao));
-  }, [selected]);
+    setShowTranscricao(Boolean(selected.transcricao) || finishedProcessing);
+    if (finishedProcessing && selected.status === "rascunho") {
+      setSuccess("Transcrição e notas geradas. Pode rever e editar.");
+      setError("");
+      editDraft.clear();
+    }
+    if (finishedProcessing && selected.status === "erro_audio") {
+      setError(selected.resumo || "Falha ao gerar a transcrição.");
+      setSuccess("");
+    }
+    const t = setTimeout(() => setEditHydrated(true), 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- só reage a id/status da reunião
+  }, [selected?.id, selected?.status, selected?.transcricao, selected?.resumo, selected?.resumoJson]);
 
   const canCreate = Boolean(titulo.trim() && dataReuniao);
 
   return (
-    <>
+    <ErrorBoundary
+      title="Não foi possível carregar a visualização deste rascunho"
+      onReset={() => {
+        if (!selected) return;
+        setEditTitulo(String(selected.titulo ?? ""));
+        try {
+          const d = new Date(selected.data);
+          setEditData(Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10));
+        } catch {
+          setEditData("");
+        }
+        setEditParticipantes(selected.participantes ?? "");
+        setEditTranscricao(typeof selected.transcricao === "string" ? selected.transcricao : "");
+        setEditResumo(typeof selected.resumo === "string" ? selected.resumo : "");
+        setError("");
+      }}
+    >
       <PageHeader
         title="Notas de Reunião"
         subtitle="Gravação, transcrição e resumo estruturado automático (admin)"
@@ -450,6 +631,34 @@ export default function ReunioesPage() {
           <div className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--green)", color: "var(--green)", background: "var(--green-subtle)" }}>
             {success}
           </div>
+        )}
+        {uploadProgress && (
+          <div className="rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "var(--blue-primary)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}>
+            {uploadProgress}
+          </div>
+        )}
+        {isProcessing && (
+          <div className="rounded-lg border px-4 py-3 text-sm animate-pulse" style={{ borderColor: "var(--blue-primary)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}>
+            A transcrever áudio e a gerar notas com IA… Isto pode demorar alguns minutos.
+          </div>
+        )}
+        {isAudioError && selected?.audioPath && (
+          <div className="rounded-lg border px-4 py-3 text-sm flex flex-wrap items-center gap-3" style={{ borderColor: "var(--amber)", color: "var(--text-primary)", background: "var(--bg-secondary)" }}>
+            <span>A geração automática falhou. O áudio está guardado.</span>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => reprocessMutation.mutate()}
+              loading={reprocessMutation.isPending}
+            >
+              Tentar novamente gerar
+            </Button>
+          </div>
+        )}
+        {(createDraft.statusLabel || editDraft.statusLabel) && (
+          <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+            {editDraft.statusLabel || createDraft.statusLabel}
+          </p>
         )}
 
         <Card>
@@ -589,14 +798,14 @@ export default function ReunioesPage() {
                     <Button variant="ghost" size="sm" onClick={() => setShowTranscricao(v => !v)}>
                       {showTranscricao ? "Ocultar" : "Mostrar"}
                     </Button>
-                    {selected.audioPath && selected.status !== "aprovada" && (
+                    {selected.audioPath && selected.status !== "aprovada" && selected.status !== "processando_audio" && (
                       <Button
                         variant="secondary"
                         size="sm"
                         onClick={() => reprocessMutation.mutate()}
                         loading={reprocessMutation.isPending}
                       >
-                        Regenerar transcrição
+                        {isAudioError ? "Tentar novamente gerar" : "Regenerar transcrição"}
                       </Button>
                     )}
                   </div>
@@ -626,17 +835,17 @@ export default function ReunioesPage() {
               )}
 
               <div className="flex flex-wrap gap-2">
-                {selected.status !== "aprovada" && (
+                {selected.status !== "aprovada" && selected.status !== "processando_audio" && (
                   <Button onClick={() => updateMutation.mutate()} loading={updateMutation.isPending}>
                     Guardar alterações
                   </Button>
                 )}
-                {selected.status !== "aprovada" && (
+                {selected.status !== "aprovada" && selected.status !== "processando_audio" && selected.status !== "erro_audio" && (
                   <Button
                     variant="secondary"
                     onClick={() => approveMutation.mutate()}
                     loading={approveMutation.isPending}
-                    disabled={updateMutation.isPending}
+                    disabled={updateMutation.isPending || !selected.transcricao}
                   >
                     Aprovar e gerar PDF
                   </Button>
@@ -653,6 +862,6 @@ export default function ReunioesPage() {
           </Card>
         )}
       </div>
-    </>
+    </ErrorBoundary>
   );
 }

@@ -36,7 +36,18 @@ export function anoPorExtenso(year: number): string {
 }
 
 export function partesData(dataISO: string): { dia: string; mes: string; anoExtenso: string } {
-  const d = new Date(`${dataISO.slice(0, 10)}T12:00:00`);
+  const raw = String(dataISO ?? "").trim().slice(0, 10);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? new Date(`${raw}T12:00:00`)
+    : new Date(NaN);
+  if (Number.isNaN(d.getTime())) {
+    const now = new Date();
+    return {
+      dia: String(now.getDate()),
+      mes: MESES[now.getMonth()] ?? "",
+      anoExtenso: anoPorExtenso(now.getFullYear()),
+    };
+  }
   const day = d.getDate();
   const month = d.getMonth();
   const year = d.getFullYear();
@@ -93,21 +104,31 @@ function linhaOrdemTrabalhos(index: number, titulo: string): string {
 
 /** Gera o texto integral da ata no formato legal português. */
 export function conteudoToTextoFormal(conteudo: AtaConteudo): string {
-  const h = conteudo.cabecalho;
-  const data = partesData(h.dataReuniao);
-  const conv = partesData(h.convocatoriaData || h.dataReuniao);
+  const h = conteudo?.cabecalho;
+  if (!h || typeof h !== "object") {
+    return "";
+  }
 
-  const tipo = h.tipoAssembleia.trim() || "Ordinária";
-  const local = h.localReuniao.trim() || "sala do condomínio";
-  const horaInicio = h.horaInicio.trim() || "……………………";
-  const horaFim = h.horaFim.trim() || "………………";
-  const nomeFormal = h.nomeCondominioFormal.trim() || h.nomeCondominio.trim();
-  const morada = h.morada.trim();
-  const freguesia = h.freguesia.trim() || "……………………………………";
-  const concelho = h.concelho.trim() || "…………………………………………";
-  const presidente = h.presidente.trim() || "…………………………………………………………………………";
-  const secretario = h.secretario.trim() || "……………………………………………………";
-  const presentes = h.presentes.trim() || "(…)";
+  const str = (v: unknown, fallback = "") => {
+    if (typeof v === "string") return v;
+    if (v == null) return fallback;
+    return String(v);
+  };
+
+  const data = partesData(str(h.dataReuniao));
+  const conv = partesData(str(h.convocatoriaData) || str(h.dataReuniao));
+
+  const tipo = str(h.tipoAssembleia).trim() || "Ordinária";
+  const local = str(h.localReuniao).trim() || "sala do condomínio";
+  const horaInicio = str(h.horaInicio).trim() || "……………………";
+  const horaFim = str(h.horaFim).trim() || "………………";
+  const nomeFormal = str(h.nomeCondominioFormal).trim() || str(h.nomeCondominio).trim();
+  const morada = str(h.morada).trim();
+  const freguesia = str(h.freguesia).trim() || "……………………………………";
+  const concelho = str(h.concelho).trim() || "…………………………………………";
+  const presidente = str(h.presidente).trim() || "…………………………………………………………………………";
+  const secretario = str(h.secretario).trim() || "……………………………………………………";
+  const presentes = str(h.presentes).trim() || "(…)";
 
   const linhas: string[] = [];
 
@@ -116,7 +137,9 @@ export function conteudoToTextoFormal(conteudo: AtaConteudo): string {
     "",
   );
 
-  if (conteudo.pontos.length === 0) {
+  const pontos = Array.isArray(conteudo.pontos) ? conteudo.pontos : [];
+
+  if (pontos.length === 0) {
     linhas.push(
       "1. Apresentação, discussão e votação do Relatório e Contas do exercício de …………………………………………………………………;",
       "2. Eleição da Administração para o exercício de ………………………………………………;",
@@ -124,7 +147,7 @@ export function conteudoToTextoFormal(conteudo: AtaConteudo): string {
       "4. Discussão de outros assuntos de interesse para o Condomínio.",
     );
   } else {
-    conteudo.pontos.forEach((p, i) => linhas.push(linhaOrdemTrabalhos(i, p.titulo)));
+    pontos.forEach((p, i) => linhas.push(linhaOrdemTrabalhos(i, str(p?.titulo, `Ponto ${i + 1}`))));
   }
 
   linhas.push(
@@ -135,18 +158,18 @@ export function conteudoToTextoFormal(conteudo: AtaConteudo): string {
     "",
     `Presidiu à Assembleia o Administrador, ${presidente}, tendo exercido as funções de secretário o condómino ${secretario}`,
     "",
-    h.textoAbertura?.trim() ||
+    str(h.textoAbertura).trim() ||
       "Verificada a regularidade da convocatória e a presença de um número de condóminos representativo dos votos necessários à tomada de deliberações, o Administrador abriu a sessão, dando início aos trabalhos da Assembleia, de harmonia com a respectiva ordem constante da convocatória:",
     "",
   );
 
-  conteudo.pontos.forEach((p, i) => {
+  pontos.forEach((p, i) => {
     const texto = buildPontoTexto(p, i);
     linhas.push(`PONTO ${i + 1} – ${texto}`, "");
   });
 
   linhas.push(
-    h.textoEncerramento?.trim() ||
+    str(h.textoEncerramento).trim() ||
       `Nada mais havendo a tratar, foram os trabalhos dados como concluídos pelas ${horaFim} horas, lavrando-se a presente ata que, após lida e aprovada, vai ser assinada pelo Presidente, pelo Secretário e por todos os condóminos presentes e/ou representados, enviando-se de seguida uma cópia a todos os condóminos ausentes.`,
   );
 

@@ -3,6 +3,7 @@ import { db } from "../database";
 import * as schema from "../database/schema";
 import { eq, and } from "drizzle-orm";
 import { requireAdmin } from "../middleware/auth";
+import { withIdempotency } from "../lib/idempotency";
 
 export const quotas = new Hono()
   .get("/", async (c) => {
@@ -162,14 +163,21 @@ export const quotas = new Hono()
   })
   .patch("/:id/pagar", requireAdmin, async (c) => {
     const id = c.req.param("id");
-    const { metodoPagamento, observacoes } = await c.req.json();
-    const [quota] = await db.update(schema.quotas).set({
-      pago: true,
-      dataPagamento: new Date(),
-      metodoPagamento: metodoPagamento || "transferência",
-      observacoes,
-    }).where(eq(schema.quotas.id, id)).returning();
-    return c.json({ quota }, 200);
+    return withIdempotency(c, `quotas:pagar:${id}`, async () => {
+      const body = await c.req.json().catch(() => ({} as any));
+      const [existing] = await db.select().from(schema.quotas).where(eq(schema.quotas.id, id)).limit(1);
+      if (!existing) return { status: 404, body: { message: "Quota não encontrada." } };
+      if (existing.pago) {
+        return { status: 200, body: { quota: existing } };
+      }
+      const [quota] = await db.update(schema.quotas).set({
+        pago: true,
+        dataPagamento: new Date(),
+        metodoPagamento: body.metodoPagamento || "transferência",
+        observacoes: body.observacoes,
+      }).where(eq(schema.quotas.id, id)).returning();
+      return { status: 200, body: { quota } };
+    });
   })
   .patch("/:id", async (c) => {
     const id = c.req.param("id");

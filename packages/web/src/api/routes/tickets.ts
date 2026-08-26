@@ -20,6 +20,7 @@ import {
   resolverEmailFracao,
   sendPlainEmail,
 } from "../lib/ticket-email";
+import { withIdempotency } from "../lib/idempotency";
 
 const STATUS_OK = new Set([
   "aberto", "em_curso", "aguarda_condomino", "pendente_aprovacao", "resolvido", "cancelado",
@@ -527,101 +528,114 @@ export const ticketsRoutes = new Hono()
     return c.json(updated);
   })
   .post("/:id/aprovar-email", requireAdmin, async (c) => {
-    const u = c.get("user") as any;
     const id = c.req.param("id");
-    const ticket = await loadTicketOr404(id);
-    if (!ticket) return c.json({ message: "Pedido não encontrado." }, 404);
-    if (ticket.origem !== "email") return c.json({ message: "Apenas pedidos com origem email." }, 400);
-    if (ticket.status !== "pendente_aprovacao") {
-      return c.json({ message: "Pedido não está pendente de aprovação." }, 400);
-    }
+    return withIdempotency(c, `tickets:aprovar-email:${id}`, async () => {
+      const u = c.get("user") as any;
+      const ticket = await loadTicketOr404(id);
+      if (!ticket) return { status: 404, body: { message: "Pedido não encontrado." } };
+      if (ticket.origem !== "email") return { status: 400, body: { message: "Apenas pedidos com origem email." } };
 
-    const [inbox] = await db.select().from(emailInbox).where(eq(emailInbox.ticketId, id)).limit(1);
-    if (!inbox) return c.json({ message: "Email de origem não encontrado." }, 404);
+      // Já resolvido → não reenviar email (retry seguro)
+      if (ticket.status === "resolvido") {
+        return { status: 200, body: ticket };
+      }
+      if (ticket.status !== "pendente_aprovacao") {
+        return { status: 400, body: { message: "Pedido não está pendente de aprovação." } };
+      }
 
-    const body = await c.req.json().catch(() => ({} as any));
-    const reply =
-      (typeof body.body === "string" && body.body.trim())
-      || ticket.llmSugestaoResposta?.trim()
-      || "";
-    if (!reply) return c.json({ message: "Resposta vazia." }, 400);
+      const [inbox] = await db.select().from(emailInbox).where(eq(emailInbox.ticketId, id)).limit(1);
+      if (!inbox) return { status: 404, body: { message: "Email de origem não encontrado." } };
 
-    const subject = inbox.subject.startsWith("Re:") ? inbox.subject : `Re: ${inbox.subject}`;
+      const body = await c.req.json().catch(() => ({} as any));
+      const reply =
+        (typeof body.body === "string" && body.body.trim())
+        || ticket.llmSugestaoResposta?.trim()
+        || "";
+      if (!reply) return { status: 400, body: { message: "Resposta vazia." } };
 
-    try {
-      await sendPlainEmail({
-        to: inbox.fromEmail,
-        subject,
-        html: reply.replace(/\n/g, "<br>\n"),
-      });
-    } catch (e: any) {
-      return c.json({ message: `Falha ao enviar email: ${String(e?.message ?? e)}` }, 500);
-    }
+      const subject = inbox.subject.startsWith("Re:") ? inbox.subject : `Re: ${inbox.subject}`;
 
-    const now = new Date();
-    await db.update(emailInbox).set({
-      replyBody: reply,
-      repliedAt: now,
-      status: "respondido",
-      processedAt: now,
-      updatedAt: now,
-    }).where(eq(emailInbox.id, inbox.id));
+      try {
+        await sendPlainEmail({
+          to: inbox.fromEmail,
+          subject,
+          html: reply.replace(/\n/g, "<br>\n"),
+        });
+      } catch (e: any) {
+        return { status: 500, body: { message: `Falha ao enviar email: ${String(e?.message ?? e)}` } };
+      }
 
-    await db.insert(ticketMessages).values({
-      ticketId: id,
-      userId: u.id,
-      authorRole: "admin",
-      body: reply,
-    });
-
-    const [updated] = await db.update(tickets).set({
-      status: "resolvido",
-      resolvedAt: now,
-      updatedAt: now,
-      llmSugestaoResposta: reply,
-    }).where(eq(tickets.id, id)).returning();
-
-    return c.json(updated);
-  })
-  .post("/:id/rejeitar-email", requireAdmin, async (c) => {
-    const u = c.get("user") as any;
-    const id = c.req.param("id");
-    const ticket = await loadTicketOr404(id);
-    if (!ticket) return c.json({ message: "Pedido não encontrado." }, 404);
-    if (ticket.origem !== "email") return c.json({ message: "Apenas pedidos com origem email." }, 400);
-    if (ticket.status !== "pendente_aprovacao") {
-      return c.json({ message: "Pedido não está pendente de aprovação." }, 400);
-    }
-
-    const body = await c.req.json().catch(() => ({} as any));
-    const motivo = typeof body.motivo === "string" ? body.motivo.trim() : "";
-
-    const now = new Date();
-    const [inbox] = await db.select().from(emailInbox).where(eq(emailInbox.ticketId, id)).limit(1);
-    if (inbox) {
+      const now = new Date();
       await db.update(emailInbox).set({
-        status: "spam",
-        categoria: "spam",
+        replyBody: reply,
+        repliedAt: now,
+        status: "respondido",
         processedAt: now,
         updatedAt: now,
       }).where(eq(emailInbox.id, inbox.id));
-    }
 
-    await db.insert(ticketMessages).values({
-      ticketId: id,
-      userId: u.id,
-      authorRole: "system",
-      body: motivo
-        ? `Pedido de email rejeitado/arquivado como spam. Motivo: ${motivo}`
-        : "Pedido de email rejeitado/arquivado como spam.",
+      await db.insert(ticketMessages).values({
+        ticketId: id,
+        userId: u.id,
+        authorRole: "admin",
+        body: reply,
+      });
+
+      const [updated] = await db.update(tickets).set({
+        status: "resolvido",
+        resolvedAt: now,
+        updatedAt: now,
+        llmSugestaoResposta: reply,
+      }).where(eq(tickets.id, id)).returning();
+
+      return { status: 200, body: updated };
     });
+  })
+  .post("/:id/rejeitar-email", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    return withIdempotency(c, `tickets:rejeitar-email:${id}`, async () => {
+      const u = c.get("user") as any;
+      const ticket = await loadTicketOr404(id);
+      if (!ticket) return { status: 404, body: { message: "Pedido não encontrado." } };
+      if (ticket.origem !== "email") return { status: 400, body: { message: "Apenas pedidos com origem email." } };
 
-    const [updated] = await db.update(tickets).set({
-      status: "cancelado",
-      updatedAt: now,
-    }).where(eq(tickets.id, id)).returning();
+      if (ticket.status === "cancelado") {
+        return { status: 200, body: ticket };
+      }
+      if (ticket.status !== "pendente_aprovacao") {
+        return { status: 400, body: { message: "Pedido não está pendente de aprovação." } };
+      }
 
-    return c.json(updated);
+      const body = await c.req.json().catch(() => ({} as any));
+      const motivo = typeof body.motivo === "string" ? body.motivo.trim() : "";
+
+      const now = new Date();
+      const [inbox] = await db.select().from(emailInbox).where(eq(emailInbox.ticketId, id)).limit(1);
+      if (inbox) {
+        await db.update(emailInbox).set({
+          status: "spam",
+          categoria: "spam",
+          processedAt: now,
+          updatedAt: now,
+        }).where(eq(emailInbox.id, inbox.id));
+      }
+
+      await db.insert(ticketMessages).values({
+        ticketId: id,
+        userId: u.id,
+        authorRole: "system",
+        body: motivo
+          ? `Pedido de email rejeitado/arquivado como spam. Motivo: ${motivo}`
+          : "Pedido de email rejeitado/arquivado como spam.",
+      });
+
+      const [updated] = await db.update(tickets).set({
+        status: "cancelado",
+        updatedAt: now,
+      }).where(eq(tickets.id, id)).returning();
+
+      return { status: 200, body: updated };
+    });
   })
   .post("/:id/messages", async (c) => {
     const u = c.get("user") as any;

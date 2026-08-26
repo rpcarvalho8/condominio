@@ -14,6 +14,7 @@ import {
   resolveConteudo,
   serializeConteudo,
 } from "../lib/ata-conteudo";
+import { resolveUploadedAudioPath } from "./uploads";
 
 const UPLOAD_DIR = path.join(process.cwd(), "data", "assembleias");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -83,6 +84,7 @@ function toPublicAtaRow(row: typeof atas.$inferSelect) {
     rejectedAt: row.rejectedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    hasAudio: Boolean(row.audioPath),
   };
 }
 
@@ -142,6 +144,137 @@ async function tryAutoCloseVoting(ataRow: typeof atas.$inferSelect, force = fals
   return updated;
 }
 
+function toPosix(p: string) {
+  return p.replace(/\\/g, "/");
+}
+
+function resolveAudioFromUpload(uploadId: string, audioPathIn: string): {
+  absolutePath: string;
+  relativePath: string;
+  filename: string;
+} | { error: string; status: 400 | 404 } {
+  let relative = audioPathIn;
+  if (uploadId && !relative) {
+    const metaFile = path.join(process.cwd(), "data", "uploads", uploadId, "meta.json");
+    if (!fs.existsSync(metaFile)) {
+      return { error: "Upload não encontrado. Complete o envio do áudio primeiro.", status: 400 };
+    }
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaFile, "utf8")) as {
+        finalRelativePath?: string;
+        status?: string;
+      };
+      if (meta.status !== "completed" || !meta.finalRelativePath) {
+        return { error: "Upload incompleto. Aguarde o complete do áudio.", status: 400 };
+      }
+      relative = meta.finalRelativePath;
+    } catch {
+      return { error: "Metadados do upload inválidos.", status: 400 };
+    }
+  }
+  relative = toPosix(relative);
+  const resolved = resolveUploadedAudioPath(relative);
+  if (!resolved) return { error: "Ficheiro de áudio não encontrado no servidor.", status: 404 };
+  return { absolutePath: resolved, relativePath: relative, filename: path.basename(resolved) };
+}
+
+async function runAtaSttPipeline(ataId: string): Promise<void> {
+  const [row] = await db.select().from(atas).where(eq(atas.id, ataId)).limit(1);
+  if (!row?.audioPath) {
+    await db.update(atas).set({
+      status: "erro_audio",
+      ataTexto: "Sem ficheiro de áudio associado.",
+      updatedAt: new Date(),
+    }).where(eq(atas.id, ataId));
+    return;
+  }
+  const absolutePath = path.join(process.cwd(), row.audioPath);
+  if (!fs.existsSync(absolutePath)) {
+    await db.update(atas).set({
+      status: "erro_audio",
+      ataTexto: "Ficheiro de áudio não encontrado no disco.",
+      updatedAt: new Date(),
+    }).where(eq(atas.id, ataId));
+    return;
+  }
+
+  try {
+    console.log("[STT] Iniciando transcrição do áudio...", { ataId, path: row.audioPath });
+    const transcricaoRaw = await transcribeAudioFilePath(absolutePath, path.basename(row.audioPath));
+    if (!transcricaoRaw?.trim()) {
+      await db.update(atas).set({
+        status: "erro_audio",
+        transcricaoRaw: "",
+        ataTexto: "Transcrição vazia. Use «Tentar novamente gerar ata».",
+        updatedAt: new Date(),
+      }).where(eq(atas.id, ataId));
+      return;
+    }
+
+    console.log("[STT] Transcrição concluída. Invocando LLM...", {
+      ataId,
+      chars: transcricaoRaw.length,
+    });
+
+    try {
+      const rascunho = await gerarRascunhoAta(transcricaoRaw, new Date(row.dataReuniao));
+      const conteudoJson = serializeConteudo(rascunho.conteudo);
+      const resumoDeliberacoes =
+        rascunho.conteudo.pontos
+          .map((p) => (p.deliberacao || p.texto || "").trim())
+          .filter(Boolean)
+          .slice(0, 8)
+          .join("\n\n") || null;
+
+      await db.update(atas).set({
+        status: "rascunho",
+        transcricaoRaw,
+        ataTexto: rascunho.ataTexto,
+        conteudoJson,
+        resumoDeliberacoes,
+        updatedAt: new Date(),
+      }).where(eq(atas.id, ataId));
+      console.log("[STT/LLM] Conteúdo guardado na BD para o ID:", ataId);
+    } catch (e: any) {
+      const msg = String(e?.message ?? "Falha LLM");
+      await db.update(atas).set({
+        status: "erro_audio",
+        transcricaoRaw,
+        ataTexto: `Transcrição OK, mas a geração da ata falhou: ${msg}\n\n--- Transcrição ---\n${transcricaoRaw}`,
+        conteudoJson: null,
+        updatedAt: new Date(),
+      }).where(eq(atas.id, ataId));
+      console.error(`[atas] LLM falhou id=${ataId}:`, msg);
+    }
+  } catch (e: any) {
+    const msg = String(e?.message ?? "Falha na transcrição.");
+    console.error(`[atas] STT falhou id=${ataId}:`, msg);
+    await db.update(atas).set({
+      status: "erro_audio",
+      ataTexto: `Falha na transcrição: ${msg}`,
+      updatedAt: new Date(),
+    }).where(eq(atas.id, ataId));
+  }
+}
+
+export const atasPdfRoutes = new Hono().get("/:filename", async (c) => {
+  const filename = c.req.param("filename");
+  if (filename.includes("..") || filename.includes("/")) {
+    return c.json({ message: "Path inválido." }, 400);
+  }
+  const pdfDir = path.join(process.cwd(), "data", "atas");
+  const pdfPath = path.join(pdfDir, filename);
+  if (!fs.existsSync(pdfPath)) return c.json({ message: "PDF não encontrado." }, 404);
+
+  const buf = fs.readFileSync(pdfPath);
+  return new Response(buf, {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="${filename}"`,
+    },
+  });
+});
+
 export const atasRoutes = new Hono()
   .use(requireAuth)
   .post("/", requireAdmin, async (c) => {
@@ -150,10 +283,9 @@ export const atasRoutes = new Hono()
       const audio = body.file;
       const titulo = String(body.titulo ?? "").trim();
       const dataReuniaoRaw = String(body.dataReuniao ?? "").trim();
+      const uploadId = String(body.uploadId ?? "").trim();
+      const audioPathIn = String(body.audioPath ?? "").trim();
 
-      if (!audio || typeof audio === "string") {
-        return c.json({ message: "Ficheiro de áudio obrigatório." }, 400);
-      }
       if (!titulo) return c.json({ message: "Título é obrigatório." }, 400);
       if (!dataReuniaoRaw) return c.json({ message: "Data da reunião é obrigatória." }, 400);
 
@@ -162,41 +294,50 @@ export const atasRoutes = new Hono()
         return c.json({ message: "Data da reunião inválida." }, 400);
       }
 
-      const audioFile = audio as File;
-      if (!isAllowedAudio(audioFile)) {
-        return c.json({ message: "Formato inválido. Use MP3, M4A, WAV ou WEBM." }, 400);
-      }
-      if (audioFile.size > MAX_AUDIO_SIZE_BYTES) {
-        return c.json({ message: "Ficheiro demasiado grande. Máximo: 25MB." }, 400);
-      }
+      let relativePath = "";
 
-      const ext = path.extname(audioFile.name).toLowerCase();
-      const safeTitle = sanitizeFilenamePart(titulo) || "reuniao";
-      const filename = `${Date.now()}_${safeTitle}${ext}`;
-      const absolutePath = path.join(UPLOAD_DIR, filename);
-      const relativePath = path.join("data", "assembleias", filename);
+      if (uploadId || audioPathIn) {
+        const resolved = resolveAudioFromUpload(uploadId, audioPathIn);
+        if ("error" in resolved) return c.json({ message: resolved.error }, resolved.status);
+        relativePath = resolved.relativePath;
+      } else if (audio && typeof audio !== "string") {
+        const audioFile = audio as File;
+        if (!isAllowedAudio(audioFile)) {
+          return c.json({ message: "Formato inválido. Use MP3, M4A, WAV ou WEBM." }, 400);
+        }
+        if (audioFile.size > MAX_AUDIO_SIZE_BYTES) {
+          return c.json({ message: `Ficheiro demasiado grande. Máximo: ${Math.round(MAX_AUDIO_SIZE_BYTES / (1024 * 1024))}MB.` }, 400);
+        }
 
-      const buffer = Buffer.from(await audioFile.arrayBuffer());
-      if (buffer.length === 0) {
-        return c.json({ message: "Ficheiro de áudio vazio." }, 400);
+        const ext = path.extname(audioFile.name).toLowerCase();
+        const safeTitle = sanitizeFilenamePart(titulo) || "reuniao";
+        const filename = `${Date.now()}_${safeTitle}${ext}`;
+        const absolutePath = path.join(UPLOAD_DIR, filename);
+        const buffer = Buffer.from(await audioFile.arrayBuffer());
+        if (buffer.length === 0) {
+          return c.json({ message: "Ficheiro de áudio vazio." }, 400);
+        }
+        fs.writeFileSync(absolutePath, buffer);
+        relativePath = toPosix(path.join("data", "assembleias", filename));
+      } else {
+        return c.json({ message: "Ficheiro de áudio obrigatório (ou uploadId)." }, 400);
       }
-      fs.writeFileSync(absolutePath, buffer);
-
-      const transcricaoRaw = await transcribeAudioFilePath(absolutePath, filename);
-      const rascunho = await gerarRascunhoAta(transcricaoRaw, dataReuniao);
 
       const [created] = await db.insert(atas).values({
         titulo,
         dataReuniao,
-        status: "rascunho",
-        transcricaoRaw,
-        ataTexto: rascunho.ataTexto,
-        conteudoJson: serializeConteudo(rascunho.conteudo),
+        status: "processando_audio",
+        transcricaoRaw: "",
+        ataTexto: "A transcrever áudio e a gerar ata com IA…",
+        conteudoJson: null,
         resumoDeliberacoes: null,
         audioPath: relativePath,
       }).returning();
 
-      return c.json(created, 201);
+      // Aguardar STT+LLM no pedido — o plugin Vite corta trabalho em background após a response
+      await runAtaSttPipeline(created.id);
+      const [updated] = await db.select().from(atas).where(eq(atas.id, created.id)).limit(1);
+      return c.json(toPublicAtaRow(updated ?? created), 201);
     } catch (error: any) {
       const message = String(error?.message ?? "Erro inesperado ao criar ata.");
       if (message.includes("GROQ_API_KEY")) {
@@ -356,8 +497,8 @@ export const atasRoutes = new Hono()
 
     const [existing] = await db.select().from(atas).where(eq(atas.id, id)).limit(1);
     if (!existing) return c.json({ message: "Ata não encontrada." }, 404);
-    if (!["rascunho", "rejeitada"].includes(existing.status)) {
-      return c.json({ message: "Edição só permitida quando a ata está em rascunho ou rejeitada." }, 403);
+    if (!["rascunho", "rejeitada", "erro_audio"].includes(existing.status)) {
+      return c.json({ message: "Edição só permitida quando a ata está em rascunho, rejeitada ou com erro de áudio." }, 403);
     }
 
     const body = await c.req.json().catch(() => ({} as any));
@@ -402,6 +543,26 @@ export const atasRoutes = new Hono()
 
     if (!updated) return c.json({ message: "Ata não encontrada." }, 404);
     return c.json(updated);
+  })
+  // POST /api/atas/:id/reprocessar → regenerar STT+LLM a partir do áudio guardado
+  .post("/:id/reprocessar", requireAdmin, async (c) => {
+    const id = c.req.param("id");
+    const [existing] = await db.select().from(atas).where(eq(atas.id, id)).limit(1);
+    if (!existing) return c.json({ message: "Ata não encontrada." }, 404);
+    if (!existing.audioPath) return c.json({ message: "Esta ata não tem áudio guardado." }, 400);
+    const abs = path.join(process.cwd(), existing.audioPath);
+    if (!fs.existsSync(abs)) return c.json({ message: "Ficheiro de áudio não encontrado no servidor." }, 404);
+
+    await db.update(atas).set({
+      status: "processando_audio",
+      ataTexto: "A regenerar transcrição e ata com IA…",
+      updatedAt: new Date(),
+    }).where(eq(atas.id, id));
+
+    await runAtaSttPipeline(id);
+    const [updated] = await db.select().from(atas).where(eq(atas.id, id)).limit(1);
+    if (!updated) return c.json({ message: "Ata não encontrada." }, 404);
+    return c.json(toPublicAtaRow(updated));
   })
   // POST /api/atas/:id/audio → (re)attach audio + regenerate transcription/draft
   .post("/:id/audio", requireAdmin, async (c) => {
@@ -604,24 +765,6 @@ export const atasRoutes = new Hono()
     }).where(eq(atas.id, id)).returning();
 
     return c.json(toPublicAtaRow(updated));
-  })
-  // GET /api/atas/pdf/:filename → stream PDF
-  .get("/pdf/:filename", async (c) => {
-    const filename = c.req.param("filename");
-    if (filename.includes("..") || filename.includes("/")) {
-      return c.json({ message: "Path inválido." }, 400);
-    }
-    const pdfDir = path.join(process.cwd(), "data", "atas");
-    const pdfPath = path.join(pdfDir, filename);
-    if (!fs.existsSync(pdfPath)) return c.json({ message: "PDF não encontrado." }, 404);
-
-    const buf = fs.readFileSync(pdfPath);
-    return new Response(buf, {
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${filename}"`,
-      },
-    });
   })
   // PATCH /api/atas/:id/fechar-votacao → admin fecha votação manualmente (fallback)
   .patch("/:id/fechar-votacao", requireAdmin, async (c) => {

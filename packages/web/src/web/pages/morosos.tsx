@@ -5,6 +5,8 @@ import { Card, CardContent } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { formatEuro, getMesNome } from "../lib/utils";
+import { apiFetch as sharedApiFetch } from "../lib/api-client";
+import { getToken } from "../lib/auth";
 import { AlertCircle, Phone, Mail, Clock, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { useState } from "react";
 
@@ -33,7 +35,14 @@ export default function MorososPage() {
 
   const pagarMut = useMutation({
     mutationFn: async (id: string) =>
-      (await api.quotas[":id"].pagar.$patch({ param: { id }, json: { metodoPagamento: "transferência" } })).json(),
+      sharedApiFetch(`/api/quotas/${id}/pagar`, {
+        method: "PATCH",
+        token: getToken(),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metodoPagamento: "transferência" }),
+        idempotent: true,
+        retries: 2,
+      }),
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["quotas"] }),
