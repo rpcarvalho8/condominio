@@ -76,7 +76,9 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
 
   try {
     console.log("[STT] Iniciando transcrição do áudio...", { reuniaoId, path: row.audioPath });
-    const transcricao = await transcribeAudioFilePath(absolutePath, path.basename(row.audioPath));
+    const transcricao = await transcribeAudioFilePath(absolutePath, path.basename(row.audioPath), {
+      cacheKey: `reuniao_${reuniaoId}`,
+    });
     if (!transcricao?.trim()) {
       await db.update(reunioes).set({
         status: "erro_audio",

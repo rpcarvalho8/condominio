@@ -200,7 +200,9 @@ async function runAtaSttPipeline(ataId: string): Promise<void> {
 
   try {
     console.log("[STT] Iniciando transcrição do áudio...", { ataId, path: row.audioPath });
-    const transcricaoRaw = await transcribeAudioFilePath(absolutePath, path.basename(row.audioPath));
+    const transcricaoRaw = await transcribeAudioFilePath(absolutePath, path.basename(row.audioPath), {
+      cacheKey: `ata_${ataId}`,
+    });
     if (!transcricaoRaw?.trim()) {
       await db.update(atas).set({
         status: "erro_audio",
@@ -599,7 +601,9 @@ export const atasRoutes = new Hono()
     fs.writeFileSync(absolutePath, buffer);
 
     // Regerar draft (transcrição + markdown)
-    const transcricaoRaw = await transcribeAudioFilePath(absolutePath, filename);
+    const transcricaoRaw = await transcribeAudioFilePath(absolutePath, filename, {
+      cacheKey: `ata_${id}`,
+    });
     const rascunho = await gerarRascunhoAta(transcricaoRaw, new Date(existing.dataReuniao));
 
     // Mantém o áudio; só será disponibilizado ao portal durante a janela de votação.

@@ -1,5 +1,10 @@
-import { GROQ_CHAT_MODEL } from "./groq-models";
 import { CONDOMINIO } from "./condominio";
+import { GROQ_CHAT_MODEL } from "./groq-models";
+import {
+  groqChat,
+  mapTranscriptionToSyntheses,
+  prepareFonteForReduce,
+} from "./llm";
 import {
   type AtaConteudo,
   conteudoToMarkdown,
@@ -10,14 +15,18 @@ import {
 
 const EXEMPLO_PONTO = `O Administrador procedeu à apresentação do Relatório e Contas do exercício de 2025. Após a sua discussão e consequente votação, o referido Relatório e Contas foi aprovado por unanimidade, ficando anexo à presente ata e dela fazendo parte integrante.`;
 
-function buildPrompt(transcricao: string, dataReuniaoISO: string) {
-  const cab = defaultCabecalho(new Date(`${dataReuniaoISO}T12:00:00`));
+const MAP_INSTRUCTIONS =
+  "Extrai APENAS os pontos críticos, deliberações, votações e valores monetários num máximo de 350 palavras. Omite saudações, introduções e conversas acessórias.";
 
+const ATA_FINAL_SYSTEM =
+  "Respondes apenas com JSON válido para atas de condomínio em PT-PT, seguindo o formato legal português.";
+
+function buildPrompt(fonte: string, dataReuniaoISO: string) {
   return `És um assistente jurídico para redigir atas de assembleias de condomínio em português europeu (Portugal).
 
 Data da reunião: ${dataReuniaoISO}
 
-Com base na transcrição abaixo, gera um rascunho de ata em JSON (apenas JSON válido, sem markdown).
+Com base na fonte abaixo (transcrição completa OU sínteses Map-Reduce da reunião), gera um rascunho de ata em JSON (apenas JSON válido, sem markdown).
 
 O texto final será formatado num modelo legal português. Preenche os campos de forma a permitir essa redacção formal.
 
@@ -66,16 +75,17 @@ Estrutura JSON obrigatória:
 }
 
 Regras:
-- Identifica cada item da ordem de trabalhos mencionado na transcrição como um elemento em "pontos".
+- Identifica cada item da ordem de trabalhos mencionado como um elemento em "pontos".
 - "titulo": texto curto do item na ordem de trabalhos (ex.: "Eleição da Administração para o exercício de 2026").
 - "texto": parágrafo narrativo formal completo do PONTO (começa directamente com a acção, SEM prefixo "PONTO N –"). Usa linguagem jurídica como no exemplo: "O Administrador procedeu...", "Após discussão e consequente votação...", "foi aprovado por unanimidade/maioria de X votos...".
-- Preenche horaInicio, horaFim, presidente, secretario, presentes, convocatoriaData, tipoAssembleia se mencionados na transcrição.
+- Preenche horaInicio, horaFim, presidente, secretario, presentes, convocatoriaData, tipoAssembleia se mencionados.
 - Votos: usa números apenas se explicitamente mencionados; caso contrário 0.
 - Não inventes factos. Lacunas: indica "Não identificado na transcrição" no campo adequado.
-- Cria APENAS pontos que foram efectivamente mencionados ou discutidos na transcrição. NÃO inventes pontos genéricos. Se a transcrição mencionar apenas 1 assunto, gera apenas 1 ponto. Se não for possível identificar nenhum ponto concreto, gera um único ponto com titulo "Assuntos gerais" e texto indicando que não foram identificados pontos específicos na transcrição.
+- Cria APENAS pontos que foram efectivamente mencionados ou discutidos. NÃO inventes pontos genéricos. Se a fonte mencionar apenas 1 assunto, gera apenas 1 ponto. Se não for possível identificar nenhum ponto concreto, gera um único ponto com titulo "Assuntos gerais" e texto indicando que não foram identificados pontos específicos.
+- Consolida informação repetida entre sínteses parciais (não dupliques o mesmo ponto).
 
-TRANSCRIÇÃO:
-${transcricao}`;
+FONTE (transcrição ou sínteses):
+${fonte}`;
 }
 
 function extractJson(content: string): unknown {
@@ -91,37 +101,31 @@ export type RascunhoAtaResult = {
 };
 
 export async function gerarRascunhoAta(transcricao: string, dataReuniao: Date): Promise<RascunhoAtaResult> {
-  const groqApiKey = process.env.GROQ_API_KEY;
-  if (!groqApiKey) {
+  if (!process.env.GROQ_API_KEY) {
     throw new Error("GROQ_API_KEY não configurada no servidor.");
   }
 
   const dataISO = dataReuniao.toISOString().slice(0, 10);
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${groqApiKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_CHAT_MODEL,
-      temperature: 0.2,
-      max_tokens: 4500,
-      messages: [
-        { role: "system", content: "Respondes apenas com JSON válido para atas de condomínio em PT-PT, seguindo o formato legal português." },
-        { role: "user", content: buildPrompt(transcricao, dataISO) },
-      ],
-    }),
+  const fonteBruta = await mapTranscriptionToSyntheses(transcricao, {
+    domainHint: "assembleia de condomínio / ata",
+    mapInstructions: MAP_INSTRUCTIONS,
+  });
+  const fonte = await prepareFonteForReduce(fonteBruta, {
+    domainHint: "assembleia de condomínio / ata",
+    promptOverheadChars: buildPrompt("", dataISO).length,
+    systemPrompt: ATA_FINAL_SYSTEM,
   });
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Falha ao gerar rascunho de ata: ${response.status} ${body}`);
-  }
+  console.log(`[LLM] Reduce (ata-final) com modelo ${GROQ_CHAT_MODEL}...`);
 
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content) throw new Error("LLM devolveu rascunho vazio.");
+  const content = await groqChat({
+    label: "ata-final",
+    preferPrimary: true,
+    temperature: 0.2,
+    maxTokens: 3000,
+    system: ATA_FINAL_SYSTEM,
+    user: buildPrompt(fonte, dataISO),
+  });
 
   try {
     const parsed = extractJson(content);

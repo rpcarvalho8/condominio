@@ -68,11 +68,22 @@ type RecordingContextValue = {
 const RecordingContext = createContext<RecordingContextValue | null>(null);
 
 const PREFERRED_MIME_TYPES = [
+  "audio/webm;codecs=opus",
+  "audio/ogg;codecs=opus",
+  "audio/webm",
   "audio/mp4",
   "audio/aac",
-  "audio/webm;codecs=opus",
-  "audio/webm",
 ];
+
+/** Constraints optimizadas para voz: mono + cancelamento de eco (ficheiro ~70% mais pequeno). */
+const AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  channelCount: { ideal: 1 },
+  echoCancellation: { ideal: true },
+  noiseSuppression: { ideal: true },
+  autoGainControl: { ideal: true },
+};
+
+const AUDIO_BITS_PER_SECOND = 24_000;
 
 function pickMimeType(): string {
   return (
@@ -248,13 +259,26 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
+      // Garantir mono no track se o browser permitir
+      try {
+        const track = stream.getAudioTracks()[0];
+        if (track?.applyConstraints) {
+          await track.applyConstraints({ channelCount: 1 });
+        }
+      } catch {
+        /* alguns browsers ignoram channelCount — não é fatal */
+      }
+
       const mime = pickMimeType();
       mimeRef.current = mime;
       const recorder = new MediaRecorder(stream, {
         ...(mime ? { mimeType: mime } : {}),
-        audioBitsPerSecond: 24000,
+        audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
       });
+      console.log(
+        `[recording] mime=${mime || recorder.mimeType || "default"} bitrate=${AUDIO_BITS_PER_SECOND} mono`,
+      );
 
       const canPause = typeof recorder.pause === "function" && typeof recorder.resume === "function";
       setSupportsPause(canPause);

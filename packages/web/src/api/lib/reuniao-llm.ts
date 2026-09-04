@@ -1,5 +1,10 @@
-import { GROQ_CHAT_MODEL } from "./groq-models";
 import { CONDOMINIO } from "./condominio";
+import { GROQ_CHAT_MODEL } from "./groq-models";
+import {
+  groqChat,
+  mapTranscriptionToSyntheses,
+  prepareFonteForReduce,
+} from "./llm";
 
 /**
  * Meeting type detection and structured summary generation.
@@ -109,7 +114,13 @@ export type ReuniaoLlmResult = {
   resumoTexto: string;
 };
 
-function buildPrompt(transcricao: string) {
+const MAP_INSTRUCTIONS =
+  "Extrai APENAS os pontos críticos, deliberações, votações e valores monetários num máximo de 350 palavras. Omite saudações, introduções e conversas acessórias.";
+
+const REUNIAO_FINAL_SYSTEM =
+  "Respondes apenas com JSON válido para documentar reuniões de condomínio em PT-PT.";
+
+function buildPrompt(fonte: string) {
   return `És um assistente para documentar reuniões de administração de condomínio em português europeu.
 
 CONTEXTO DO CONDOMÍNIO:
@@ -117,7 +128,7 @@ CONTEXTO DO CONDOMÍNIO:
 - Morada: ${CONDOMINIO.morada}
 
 TAREFA:
-Analisa a transcrição abaixo e:
+Analisa a fonte abaixo (transcrição completa OU sínteses Map-Reduce) e:
 1. Identifica os participantes mencionados
 2. Determina o TIPO de reunião:
    - "interna" → reunião apenas entre administradores/gestores do condomínio (discussão interna de gestão, finanças, manutenção, preparação de decisões)
@@ -211,13 +222,14 @@ FORMATO PARA TIPO "fornecedor":
 
 REGRAS:
 - Responde APENAS com JSON válido, sem markdown.
-- Preenche cada secção com base no que foi dito na transcrição.
+- Preenche cada secção com base no que foi dito na fonte.
 - Secções sem informação: usa strings vazias "" ou arrays vazios [].
-- NÃO inventes factos — apenas o que está na transcrição.
+- NÃO inventes factos — apenas o que está na fonte.
 - Arrays de string: se só houver 1 item, usa array com 1 elemento.
+- Consolida informação repetida entre sínteses parciais (não dupliques).
 
-TRANSCRIÇÃO:
-${transcricao}`;
+FONTE (transcrição ou sínteses):
+${fonte}`;
 }
 
 function extractJson(content: string): unknown {
@@ -319,34 +331,28 @@ function contentToResumoTexto(content: ReuniaoStructuredContent): string {
 }
 
 export async function gerarResumoReuniao(transcricao: string): Promise<ReuniaoLlmResult> {
-  const groqApiKey = process.env.GROQ_API_KEY;
-  if (!groqApiKey) throw new Error("GROQ_API_KEY não configurada.");
+  if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY não configurada.");
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${groqApiKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_CHAT_MODEL,
-      temperature: 0.2,
-      max_tokens: 4000,
-      messages: [
-        { role: "system", content: "Respondes apenas com JSON válido para documentar reuniões de condomínio em PT-PT." },
-        { role: "user", content: buildPrompt(transcricao) },
-      ],
-    }),
+  const fonteBruta = await mapTranscriptionToSyntheses(transcricao, {
+    domainHint: "reunião de administração / fornecedor",
+    mapInstructions: MAP_INSTRUCTIONS,
+  });
+  const fonte = await prepareFonteForReduce(fonteBruta, {
+    domainHint: "reunião de administração / fornecedor",
+    promptOverheadChars: buildPrompt("").length,
+    systemPrompt: REUNIAO_FINAL_SYSTEM,
   });
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Falha ao gerar resumo: ${response.status} ${body}`);
-  }
+  console.log(`[LLM] Reduce (reuniao-final) com modelo ${GROQ_CHAT_MODEL}...`);
 
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content) throw new Error("LLM devolveu resumo vazio.");
+  const content = await groqChat({
+    label: "reuniao-final",
+    preferPrimary: true,
+    temperature: 0.2,
+    maxTokens: 3000,
+    system: REUNIAO_FINAL_SYSTEM,
+    user: buildPrompt(fonte),
+  });
 
   try {
     const parsed = extractJson(content) as ReuniaoStructuredContent;
