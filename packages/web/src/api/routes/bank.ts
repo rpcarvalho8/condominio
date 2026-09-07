@@ -583,19 +583,42 @@ export const bankRoutes = new Hono()
         console.warn("[bank/callback] ⚠️ ENABLE_BANKING_ASPSP_NAME não definida — ligou ao Mock ASPSP (sandbox), NÃO ao Santander real!");
       }
 
-      await db.delete(schema.bankConnections); // only one connection at a time
-      await db.insert(schema.bankConnections).values({
-        sessionId,
-        bankName: aspspLigado,
-        accounts: JSON.stringify(accounts),
-        status: "active",
-        connectedAt: new Date(),
-        expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
-      });
+      // Upsert: NÃO fazer DELETE cego — bank_transactions.connection_id referencia
+      // bank_connections.id (FK). Em reconnect (EXPIRED_SESSION) preservamos o id.
+      const existing = await db.select().from(schema.bankConnections).limit(1);
+      const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      const accountsJson = JSON.stringify(accounts);
+
+      if (existing.length > 0) {
+        await db.update(schema.bankConnections)
+          .set({
+            sessionId,
+            bankName: aspspLigado,
+            accounts: accountsJson,
+            status: "active",
+            connectedAt: new Date(),
+            expiresAt,
+          })
+          .where(eq(schema.bankConnections.id, existing[0]!.id));
+        console.log("[bank/callback] Ligação actualizada (reconnect) id=", existing[0]!.id);
+      } else {
+        await db.insert(schema.bankConnections).values({
+          sessionId,
+          bankName: aspspLigado,
+          accounts: accountsJson,
+          status: "active",
+          connectedAt: new Date(),
+          expiresAt,
+        });
+        console.log("[bank/callback] Nova ligação criada");
+      }
 
       return c.redirect("/importar?bank_connected=1");
     } catch (err: any) {
-      return c.redirect(`/importar?bank_error=${encodeURIComponent(err.message)}`);
+      const cause = err?.cause?.message ?? err?.cause ?? "";
+      const msg = [err?.message, cause].filter(Boolean).join(" — ");
+      console.error("[bank/callback] falhou:", msg);
+      return c.redirect(`/importar?bank_error=${encodeURIComponent(msg)}`);
     }
   })
 
@@ -776,7 +799,10 @@ export const bankRoutes = new Hono()
 
   // DELETE /api/bank/disconnect
   .delete("/disconnect", requireAdmin, async (c) => {
-    await db.delete(schema.bankConnections);
+    // Libertamos a FK em bank_transactions antes de apagar a ligação
+    await db.update(schema.bankTransactions)
+      .set({ connectionId: null });
+    await db.delete(schema.bankConnections).where(sql`1 = 1`);
     return c.json({ ok: true });
   })
 
