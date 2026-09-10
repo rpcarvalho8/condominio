@@ -1,14 +1,17 @@
 import { AUDIT_TYPES } from "../../domain/audit";
+import { DOMAIN_EVENT_TYPES } from "../../domain/domain-event";
 import { DomainError } from "../../domain/errors";
 import type { Membership } from "../../domain/membership";
 import { sameFracao } from "../../domain/membership";
 import type { Person } from "../../domain/person";
 import { isKernelRoleCode } from "../../domain/roles";
+import { OUTBOX_JOB_TYPES } from "../../domain/outbox";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createMembershipRepo } from "../../infra/repos/membership-repo";
 import { createPersonRepo } from "../../infra/repos/person-repo";
 import { createRoleRepo } from "../../infra/repos/role-repo";
+import { emitAndEnqueue } from "../events/emit";
 
 export type CreateMembershipInput = {
   tenantId: string;
@@ -157,6 +160,31 @@ export async function createMembership(
     source: input.actor.source ?? "application",
     requestId: input.actor.requestId ?? null,
   });
+
+  await emitAndEnqueue(
+    deps,
+    {
+      tenantId,
+      type: DOMAIN_EVENT_TYPES.membershipCreated,
+      aggregateType: "membership",
+      aggregateId: membership.id,
+      payload: snapshot(membership),
+      correlationId: input.actor.requestId ?? null,
+    },
+    {
+      tenantId,
+      jobType: OUTBOX_JOB_TYPES.notifyMembershipCreated,
+      idempotencyKey: `notify:membership:${membership.id}:created`,
+      payload: {
+        membershipId: membership.id,
+        personId: person.id,
+        email: person.email,
+        roleCode: membership.roleCode,
+      },
+      correlationId: input.actor.requestId ?? null,
+    },
+    { drain: true },
+  );
 
   return { person, membership };
 }

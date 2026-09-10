@@ -1,9 +1,11 @@
 import { AUDIT_TYPES } from "../../domain/audit";
+import { DOMAIN_EVENT_TYPES } from "../../domain/domain-event";
 import { DomainError } from "../../domain/errors";
 import { MEMBERSHIP_STATUS, type Membership } from "../../domain/membership";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createMembershipRepo } from "../../infra/repos/membership-repo";
+import { publishDomainEvent } from "../events/emit";
 
 export type RevokeMembershipInput = {
   membershipId: string;
@@ -76,6 +78,15 @@ export async function revokeMembership(
     reason: input.reason ?? "revoke_membership",
     source: input.actor.source ?? "application",
     requestId: input.actor.requestId ?? null,
+  });
+
+  await publishDomainEvent(deps, {
+    tenantId,
+    type: DOMAIN_EVENT_TYPES.membershipRevoked,
+    aggregateType: "membership",
+    aggregateId: revoked.id,
+    payload: snapshot(revoked),
+    correlationId: input.actor.requestId ?? null,
   });
 
   return revoked;

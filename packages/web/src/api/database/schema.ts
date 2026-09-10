@@ -485,6 +485,137 @@ export const memberships = sqliteTable(
     tenantStatusIdx: index("memberships_tenant_status_idx").on(t.tenantId, t.status),
   }),
 );
+
+/**
+ * DomainEvent bus (ADR-009) — append-only facts inside the tenant DB.
+ */
+export const domainEvents = sqliteTable(
+  "domain_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    type: text("type").notNull(),
+    aggregateType: text("aggregate_type").notNull(),
+    aggregateId: text("aggregate_id").notNull(),
+    payloadJson: text("payload_json"),
+    occurredAt: integer("occurred_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    correlationId: text("correlation_id"),
+  },
+  (t) => ({
+    tenantOccurredIdx: index("domain_events_tenant_occurred_idx").on(t.tenantId, t.occurredAt),
+    aggregateIdx: index("domain_events_aggregate_idx").on(t.aggregateType, t.aggregateId),
+  }),
+);
+
+/**
+ * Outbox / Job Queue (ADR-038) — idempotent async side-effects.
+ */
+export const outboxJobs = sqliteTable(
+  "outbox_jobs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    jobType: text("job_type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(8),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    availableAt: integer("available_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    processedAt: integer("processed_at", { mode: "timestamp" }),
+    correlationId: text("correlation_id"),
+  },
+  (t) => ({
+    idempotencyUq: uniqueIndex("outbox_jobs_idempotency_uq").on(t.tenantId, t.idempotencyKey),
+    pendingIdx: index("outbox_jobs_pending_idx").on(t.status, t.availableAt),
+  }),
+);
+
+/**
+ * Policy Engine skeleton — empty host for F2/F4/F5 policies.
+ */
+export const policies = sqliteTable(
+  "policies",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    code: text("code").notNull(),
+    version: integer("version").notNull().default(1),
+    bodyJson: text("body_json"),
+    effectiveFrom: integer("effective_from", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    supersededBy: text("superseded_by"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantKindCodeVersionUq: uniqueIndex("policies_tenant_kind_code_version_uq").on(
+      t.tenantId,
+      t.kind,
+      t.code,
+      t.version,
+    ),
+  }),
+);
+
+/**
+ * Content-addressed uploads (F0 property 5) — repeated hash does not corrupt state.
+ */
+export const contentUploads = sqliteTable(
+  "content_uploads",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    filename: text("filename").notNull(),
+    byteSize: integer("byte_size").notNull().default(0),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantHashUq: uniqueIndex("content_uploads_tenant_hash_uq").on(t.tenantId, t.contentHash),
+  }),
+);
+
+/**
+ * Delivery attempts for notification jobs — observability without inbox guarantee (ADR-035).
+ */
+export const notificationDeliveries = sqliteTable(
+  "notification_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    channel: text("channel").notNull().default("email"),
+    destination: text("destination").notNull(),
+    template: text("template").notNull(),
+    status: text("status").notNull(),
+    providerMessageId: text("provider_message_id"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    error: text("error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    idempotencyUq: uniqueIndex("notification_deliveries_idempotency_uq").on(
+      t.tenantId,
+      t.idempotencyKey,
+    ),
+  }),
+);
+
 // --- ATAS DE ASSEMBLEIA ---
 export const atas = sqliteTable("atas", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
