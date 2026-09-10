@@ -15,6 +15,7 @@ export const auth = betterAuth({
   },
   user: {
     additionalFields: {
+      // LEGACY Fonte fields. New authorization reads Membership (ADR-006).
       role: {
         type: "string",
         required: false,
