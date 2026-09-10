@@ -293,6 +293,8 @@ DRAFT
 
 - **Sem distribuição além do piloto** enquanto F0–F2 não estiverem estáveis.
 - **Freeze** de features “nice” de **F4–F6** até haver **10 tenants pagos** ou até ao **fim do piloto** — o que ocorrer primeiro. Excepções só com decisão explícita registada (ADR/Audit), não por impulso de venda.
+- **WIP limit em F0:** no máximo **duas** frentes F0 em curso em paralelo (ex.: Domain Kernel + Job/Outbox); o resto fica em fila. Evita o founder abrir multi-tenant + GTM + UI + sync ao mesmo tempo.
+- **Critério comercial do piloto (negócio):** champion nomeado + assembleia ≤60 dias — ver checklist em [07-BUSINESS-PLAN](07-BUSINESS-PLAN.md).
 
 ---
 

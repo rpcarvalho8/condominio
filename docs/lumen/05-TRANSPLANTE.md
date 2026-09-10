@@ -14,6 +14,7 @@ A branch **`dev`** é a **dadora de órgãos**. O LUMEN multi-tenant **transplan
 |---|-------|-------|
 | Prova | Motor de reconciliação e fluxos associados **já validados em produção num condomínio** | Plataforma **multi-tenant em construção** |
 | Código | Origem na `dev` / operação Fonte | Destino: Domain Services + isolamento por tenant |
+| Frase de pitch | "motor de reconciliação já validado em produção num condomínio; a plataforma multi-tenant está em construção." | Usar as duas metades juntas — nunca só a primeira |
 
 Não transplantar "o condomínio Fonte hardcoded" como se fosse o produto.
 

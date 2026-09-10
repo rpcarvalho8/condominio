@@ -205,18 +205,21 @@ Uma administradora profissional tem seguro de RC; um condómino-admin tipicament
 
 ## Checklist do founder (acções de negócio — não código)
 
-- [ ] Fechar linguagem Fonte vs LUMEN em todas as conversas e materiais
+- [ ] **Critério de entrada no piloto:** só aceitar prédios com **champion nomeado** e assembleia já agendada ou agendável em **≤60 dias**
+- [ ] Fechar linguagem Fonte vs LUMEN em todas as conversas e materiais (frase: "motor de reconciliação já validado em produção num condomínio; a plataforma multi-tenant está em construção")
 - [ ] Correr o funil deliberativo com métricas (time to assembly, vote-yes, drop-off) desde o primeiro lead
-- [ ] Cap do lead magnet assisted: máximo 4/mês no piloto
+- [ ] Cap do lead magnet assisted: máximo 4/mês no piloto; resto espera self-serve
 - [ ] Não distribuir além do piloto até F0–F2 estáveis
 - [ ] Congelar priorização comercial de F4–F6 até 10 pagos ou fim do piloto
 - [ ] Vender só Essencial no piloto; não prometer Profissional/Enterprise/IoT
 - [ ] Medir CAC e win-rate nos patamares 5 → 20 → 40; deixar SOM como TBD até lá
+- [ ] Inquérito qualitativo (10–20 condóminos-admin) antes de apresentar SAM a investidores
 - [ ] Não usar CAC institucional nem ARR "50k × 44€" em pitch
 - [ ] Validar com advogado/DPO os Production Gates antes de dinheiro/votos/efeitos legais reais
 - [ ] Explorar seguro RC admin como add-on (sem fechar preço antes de proposta de seguradora)
 - [ ] Definir política comercial de Tenant Exit / portabilidade (o que exportamos, em que formato, em que prazo)
-- [ ] Instrumentar suporte e tempo gasto por tenant no piloto (capacidade real vs desejo de crescimento)
+- [ ] Instrumentar suporte e tempo gasto por tenant no piloto (capacidade real vs desejo de crescimento); office hours semanais, não 24/7
+- [ ] Contratar 0.5 frontend só depois do vertical slice F1 verde
 
 ## Referências
 

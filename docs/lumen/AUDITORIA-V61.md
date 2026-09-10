@@ -106,4 +106,4 @@ Não expandir a arquitectura por entusiasmo. Decisões maduras foram fechadas (A
 
 ### Checklist founder (negócio — não código)
 
-Ver secção correspondente em `07-BUSINESS-PLAN.md`: champion + assembleia ≤60 dias; inquérito SAM; preencher 08 com números reais; advogado/seguro; vender só Essencial no piloto; frase Fonte vs LUMEN; máx. 4 relatórios assistidos/mês.
+Ver secção correspondente em `07-BUSINESS-PLAN.md`: champion + assembleia ≤60 dias; inquérito SAM; preencher 08 com números reais; advogado/seguro; vender só Essencial no piloto; frase Fonte vs LUMEN; máx. 4 relatórios assistidos/mês; WIP/capacidade; 0.5 frontend só após F1 verde.
