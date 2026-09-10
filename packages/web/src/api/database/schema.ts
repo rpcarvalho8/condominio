@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, index, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { user } from "./auth-schema";
 
 export * from "./auth-schema";
@@ -285,31 +285,135 @@ export const rateioPagamentos = sqliteTable("rateio_pagamentos", {
 });
 
 // --- NOTAS DE REUNIÃO (internas, admin only) ---
-export const reunioes = sqliteTable("reunioes", {
-  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
-  titulo: text("titulo").notNull(),
-  data: integer("data", { mode: "timestamp" }).notNull(),
-  /** "interna" (administradores) | "fornecedor" */
-  tipo: text("tipo").notNull().default("interna"),
-  /** Nome do fornecedor (quando tipo === "fornecedor") */
-  fornecedorNome: text("fornecedor_nome"),
-  participantes: text("participantes"),
-  transcricao: text("transcricao"),
-  /** JSON estruturado da reunião conforme layout do tipo */
-  resumoJson: text("resumo_json"),
-  resumo: text("resumo"),
-  status: text("status").notNull().default("rascunho"), // "rascunho" | "processando_audio" | "erro_audio" | "aprovada"
-  pdfUrl: text("pdf_url"),
-  approvedAt: integer("approved_at", { mode: "timestamp" }),
-  audioPath: text("audio_path"),
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
+/**
+ * Máquina de estados (persistida) — alinhada ao ciclo de gravação contínua:
+ *
+ *   em_curso ──(Terminar reunião)──► processando_audio ──► rascunho
+ *                                         │
+ *                                         └──► erro_audio ──(reprocessar)──► processando_audio
+ *   rascunho ──(aprovar)──► aprovada
+ *
+ * `terminada` NÃO é usada no fluxo actual: a intenção humana de terminar
+ * passa directamente a `processando_audio` (STT/LLM). Reservado / legado.
+ * Falha técnica NUNCA sai de `em_curso`.
+ *
+ * tenantId: carimbo do tenant da BD (ADR-016 = 1 BD/tenant; defesa em profundidade).
+ */
+export const reunioes = sqliteTable(
+  "reunioes",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    /** Ownership — preenchido no servidor a partir da sessão/config; nunca do cliente. */
+    tenantId: text("tenant_id").notNull(),
+    titulo: text("titulo").notNull(),
+    data: integer("data", { mode: "timestamp" }).notNull(),
+    /** "interna" (administradores) | "fornecedor" */
+    tipo: text("tipo").notNull().default("interna"),
+    /** Nome do fornecedor (quando tipo === "fornecedor") */
+    fornecedorNome: text("fornecedor_nome"),
+    participantes: text("participantes"),
+    transcricao: text("transcricao"),
+    /** JSON estruturado da reunião conforme layout do tipo */
+    resumoJson: text("resumo_json"),
+    resumo: text("resumo"),
+    /**
+     * "em_curso" | "rascunho" | "processando_audio" | "erro_audio" | "aprovada"
+     * (`terminada` legado — não usado no fluxo actual)
+     */
+    status: text("status").notNull().default("rascunho"),
+    pdfUrl: text("pdf_url"),
+    approvedAt: integer("approved_at", { mode: "timestamp" }),
+    /** Legado: primeiro/único ficheiro. Preferir recording_segments. */
+    audioPath: text("audio_path"),
+    /**
+     * Contador de geração de processamento — incrementado em cada end-meeting
+     * que inicia STT. Permite idempotência: retries com a mesma geração não
+     * duplicam Acta/efeitos se o resultado já existir.
+     */
+    processingGeneration: integer("processing_generation").notNull().default(0),
+    processingStartedAt: integer("processing_started_at", { mode: "timestamp" }),
+    processingCompletedAt: integer("processing_completed_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantIdx: index("reunioes_tenant_idx").on(t.tenantId),
+    tenantStatusIdx: index("reunioes_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
 
+/**
+ * Segmentos de áudio de uma única Reunião (MediaRecorder pode reiniciar sem nova reunião).
+ *
+ * Semântica de timestamps (MVP actual):
+ * - startedAt / endedAt = momento em que o servidor persiste o segmento
+ *   (aproximação de receção), NÃO o relógio exacto do MediaRecorder.
+ * - clientStartedAt / clientEndedAt = opcionais, enviados pelo cliente quando disponíveis.
+ *
+ * status: o API actual só persiste segmentos `closed` (blob/upload concluído).
+ * `open` existe no domínio in-memory / futuro upload progressivo servidor;
+ * não fingir que o servidor mantém segmentos abertos durante a gravação.
+ */
+export const recordingSegments = sqliteTable(
+  "recording_segments",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    reuniaoId: text("reuniao_id")
+      .notNull()
+      .references(() => reunioes.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    /** Receção no servidor (não clock exacto do browser). */
+    startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
+    endedAt: integer("ended_at", { mode: "timestamp" }),
+    /** Opcional: clock do cliente (ms epoch) se enviado. */
+    clientStartedAt: integer("client_started_at", { mode: "timestamp" }),
+    clientEndedAt: integer("client_ended_at", { mode: "timestamp" }),
+    /** user_stop_segment | technical_interrupt | user_end_meeting */
+    reasonEnded: text("reason_ended"),
+    storagePath: text("storage_path"),
+    byteSize: integer("byte_size").notNull().default(0),
+    /** closed (persistido) | open (reservado — não usado no insert actual) */
+    status: text("status").notNull().default("closed"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    reuniaoOrdinalUq: uniqueIndex("recording_segments_reuniao_ordinal_uq").on(
+      t.reuniaoId,
+      t.ordinal,
+    ),
+    reuniaoIdx: index("recording_segments_reuniao_idx").on(t.reuniaoId),
+  }),
+);
+
+/**
+ * AuditEvent genérico ( Domínio Kernel / ADR-009 ).
+ * Usado por reuniões/gravação; extensível a outros agregados.
+ */
+export const auditEvents = sqliteTable(
+  "audit_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    type: text("type").notNull(),
+    entityType: text("entity_type").notNull(),
+    entityId: text("entity_id").notNull(),
+    actorUserId: text("actor_user_id"),
+    payloadJson: text("payload_json"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantCreatedIdx: index("audit_events_tenant_created_idx").on(t.tenantId, t.createdAt),
+    entityIdx: index("audit_events_entity_idx").on(t.entityType, t.entityId),
+  }),
+);
 // --- ATAS DE ASSEMBLEIA ---
 export const atas = sqliteTable("atas", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),

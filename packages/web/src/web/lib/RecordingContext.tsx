@@ -29,7 +29,12 @@ export type RecordingDraft = {
   participantes?: string;
 };
 
-export type RecordingStatus = "idle" | "recording" | "paused";
+export type RecordingStatus = "idle" | "recording" | "paused" | "interrupted";
+
+export type SegmentStopReason =
+  | "user_stop_segment"
+  | "technical_interrupt"
+  | "user_end_meeting";
 
 export type RecoverableRecording = {
   session: PersistedSession;
@@ -41,25 +46,31 @@ type RecordingContextValue = {
   target: RecordingTarget | null;
   draft: RecordingDraft | null;
   sessionTarget: RecordingTarget | null;
+  /** Reunião aberta (gravação contínua). Null em atas / legado. */
+  reuniaoId: string | null;
   elapsedMs: number;
   error: string | null;
   completedFile: File | null;
   completedTarget: RecordingTarget | null;
+  lastStopReason: SegmentStopReason | null;
   supportsPause: boolean;
-  /** Bytes já persistidos no IndexedDB (gravação activa) */
   persistedBytes: number;
-  /** Sessões recuperáveis após crash / fecho de aba */
   recoverable: RecoverableRecording[];
-  start: (target: RecordingTarget, draft: RecordingDraft) => Promise<void>;
+  start: (
+    target: RecordingTarget,
+    draft: RecordingDraft,
+    opts?: { reuniaoId?: string | null },
+  ) => Promise<void>;
   pause: () => void;
   resume: () => void;
-  stop: () => void;
+  /** Para o MediaRecorder actual (segmento). Por defeito user_stop_segment. */
+  stop: (reason?: SegmentStopReason) => void;
   updateDraft: (patch: Partial<RecordingDraft>) => void;
+  setReuniaoId: (id: string | null) => void;
   consumeCompletedFile: (target: RecordingTarget) => File | null;
   clearSession: () => void;
   clearCompleted: () => void;
   clearError: () => void;
-  /** Restaura gravação guardada localmente para o formulário */
   restoreRecoverable: (sessionId: string) => Promise<void>;
   discardRecoverable: (sessionId: string) => Promise<void>;
   refreshRecoverable: () => Promise<void>;
@@ -115,6 +126,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const [supportsPause, setSupportsPause] = useState(true);
   const [persistedBytes, setPersistedBytes] = useState(0);
   const [recoverable, setRecoverable] = useState<RecoverableRecording[]>([]);
+  const [reuniaoId, setReuniaoIdState] = useState<string | null>(null);
+  const [lastStopReason, setLastStopReason] = useState<SegmentStopReason | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -123,6 +136,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const targetRef = useRef<RecordingTarget | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const draftRef = useRef<RecordingDraft | null>(null);
+  const reuniaoIdRef = useRef<string | null>(null);
+  const stopReasonRef = useRef<SegmentStopReason>("user_stop_segment");
   const flushQueueRef = useRef<Promise<void>>(Promise.resolve());
   const tickBaseRef = useRef(0);
   const elapsedAtPauseRef = useRef(0);
@@ -136,6 +151,15 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    reuniaoIdRef.current = reuniaoId;
+  }, [reuniaoId]);
+
+  const setReuniaoId = useCallback((id: string | null) => {
+    reuniaoIdRef.current = id;
+    setReuniaoIdState(id);
+  }, []);
 
   const clearTick = useCallback(() => {
     if (intervalRef.current) {
@@ -247,7 +271,11 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     mediaRecorderRef.current = null;
   }, [clearTick]);
 
-  const start = useCallback(async (nextTarget: RecordingTarget, nextDraft: RecordingDraft) => {
+  const start = useCallback(async (
+    nextTarget: RecordingTarget,
+    nextDraft: RecordingDraft,
+    opts?: { reuniaoId?: string | null },
+  ) => {
     setError(null);
     if (status === "recording" || status === "paused") {
       setError("Já existe uma gravação em curso. Termine-a antes de iniciar outra.");
@@ -257,6 +285,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       setError("Gravação de áudio não suportada neste browser.");
       return;
     }
+
+    const boundReuniaoId = opts?.reuniaoId !== undefined ? opts.reuniaoId : reuniaoIdRef.current;
+    if (boundReuniaoId) setReuniaoId(boundReuniaoId);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
@@ -277,7 +308,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
       });
       console.log(
-        `[recording] mime=${mime || recorder.mimeType || "default"} bitrate=${AUDIO_BITS_PER_SECOND} mono`,
+        `[recording] mime=${mime || recorder.mimeType || "default"} bitrate=${AUDIO_BITS_PER_SECOND} mono reuniaoId=${boundReuniaoId ?? "-"}`,
       );
 
       const canPause = typeof recorder.pause === "function" && typeof recorder.resume === "function";
@@ -285,9 +316,11 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
       const sessionId = newRecordingSessionId();
       sessionIdRef.current = sessionId;
+      stopReasonRef.current = "user_stop_segment";
       await createRecordingSession({
         id: sessionId,
         target: nextTarget,
+        reuniaoId: boundReuniaoId ?? null,
         draft: nextDraft,
         mimeType: mime || "audio/webm",
         status: "recording",
@@ -315,6 +348,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           const finalMime = mimeRef.current || recorder.mimeType || "audio/webm";
           const endedTarget = targetRef.current ?? "ata";
           const prefix = formatPrefix(endedTarget);
+          const reason = stopReasonRef.current;
 
           let file: File | null = null;
           if (sid) {
@@ -323,6 +357,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
               mimeType: finalMime,
               draft: draftRef.current ?? { titulo: "", data: "" },
               elapsedMs: elapsedAtPauseRef.current,
+              reuniaoId: reuniaoIdRef.current,
             });
             const session = await getRecordingSession(sid);
             if (session) file = await assembleRecordingFile(session);
@@ -337,13 +372,14 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           setCompletedFile(file);
           setCompletedTarget(endedTarget);
           setSessionTarget(endedTarget);
+          setLastStopReason(reason);
           cleanupStream();
           clearTick();
-          setStatus("idle");
+          // Interrupção técnica: reunião continua aberta — UI deve oferecer «Retomar gravação»
+          setStatus(reason === "technical_interrupt" ? "interrupted" : "idle");
           setTarget(null);
           elapsedAtPauseRef.current = 0;
           setElapsedMs(0);
-          // Mantém sessionId até clearSession (upload OK) para poder apagar IDB
         };
 
         void finalize().catch((e) => {
@@ -351,22 +387,25 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           setError("Gravação terminou mas falhou a montagem do ficheiro. Tente recuperar na barra inferior.");
           cleanupStream();
           clearTick();
-          setStatus("idle");
+          setStatus("interrupted");
           setTarget(null);
+          setLastStopReason("technical_interrupt");
           void refreshRecoverable();
         });
       };
 
       recorder.onerror = () => {
-        setError("Erro durante a gravação — o áudio já gravado está guardado neste dispositivo.");
+        setError("A gravação foi interrompida. A reunião continua aberta. Retomar gravação.");
+        stopReasonRef.current = "technical_interrupt";
         flushPendingData();
         try {
           if (recorder.state !== "inactive") recorder.stop();
         } catch {
           cleanupStream();
           clearTick();
-          setStatus("idle");
+          setStatus("interrupted");
           setTarget(null);
+          setLastStopReason("technical_interrupt");
           void refreshRecoverable();
         }
       };
@@ -377,6 +416,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       setDraft(nextDraft);
       setCompletedFile(null);
       setCompletedTarget(null);
+      setLastStopReason(null);
       setStatus("recording");
       elapsedAtPauseRef.current = 0;
       setElapsedMs(0);
@@ -384,7 +424,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     } catch (e: any) {
       cleanupStream();
       sessionIdRef.current = null;
-      setStatus("idle");
+      setStatus(reuniaoIdRef.current ? "interrupted" : "idle");
       setTarget(null);
       const msg = String(e?.message ?? "");
       if (/Permission|NotAllowed/i.test(msg)) {
@@ -393,7 +433,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         setError("Não foi possível iniciar a gravação. Verifique o microfone e tente outra vez.");
       }
     }
-  }, [status, cleanupStream, clearTick, startTick, enqueueFlush, flushPendingData, refreshRecoverable]);
+  }, [status, cleanupStream, clearTick, startTick, enqueueFlush, flushPendingData, refreshRecoverable, setReuniaoId]);
 
   const pause = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -436,9 +476,10 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     }
   }, [status, startTick]);
 
-  const stop = useCallback(() => {
+  const stop = useCallback((reason: SegmentStopReason = "user_stop_segment") => {
     const recorder = mediaRecorderRef.current;
     if (!recorder) return;
+    stopReasonRef.current = reason;
     try {
       if (recorder.state !== "inactive") {
         if (typeof recorder.requestData === "function" && recorder.state === "recording") {
@@ -450,8 +491,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     } catch {
       setError("Erro ao terminar — tente «Recuperar gravação» na barra inferior.");
       cleanupStream();
-      setStatus("idle");
+      setStatus(reuniaoIdRef.current ? "interrupted" : "idle");
       setTarget(null);
+      setLastStopReason("technical_interrupt");
       void refreshRecoverable();
     }
   }, [clearTick, cleanupStream, refreshRecoverable]);
@@ -505,8 +547,11 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     setSessionTarget(entry.session.target);
     setDraft(entry.session.draft);
     setPersistedBytes(entry.session.byteSize);
+    if (entry.session.reuniaoId) setReuniaoId(entry.session.reuniaoId);
+    setLastStopReason("technical_interrupt");
+    setStatus(entry.session.reuniaoId ? "interrupted" : "idle");
     setRecoverable((prev) => prev.filter((r) => r.session.id !== sessionId));
-  }, [recoverable]);
+  }, [recoverable, setReuniaoId]);
 
   const discardRecoverable = useCallback(async (sessionId: string) => {
     await deleteRecordingSession(sessionId);
@@ -519,10 +564,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     target,
     draft,
     sessionTarget,
+    reuniaoId,
     elapsedMs,
     error,
     completedFile,
     completedTarget,
+    lastStopReason,
     supportsPause,
     persistedBytes,
     recoverable,
@@ -531,6 +578,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     resume,
     stop,
     updateDraft,
+    setReuniaoId,
     consumeCompletedFile,
     clearSession,
     clearCompleted,
@@ -539,10 +587,10 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     discardRecoverable,
     refreshRecoverable,
   }), [
-    status, target, draft, sessionTarget, elapsedMs, error, completedFile, completedTarget, supportsPause,
-    persistedBytes, recoverable,
-    start, pause, resume, stop, updateDraft, consumeCompletedFile, clearSession, clearCompleted, clearError,
-    restoreRecoverable, discardRecoverable, refreshRecoverable,
+    status, target, draft, sessionTarget, reuniaoId, elapsedMs, error, completedFile, completedTarget,
+    lastStopReason, supportsPause, persistedBytes, recoverable,
+    start, pause, resume, stop, updateDraft, setReuniaoId, consumeCompletedFile, clearSession,
+    clearCompleted, clearError, restoreRecoverable, discardRecoverable, refreshRecoverable,
   ]);
 
   return (

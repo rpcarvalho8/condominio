@@ -315,9 +315,17 @@ export default function ReunioesPage() {
   const [editHydrated, setEditHydrated] = useState(false);
 
   const recording = useRecording();
-  const isThisRecording = recording.target === "reuniao" && recording.status !== "idle";
-  const isAnyRecording = recording.status !== "idle";
+  const isThisRecording =
+    recording.target === "reuniao" &&
+    (recording.status === "recording" || recording.status === "paused");
+  const isInterruptedReuniao =
+    recording.sessionTarget === "reuniao" &&
+    (recording.status === "interrupted" || Boolean(recording.reuniaoId && recording.status === "idle" && recording.completedFile));
+  const isAnyRecording = recording.status === "recording" || recording.status === "paused";
   const hasPendingSession = recording.sessionTarget === "reuniao";
+  const [activeReuniaoId, setActiveReuniaoId] = useState<string | null>(null);
+  const [segmentCountUi, setSegmentCountUi] = useState(0);
+  const [endingMeeting, setEndingMeeting] = useState(false);
 
   const createDraft = useDraftAutosave({
     scope: "reuniao:create",
@@ -335,7 +343,7 @@ export default function ReunioesPage() {
     queryFn: () => apiFetch("/api/reunioes"),
     refetchInterval: (query) => {
       const rows = query.state.data as Reuniao[] | undefined;
-      const busy = rows?.some((r) => r.status === "processando_audio");
+      const busy = rows?.some((r) => r.status === "processando_audio" || r.status === "em_curso");
       return busy ? 2_500 : false;
     },
   });
@@ -518,12 +526,101 @@ export default function ReunioesPage() {
     onError: (e: any) => { setError(e.message); setSuccess(""); },
   });
 
+  async function ensureOpenReuniao(): Promise<string> {
+    if (activeReuniaoId || recording.reuniaoId) {
+      return (activeReuniaoId || recording.reuniaoId)!;
+    }
+    const created = await apiFetch("/api/reunioes/open", {
+      method: "POST",
+      body: JSON.stringify({ titulo, data: dataReuniao, participantes }),
+    }) as Reuniao;
+    setActiveReuniaoId(created.id);
+    recording.setReuniaoId(created.id);
+    void queryClient.invalidateQueries({ queryKey: ["reunioes"] });
+    return created.id;
+  }
+
+  async function uploadSegmentFile(
+    file: File,
+    reuniaoId: string,
+    reasonEnded: string,
+  ): Promise<void> {
+    setUploadProgress("A enviar segmento de áudio…");
+    const uploaded = await uploadFileResumable({
+      file,
+      target: "reuniao",
+      filename: file.name,
+      onProgress: (p) => {
+        const pct = p.totalBytes ? Math.round((100 * p.sentBytes) / p.totalBytes) : 0;
+        setUploadProgress(`A enviar segmento… ${pct}%`);
+      },
+    });
+    const form = new FormData();
+    form.append("uploadId", uploaded.uploadId);
+    form.append("audioPath", uploaded.audioPath);
+    form.append("reasonEnded", reasonEnded);
+    await apiFetch(`/api/reunioes/${reuniaoId}/segments`, { method: "POST", body: form });
+    setSegmentCountUi((n) => n + 1);
+    setUploadProgress(null);
+  }
+
   async function startRecording() {
     setError("");
     try {
-      await recording.start("reuniao", { titulo, data: dataReuniao, participantes });
+      const id = await ensureOpenReuniao();
+      await recording.start("reuniao", { titulo, data: dataReuniao, participantes }, { reuniaoId: id });
+      setSuccess("Reunião aberta. A gravação continua na mesma reunião mesmo se o browser interromper o segmento.");
     } catch (e: any) {
       setError(e?.message ?? "Erro ao iniciar gravação.");
+    }
+  }
+
+  async function resumeRecordingSameMeeting() {
+    setError("");
+    try {
+      const id = await ensureOpenReuniao();
+      await recording.start("reuniao", { titulo, data: dataReuniao, participantes }, { reuniaoId: id });
+      setSuccess("A gravação foi retomada na mesma reunião.");
+    } catch (e: any) {
+      setError(e?.message ?? "Erro ao retomar gravação.");
+    }
+  }
+
+  async function endMeetingExplicit() {
+    setEndingMeeting(true);
+    setError("");
+    try {
+      const id = activeReuniaoId || recording.reuniaoId;
+      if (!id) throw new Error("Não há reunião aberta.");
+
+      if (recording.status === "recording" || recording.status === "paused") {
+        recording.stop("user_end_meeting");
+        // espera o ficheiro ficar disponível
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      const file = recording.completedFile ?? audioFile;
+      if (file && recording.completedTarget === "reuniao") {
+        const consumed = recording.consumeCompletedFile("reuniao") ?? file;
+        await uploadSegmentFile(consumed, id, "user_end_meeting");
+        setAudioFile(null);
+      }
+
+      setUploadProgress("A terminar reunião e a processar áudio…");
+      const updated = await apiFetch(`/api/reunioes/${id}/end-meeting`, { method: "POST" }, 300_000) as Reuniao;
+      setSuccess("Reunião terminada. Transcrição gerada a partir de todos os segmentos.");
+      setActiveReuniaoId(null);
+      setSegmentCountUi(0);
+      recording.setReuniaoId(null);
+      recording.clearSession();
+      setSelectedId(updated.id);
+      void queryClient.invalidateQueries({ queryKey: ["reunioes"] });
+      setUploadProgress(null);
+    } catch (e: any) {
+      setError(e?.message ?? "Erro ao terminar reunião.");
+      setUploadProgress(null);
+    } finally {
+      setEndingMeeting(false);
     }
   }
 
@@ -535,16 +632,39 @@ export default function ReunioesPage() {
     if (recording.draft.participantes) setParticipantes(recording.draft.participantes);
   }, [hasPendingSession, recording.draft?.titulo, recording.draft?.data, recording.draft?.participantes]);
 
+  // Segmento concluído: upload para a mesma reunião (não criar reunião nova)
   useEffect(() => {
     if (recording.completedTarget !== "reuniao" || !recording.completedFile) return;
     const file = recording.consumeCompletedFile("reuniao");
-    if (file) {
-      setAudioFile(file);
-      if (recording.draft?.titulo) setTitulo(recording.draft.titulo);
-      if (recording.draft?.data) setDataReuniao(recording.draft.data);
-      if (recording.draft?.participantes) setParticipantes(recording.draft.participantes ?? "");
-      setSuccess("Gravação terminada. Confirme os dados e crie a reunião.");
+    if (!file) return;
+
+    const reason = recording.lastStopReason ?? "user_stop_segment";
+    const rid = recording.reuniaoId || activeReuniaoId;
+
+    if (rid) {
+      void (async () => {
+        try {
+          await uploadSegmentFile(file, rid, reason);
+          if (reason === "technical_interrupt") {
+            setSuccess("A gravação foi interrompida. A reunião continua aberta. Retomar gravação.");
+          } else if (reason !== "user_end_meeting") {
+            setSuccess(`Segmento ${segmentCountUi + 1} guardado. Pode retomar ou terminar a reunião.`);
+          }
+          setAudioFile(null);
+        } catch (e: any) {
+          setAudioFile(file);
+          setError(e?.message ?? "Falha ao enviar segmento.");
+        }
+      })();
+      return;
     }
+
+    // Legado / ata-like: sem reuniaoId → comportamento antigo (ficheiro no formulário)
+    setAudioFile(file);
+    if (recording.draft?.titulo) setTitulo(recording.draft.titulo);
+    if (recording.draft?.data) setDataReuniao(recording.draft.data);
+    if (recording.draft?.participantes) setParticipantes(recording.draft.participantes ?? "");
+    setSuccess("Gravação terminada. Confirme os dados e crie a reunião.");
   }, [recording.completedTarget, recording.completedFile]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -671,30 +791,64 @@ export default function ReunioesPage() {
             </div>
             <div className="md:col-span-2 space-y-3">
               <div className="flex items-center gap-2 flex-wrap">
-                {!isThisRecording ? (
+                {!isThisRecording && !isInterruptedReuniao ? (
                   <Button
                     onClick={startRecording}
                     disabled={!titulo || !dataReuniao || !navigator.mediaDevices || isAnyRecording}
                   >
-                    Gravar áudio
+                    Iniciar reunião / gravação
                   </Button>
-                ) : (
+                ) : null}
+                {isThisRecording ? (
                   <>
                     <span className="text-xs font-medium" style={{ color: "var(--red)" }}>
                       {recording.status === "paused" ? "Em pausa" : "A gravar"} · {formatElapsed(recording.elapsedMs)}
+                      {activeReuniaoId || recording.reuniaoId
+                        ? ` · reunião ${(activeReuniaoId || recording.reuniaoId)!.slice(0, 8)}…`
+                        : ""}
+                      {segmentCountUi > 0 ? ` · ${segmentCountUi} segmento(s) guardado(s)` : ""}
                     </span>
-                    <Button variant="secondary" size="sm" onClick={() => recording.stop()}>
-                      Terminar gravação
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => recording.stop("user_stop_segment")}
+                    >
+                      Pausar segmento
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => void endMeetingExplicit()}
+                      loading={endingMeeting}
+                    >
+                      Terminar reunião
                     </Button>
                   </>
-                )}
+                ) : null}
+                {isInterruptedReuniao && !isThisRecording ? (
+                  <>
+                    <span className="text-xs font-medium" style={{ color: "var(--amber)" }}>
+                      A gravação foi interrompida. A reunião continua aberta.
+                      {segmentCountUi > 0 ? ` · ${segmentCountUi} segmento(s)` : ""}
+                    </span>
+                    <Button onClick={() => void resumeRecordingSameMeeting()}>
+                      Retomar gravação
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void endMeetingExplicit()}
+                      loading={endingMeeting}
+                    >
+                      Terminar reunião
+                    </Button>
+                  </>
+                ) : null}
                 {audioFile ? (
                   <span className="text-xs text-gray-500">{audioFile.name}</span>
                 ) : (
                   <span className="text-xs text-gray-500">
                     {isThisRecording
                       ? "Pode navegar na app — a gravação continua (barra inferior)."
-                      : "Sem áudio (opcional)"}
+                      : "Sem áudio (opcional para criação manual)"}
                   </span>
                 )}
               </div>
@@ -707,16 +861,17 @@ export default function ReunioesPage() {
                 />
               </div>
               <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                O sistema detecta automaticamente se é uma reunião interna (administradores) ou com fornecedor, e aplica o layout adequado.
+                Uma interrupção técnica (browser, rede, limite de tempo) cria um novo segmento na mesma reunião —
+                nunca uma reunião nova. Só «Terminar reunião» fecha o ciclo.
               </p>
             </div>
             <div className="md:col-span-2">
               <Button
                 onClick={() => createMutation.mutate()}
                 loading={createMutation.isPending}
-                disabled={!canCreate}
+                disabled={!canCreate || Boolean(activeReuniaoId || recording.reuniaoId)}
               >
-                Criar reunião
+                Criar reunião (legado / sem gravação contínua)
               </Button>
               {!canCreate && (
                 <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
