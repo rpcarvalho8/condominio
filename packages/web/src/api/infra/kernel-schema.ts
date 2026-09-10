@@ -66,18 +66,18 @@ const DDL = [
     request_id TEXT,
     created_at INTEGER NOT NULL
   )`,
-  `CREATE INDEX IF NOT EXISTS audit_events_tenant_created_idx
-    ON audit_events (tenant_id, created_at)`,
-  `CREATE INDEX IF NOT EXISTS audit_events_entity_idx
-    ON audit_events (entity_type, entity_id)`,
-  `CREATE INDEX IF NOT EXISTS audit_events_request_id_idx
-    ON audit_events (request_id)`,
   `ALTER TABLE audit_events ADD COLUMN actor_person_id TEXT`,
   `ALTER TABLE audit_events ADD COLUMN before_json TEXT`,
   `ALTER TABLE audit_events ADD COLUMN after_json TEXT`,
   `ALTER TABLE audit_events ADD COLUMN reason TEXT`,
   `ALTER TABLE audit_events ADD COLUMN source TEXT`,
   `ALTER TABLE audit_events ADD COLUMN request_id TEXT`,
+  `CREATE INDEX IF NOT EXISTS audit_events_tenant_created_idx
+    ON audit_events (tenant_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS audit_events_entity_idx
+    ON audit_events (entity_type, entity_id)`,
+  `CREATE INDEX IF NOT EXISTS audit_events_request_id_idx
+    ON audit_events (request_id)`,
 ];
 
 async function execSafe(client: SqlExecutor, stmt: string): Promise<void> {

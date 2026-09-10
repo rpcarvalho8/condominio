@@ -25,7 +25,9 @@ import { reunioesRoutes, reunioesPdfRoutes } from "./routes/reunioes";
 import { ticketsRoutes } from "./routes/tickets";
 import { emailInboxRoutes, scheduleEmailInboxSync } from "./routes/email-inbox";
 import { uploadsRoutes } from "./routes/uploads";
-import { kernelRoutes } from "./routes/kernel";
+import { createKernelRoutes } from "./routes/kernel";
+import { db } from "./database";
+import { getKernelTenantId } from "./lib/tenant";
 import { rehydrateDividasFromDB } from "./lib/identity-matrix";
 
 // ─── Sync imediato no arranque do servidor ────────────────────────────────────
@@ -171,6 +173,11 @@ scheduleAvisosCron(); // agora é no-op, mantém o export activo
 
 // ─── Recibos cron (mantido para compatibilidade — funcionalidade migrada para transicao-cron) ──
 scheduleRecibosCron();
+
+const kernelRoutes = createKernelRoutes({
+  db,
+  getTenantId: getKernelTenantId,
+});
 
 const app = new Hono()
   // CORS — must be before everything

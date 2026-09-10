@@ -2,8 +2,6 @@ import { Hono } from "hono";
 import { createMembership } from "../application/identity/create-membership";
 import { revokeMembership } from "../application/identity/revoke-membership";
 import { DomainError } from "../domain/errors";
-import { db } from "../database";
-import { getKernelTenantId } from "../lib/tenant";
 import type { KernelDeps } from "../infra/kernel-deps";
 import {
   createRequireActiveMembership,
@@ -100,8 +98,3 @@ export function createKernelRoutes(deps: KernelDeps) {
       }
     });
 }
-
-export const kernelRoutes = createKernelRoutes({
-  db: db as KernelDeps["db"],
-  getTenantId: getKernelTenantId,
-});
