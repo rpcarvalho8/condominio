@@ -218,7 +218,7 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 | Approval | Snapshot da versão aprovada; alteração material invalida (ADR-027) |
 | Contract (leve) | Renovação + aviso prévio; sem procurement autónomo (Tier 3) |
 | Centro de Operações | Decisões/exceções, não navegação por objetos |
-| Reuniões Admin | Whisper/STT da `dev` possível; resumo informativo; áudio eliminado após resumo (RGPD). **Continuidade de gravação** (`RecordingSegment` / mesma sessão face a interrupção técnica) onde existir MediaRecorder — mesmo princípio que F5 (ADR-042) |
+| Reuniões Admin | Whisper/STT da `dev` possível; resumo informativo; áudio eliminado após resumo (RGPD). **Continuidade de gravação** (`RecordingSegment` / mesma sessão face a interrupção técnica) onde existir MediaRecorder — mesmo princípio que F5 (ADR-042). MVP: IDB+upload resumível no cliente; STT ainda no pedido HTTP até job F0 |
 
 **Critério:** ticket com prioridade; Decision Brief; Approval versionada; lembrete de contrato; reunião resumida com áudio purgado.
 

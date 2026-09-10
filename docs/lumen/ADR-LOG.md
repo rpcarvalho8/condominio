@@ -650,9 +650,20 @@ O piloto **não** autoriza a omitir invariantes de domínio (dinheiro, Ledger, A
 
 **Justificação:** no código actual da Fonte, cada ciclo MediaRecorder + “Criar reunião” pode gerar um INSERT novo — isso parte a assembleia em várias “reuniões” e várias actas potenciais. O domínio LUMEN trata a reunião como sessão contínua com segmentos.
 
-**Em aberto:** nomes exactos no schema da Fonte (`rascunho` / `processando_audio`, etc.) alinham-se na implementação sem inventar máquina paralela desnecessária; retenção multi-segmento a confirmar com DPO (mesmo critério pós-`APPROVED`).
+**Emenda de implementação (Fonte / branch `cursor/reuniao-recording-segments-1c40`):**
 
-**Impacto:** 02-DOMINIO, 06-FATIAS F4/F5, diagramas, implementação futura de recording.
+- Ciclo persistido: `em_curso` → `processando_audio` → `rascunho` → `aprovada` (`terminada` não é usada no fluxo actual).
+- `reunioes.tenant_id` carimbado no servidor (defesa em profundidade; ADR-016 continua a ser 1 BD/tenant).
+- `UNIQUE (reuniao_id, ordinal)` + alocação `MAX+1` com retry.
+- Timestamps do segmento no servidor = receção; `clientStartedAt`/`clientEndedAt` opcionais.
+- Segmentos persistidos estão `closed`; `open` é domínio in-memory / futuro.
+- Resiliência de áudio (MVP): IndexedDB + upload resumível no cliente. **Não** há persistência progressiva de áudio no servidor durante a gravação — browser crash antes do upload pode perder o segmento actual; **não** cria nova Reunião.
+- `end-meeting` idempotente; STT/LLM ainda no pedido HTTP na Fonte (Vite); F0 (ADR-038) migra para job — sem segunda infra de jobs.
+- `AuditEvent` tipado para abertura, segmentos, interrupção, processamento e fim.
+
+**Em aberto:** retenção multi-segmento a confirmar com DPO (mesmo critério pós-`APPROVED`); persistência progressiva no servidor se o piloto exigir zero perda de áudio; migração STT/LLM para job F0.
+
+**Impacto:** 02-DOMINIO, 06-FATIAS F4/F5, diagramas, implementação `packages/web` (RecordingSegment).
 
 ---
 

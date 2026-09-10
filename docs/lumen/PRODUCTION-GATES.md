@@ -81,6 +81,8 @@ FAIL se LLM ou Risk Engine aparecerem como decisor de deliberação ou de valida
 
 - [ ] Legal PASS para o âmbito (Essencial vs Profissional com atas/votos)
 - [ ] Privacy/DPO PASS (áudio, docs, export/erasure)
+- [ ] RecordingSegment: retenção multi-segmento confirmada com DPO; se piloto exigir zero perda de áudio, persistência progressiva no servidor (hoje só IDB cliente)
+- [ ] STT/LLM de reunião via job idempotente (ADR-038), não só pedido HTTP longo
 - [ ] Accounting PASS (cash, recibos, períodos)
 - [ ] Banking/Security PASS (BankConnection, auth, restore)
 - [ ] Liability PASS (termos, autonomia, seguro em curso de validação se prometido)

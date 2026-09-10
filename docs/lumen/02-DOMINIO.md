@@ -202,7 +202,9 @@ Sub-estados de gravação (derivados dos segmentos, não uma segunda máquina pa
 ### `RecordingSegment`
 
 - `reuniao_id`, `ordinal` (inteiro crescente), `started_at`, `ended_at`, `reason_ended` (`user_stop_segment` | `technical_interrupt` | `user_end_meeting`), `storage_path`, `byte_size`, `status`
-- Persistência **progressiva** (chunks / upload resumível) — um ciclo MediaRecorder ≠ uma nova `Reuniao`
+- Persistência **progressiva no cliente** (IndexedDB chunks ~1s + upload resumível do ficheiro montado). No servidor, cada `POST /segments` persiste um segmento **já fechado**. Um ciclo MediaRecorder ≠ uma nova `Reuniao`.
+- **Limitação MVP:** crash do browser antes do upload pode perder o áudio desse segmento; a Reunião continua aberta. Persistência progressiva no servidor = requisito futuro se produção exigir zero perda.
+- Timestamps `started_at`/`ended_at` no servidor = receção; não confundir com clock exacto do MediaRecorder
 - STT consome segmentos por **ordinal** crescente
 - **Uma Acta por Reuniao**; vários segmentos alimentam a mesma Acta
 

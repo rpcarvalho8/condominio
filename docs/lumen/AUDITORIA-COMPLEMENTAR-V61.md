@@ -2,7 +2,7 @@
 
 **Versão:** complementar à v6.1 | **Data:** 2026-09-10  
 **Branch de referência documental:** `cursor/lumen-v61-docs-1c40`  
-**Estado:** análise fechada; implementação selectiva dos pontos com acordo
+**Estado:** análise fechada; implementação de RecordingSegment na branch `cursor/reuniao-recording-segments-1c40` (auditoria final 2026-09-10)
 
 Este documento responde à Parte P do pedido. A v6.1 permanece fechada: não se reabre a arquitectura geral nem se inicia F0 por iniciativa própria.
 
@@ -13,8 +13,8 @@ Este documento responde à Parte P do pedido. A v6.1 permanece fechada: não se 
 1. **Linguagem (Parte A).** A documentação deve soar a português de Portugal claro e humano, sem mudar o significado das decisões já fechadas.
 2. **Convocatória por condómino (Parte B).** O meio não é uniforme: art. 1432.º n.º 1 (carta registada / aviso com recibo) e n.ºs 2–3 (email só se vontade lavrada em acta com endereço e recibo de receção). Separar convocatória de comunicação posterior de deliberações (n.º 9) é correcto.
 3. **UNKNOWN → HUMAN REVIEW**, nunca AUTO SEND.
-4. **Gravação ≠ fim da reunião (Partes C–O).** A implementação actual em `RecordingContext` / `reunioes.tsx` / `POST /api/reunioes` trata cada ciclo MediaRecorder + “Criar reunião” como um `INSERT` novo. Não existe `RecordingSegment`. Não há limite de 30–40 min no código — a interrupção é técnica/browser e o utilizador, ao gravar de novo e criar outra vez, gera uma segunda `Reuniao`.
-5. Separar `Reuniao` de `RecordingSegment`, com persistência progressiva (já há chunks IndexedDB + upload resumível — preservar).
+4. **Gravação ≠ fim da reunião (Partes C–O).** O bug histórico (cada ciclo MediaRecorder + “Criar reunião” = novo `INSERT`) foi corrigido: `POST /open` + `POST /:id/segments` + `POST /:id/end-meeting`. Interrupção técnica não cria nova Reunião.
+5. Separar `Reuniao` de `RecordingSegment`, com persistência progressiva **no cliente** (IndexedDB + upload resumível). Persistência progressiva no servidor fica como requisito futuro se o piloto exigir zero perda de áudio.
 6. Intenção humana ≠ falha técnica tem de existir no domínio/estado, não só no UI.
 7. Uma Acta / uma Reuniao, vários segmentos ordenados para STT.
 8. Retenção de áudio v6.1 mantém-se (hard-delete após Acta `APPROVED`).
@@ -137,3 +137,25 @@ Não misturar este fix com F0 multi-tenant.
 | Código gravação multi-segmento | Implementar na branch `cursor/reuniao-recording-segments-1c40` |
 | F0 / orquestra / multi-tenant | Não iniciar |
 | Fechar contagem dos 10 dias / recibo email | Não — `legal validation required` |
+
+---
+
+## Pós-implementação — auditoria final RecordingSegment (2026-09-10)
+
+Branch código: `cursor/reuniao-recording-segments-1c40`. Documentação alinhada em ADR-042 (emenda), `02-DOMINIO`.
+
+| Área | Estado após correcção |
+|------|------------------------|
+| Domínio 1 Reunião / N segmentos | Implementado |
+| Tenant isolation (`tenant_id` + filtro servidor) | Implementado (defesa; ADR-016 mantém 1 BD/tenant) |
+| Ordinal concorrente + UNIQUE | Implementado + teste |
+| Testes integração (8 casos) | Implementado |
+| Resiliência áudio | MVP documentado: IDB cliente; sem falsa garantia servidor |
+| Timestamps | Semântica documentada (receção vs client opcional) |
+| Estados Reunião / Segmento | Clarificados (`terminada` não usada; segmentos persistidos `closed`) |
+| end-meeting idempotente | Implementado |
+| STT async job | Adiado a F0/ADR-038 (Vite corta background); sync HTTP na Fonte |
+| AuditEvent | Tabela + eventos de gravação |
+| Migration SQL (não só db:push) | `migrations/0001` + script |
+
+**Veredicto documental:** GO para merge do código de RecordingSegment **com** a limitação MVP de áudio e STT-no-HTTP explicitamente aceites até F0/piloto.
