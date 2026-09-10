@@ -142,7 +142,11 @@ export function isMeetingOpen(state: ReuniaoRecordingState): boolean {
   return state.lifecycle !== "ended";
 }
 
-/** Mapeia lifecycle de domínio → status persistido na app actual. */
+/**
+ * Mapeia lifecycle de domínio → status persistido na app actual.
+ * Nota: após endMeeting, o API passa a `processando_audio` (não `terminada`).
+ * `terminada` fica reservada/legado e não é usada no fluxo Fonte actual.
+ */
 export function toPersistedReuniaoStatus(
   lifecycle: ReuniaoLifecycleStatus,
   phase: "recording" | "processing" | "draft" = "recording",
@@ -150,5 +154,7 @@ export function toPersistedReuniaoStatus(
   if (lifecycle === "draft") return "rascunho";
   if (lifecycle === "in_progress") return "em_curso";
   if (phase === "processing") return "processando_audio";
-  return "terminada";
+  if (phase === "draft") return "rascunho";
+  // lifecycle ended sem phase explícita → processamento (fluxo real)
+  return "processando_audio";
 }

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import fs from "node:fs";
 import path from "node:path";
 import { db } from "../database";
@@ -9,6 +9,14 @@ import { transcribeAudioFilePath } from "../lib/stt";
 import { gerarResumoReuniao } from "../lib/reuniao-llm";
 import { gerarReuniaoPdf } from "../lib/reuniao-pdf";
 import { resolveUploadedAudioPath } from "./uploads";
+import { getCurrentTenantId } from "../lib/tenant";
+import { findReuniaoForCurrentTenant } from "../lib/reuniao-access";
+import {
+  insertSegmentWithOrdinalRetry,
+  isOrdinalUniqueViolation,
+} from "../lib/reuniao-ordinal";
+import { writeReuniaoAudit } from "../lib/reuniao-audit";
+import { withIdempotency } from "../lib/idempotency";
 
 const UPLOAD_DIR = path.join(process.cwd(), "data", "reunioes");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -18,6 +26,11 @@ const ALLOWED_EXTENSIONS = new Set([".mp3", ".m4a", ".mp4", ".wav", ".webm"]);
 
 function toPosix(p: string) {
   return p.replace(/\\/g, "/");
+}
+
+function actorUserId(c: { get: (k: string) => unknown }): string | null {
+  const user = c.get("user") as { id?: string } | null;
+  return user?.id ?? null;
 }
 
 function resolveAudioFromBody(uploadId: string, audioPathIn: string): {
@@ -52,10 +65,42 @@ function resolveAudioFromBody(uploadId: string, audioPathIn: string): {
   return { absolutePath, relativePath: relative, filename: path.basename(absolutePath) };
 }
 
-/** STT + LLM → UPDATE do registo. Corre após create/reprocess (await no pedido HTTP). */
-async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
-  const [row] = await db.select().from(reunioes).where(eq(reunioes.id, reuniaoId)).limit(1);
-  if (!row) {
+function parseOptionalClientTs(raw: unknown): Date | null {
+  if (raw == null || raw === "") return null;
+  const n = typeof raw === "number" ? raw : Number(String(raw));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const d = new Date(n);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * STT + LLM sobre TODOS os segmentos (ordinal), uma única transcrição lógica.
+ *
+ * Nota de arquitectura (Fonte actual): corre no pedido HTTP porque o plugin Vite
+ * corta trabalho em background após a response. Em F0 (ADR-038) isto migra para
+ * job persistente. Idempotência: se já existir transcrição para a mesma
+ * processingGeneration, não reescreve Acta.
+ */
+export async function runReuniaoSttPipeline(
+  reuniaoId: string,
+  opts?: { force?: boolean; expectedGeneration?: number },
+): Promise<void> {
+  const tenantId = getCurrentTenantId();
+  const [row] = await db
+    .select()
+    .from(reunioes)
+    .where(and(eq(reunioes.id, reuniaoId), eq(reunioes.tenantId, tenantId)))
+    .limit(1);
+  if (!row) return;
+
+  if (
+    !opts?.force &&
+    row.transcricao &&
+    row.status === "rascunho" &&
+    opts?.expectedGeneration != null &&
+    row.processingGeneration === opts.expectedGeneration &&
+    row.processingCompletedAt
+  ) {
     return;
   }
 
@@ -65,18 +110,22 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
     .where(eq(recordingSegments.reuniaoId, reuniaoId))
     .orderBy(asc(recordingSegments.ordinal));
 
-  const audioJobs: Array<{ absolutePath: string; label: string }> = [];
+  const audioJobs: Array<{ absolutePath: string; label: string; ordinal: number }> = [];
   for (const seg of segments) {
     if (!seg.storagePath) continue;
     const absolutePath = path.join(process.cwd(), seg.storagePath);
     if (fs.existsSync(absolutePath)) {
-      audioJobs.push({ absolutePath, label: path.basename(absolutePath) });
+      audioJobs.push({
+        absolutePath,
+        label: path.basename(absolutePath),
+        ordinal: seg.ordinal,
+      });
     }
   }
   if (audioJobs.length === 0 && row.audioPath) {
     const absolutePath = path.join(process.cwd(), row.audioPath);
     if (fs.existsSync(absolutePath)) {
-      audioJobs.push({ absolutePath, label: path.basename(absolutePath) });
+      audioJobs.push({ absolutePath, label: path.basename(absolutePath), ordinal: 0 });
     }
   }
 
@@ -85,7 +134,12 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
       status: "erro_audio",
       resumo: "Sem ficheiro de áudio associado.",
       updatedAt: new Date(),
-    }).where(eq(reunioes.id, reuniaoId));
+    }).where(and(eq(reunioes.id, reuniaoId), eq(reunioes.tenantId, tenantId)));
+    await writeReuniaoAudit({
+      type: "recording_processing_failed",
+      reuniaoId,
+      payload: { reason: "no_audio" },
+    });
     return;
   }
 
@@ -93,14 +147,19 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
     const parts: string[] = [];
     for (let i = 0; i < audioJobs.length; i++) {
       const job = audioJobs[i]!;
-      console.log("[STT] Transcrevendo segmento...", { reuniaoId, i: i + 1, path: job.absolutePath });
+      console.log("[STT] Transcrevendo segmento...", {
+        reuniaoId,
+        ordinal: job.ordinal,
+        i: i + 1,
+        path: job.absolutePath,
+      });
       const text = await transcribeAudioFilePath(job.absolutePath, job.label, {
-        cacheKey: `reuniao_${reuniaoId}_s${i + 1}`,
+        cacheKey: `reuniao_${reuniaoId}_ord${job.ordinal || i + 1}`,
       });
       if (text?.trim()) {
         parts.push(
           audioJobs.length > 1
-            ? `--- Segmento ${i + 1}/${audioJobs.length} ---\n${text.trim()}`
+            ? `--- Segmento ${job.ordinal || i + 1}/${audioJobs.length} ---\n${text.trim()}`
             : text.trim(),
         );
       }
@@ -112,7 +171,12 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
         transcricao: null,
         resumo: "Transcrição vazia. Use «Tentar novamente gerar».",
         updatedAt: new Date(),
-      }).where(eq(reunioes.id, reuniaoId));
+      }).where(and(eq(reunioes.id, reuniaoId), eq(reunioes.tenantId, tenantId)));
+      await writeReuniaoAudit({
+        type: "recording_processing_failed",
+        reuniaoId,
+        payload: { reason: "empty_transcription" },
+      });
       return;
     }
 
@@ -146,8 +210,19 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
       fornecedorNome,
       resumoJson,
       resumo,
+      processingCompletedAt: new Date(),
       updatedAt: new Date(),
-    }).where(eq(reunioes.id, reuniaoId));
+    }).where(and(eq(reunioes.id, reuniaoId), eq(reunioes.tenantId, tenantId)));
+
+    await writeReuniaoAudit({
+      type: "recording_processing_completed",
+      reuniaoId,
+      payload: {
+        segments: audioJobs.length,
+        generation: row.processingGeneration,
+        llmWarning: llmWarning ?? undefined,
+      },
+    });
 
     console.log("[STT/LLM] Conteúdo guardado na BD para o ID:", reuniaoId);
     if (llmWarning) console.warn(`[reunioes] LLM warning id=${reuniaoId}:`, llmWarning);
@@ -158,7 +233,12 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
       status: "erro_audio",
       resumo: `Falha na transcrição: ${msg}`,
       updatedAt: new Date(),
-    }).where(eq(reunioes.id, reuniaoId));
+    }).where(and(eq(reunioes.id, reuniaoId), eq(reunioes.tenantId, tenantId)));
+    await writeReuniaoAudit({
+      type: "recording_processing_failed",
+      reuniaoId,
+      payload: { reason: msg },
+    });
   }
 }
 
@@ -183,7 +263,12 @@ export const reunioesPdfRoutes = new Hono().get("/:filename", async (c) => {
 export const reunioesRoutes = new Hono()
   .use(requireAdmin)
   .get("/", async (c) => {
-    const rows = await db.select().from(reunioes).orderBy(desc(reunioes.data), desc(reunioes.createdAt));
+    const tenantId = getCurrentTenantId();
+    const rows = await db
+      .select()
+      .from(reunioes)
+      .where(eq(reunioes.tenantId, tenantId))
+      .orderBy(desc(reunioes.data), desc(reunioes.createdAt));
     return c.json(rows);
   })
   /** Abre uma reunião em curso (antes / ao iniciar a primeira gravação). */
@@ -198,7 +283,9 @@ export const reunioesRoutes = new Hono()
       const dataReuniao = new Date(dataRaw);
       if (Number.isNaN(dataReuniao.getTime())) return c.json({ message: "Data inválida." }, 400);
 
+      const tenantId = getCurrentTenantId();
       const [created] = await db.insert(reunioes).values({
+        tenantId,
         titulo,
         data: dataReuniao,
         tipo: "interna",
@@ -211,6 +298,13 @@ export const reunioesRoutes = new Hono()
         status: "em_curso",
       }).returning();
 
+      await writeReuniaoAudit({
+        type: "meeting_opened",
+        reuniaoId: created.id,
+        actorUserId: actorUserId(c),
+        payload: { titulo },
+      });
+
       return c.json(created, 201);
     } catch (error: any) {
       return c.json({ message: String(error?.message ?? "Erro inesperado.") }, 500);
@@ -218,7 +312,7 @@ export const reunioesRoutes = new Hono()
   })
   .get("/:id/segments", async (c) => {
     const id = c.req.param("id");
-    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    const row = await findReuniaoForCurrentTenant(id);
     if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
     const segs = await db
       .select()
@@ -231,7 +325,7 @@ export const reunioesRoutes = new Hono()
   .post("/:id/segments", async (c) => {
     try {
       const id = c.req.param("id");
-      const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+      const row = await findReuniaoForCurrentTenant(id);
       if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
       if (row.status !== "em_curso" && row.status !== "rascunho") {
         return c.json({
@@ -253,80 +347,149 @@ export const reunioesRoutes = new Hono()
       }
 
       const resolved = resolveAudioFromBody(uploadId, audioPathIn);
-      if ("error" in resolved) return c.json({ message: resolved.error }, resolved.status);
+      if ("error" in resolved) {
+        await writeReuniaoAudit({
+          type: "recording_upload_failed",
+          reuniaoId: id,
+          actorUserId: actorUserId(c),
+          payload: { error: resolved.error },
+        });
+        return c.json({ message: resolved.error }, resolved.status);
+      }
 
-      const existing = await db
-        .select()
-        .from(recordingSegments)
-        .where(eq(recordingSegments.reuniaoId, id));
-      const ordinal = existing.length + 1;
       const byteSize = fs.existsSync(resolved.absolutePath)
         ? fs.statSync(resolved.absolutePath).size
         : 0;
+      const now = new Date();
+      const clientStartedAt = parseOptionalClientTs(body.clientStartedAt);
+      const clientEndedAt = parseOptionalClientTs(body.clientEndedAt);
 
-      const [seg] = await db.insert(recordingSegments).values({
-        reuniaoId: id,
-        ordinal,
-        startedAt: new Date(),
-        endedAt: new Date(),
-        reasonEnded,
-        storagePath: resolved.relativePath,
-        byteSize,
-        status: "closed",
-      }).returning();
+      const seg = await insertSegmentWithOrdinalRetry(
+        db,
+        id,
+        (ordinal) => ({
+          reuniaoId: id,
+          ordinal,
+          startedAt: now,
+          endedAt: now,
+          clientStartedAt,
+          clientEndedAt,
+          reasonEnded,
+          storagePath: resolved.relativePath,
+          byteSize,
+          status: "closed",
+        }),
+        async (values) =>
+          db.insert(recordingSegments).values(values as any).returning(),
+      );
 
-      // Compat: audioPath aponta para o primeiro segmento
+      const tenantId = getCurrentTenantId();
       if (!row.audioPath) {
         await db.update(reunioes).set({
           audioPath: resolved.relativePath,
           status: "em_curso",
           updatedAt: new Date(),
-        }).where(eq(reunioes.id, id));
+        }).where(and(eq(reunioes.id, id), eq(reunioes.tenantId, tenantId)));
       } else {
         await db.update(reunioes).set({
           status: "em_curso",
           updatedAt: new Date(),
-        }).where(eq(reunioes.id, id));
+        }).where(and(eq(reunioes.id, id), eq(reunioes.tenantId, tenantId)));
       }
+
+      await writeReuniaoAudit({
+        type:
+          reasonEnded === "technical_interrupt"
+            ? "recording_interrupted"
+            : "recording_segment_closed",
+        reuniaoId: id,
+        actorUserId: actorUserId(c),
+        payload: {
+          segmentId: (seg as any).id,
+          ordinal: (seg as any).ordinal,
+          reasonEnded,
+          byteSize,
+        },
+      });
 
       return c.json({ segment: seg, reuniaoId: id }, 201);
     } catch (error: any) {
+      if (isOrdinalUniqueViolation(error)) {
+        return c.json({ message: "Conflito de ordinal — tente novamente." }, 409);
+      }
       return c.json({ message: String(error?.message ?? "Erro inesperado.") }, 500);
     }
   })
   /**
-   * Termina a reunião por intenção humana e dispara STT sobre todos os segmentos.
+   * Termina a reunião por intenção humana.
    * Falha técnica NÃO deve chamar este endpoint.
+   *
+   * Idempotente: segunda chamada enquanto processando / já rascunho
+   * não dispara segundo pipeline.
+   *
+   * Fonte: STT/LLM ainda corre no pedido (limitação Vite). F0 → job ADR-038.
    */
   .post("/:id/end-meeting", async (c) => {
     const id = c.req.param("id");
-    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
-    if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
-    if (row.status === "aprovada") {
-      return c.json({ message: "Reunião já aprovada." }, 400);
-    }
+    return withIdempotency(c, `reunioes:end:${id}`, async () => {
+      const row = await findReuniaoForCurrentTenant(id);
+      if (!row) return { status: 404 as const, body: { message: "Reunião não encontrada." } };
+      if (row.status === "aprovada") {
+        return { status: 400 as const, body: { message: "Reunião já aprovada." } };
+      }
 
-    const segs = await db
-      .select()
-      .from(recordingSegments)
-      .where(eq(recordingSegments.reuniaoId, id));
-    if (segs.length === 0 && !row.audioPath) {
-      return c.json({ message: "Não há segmentos de áudio para processar." }, 400);
-    }
+      // Já processado com sucesso nesta geração → devolver sem reprocessar
+      if (row.status === "rascunho" && row.transcricao && row.processingCompletedAt) {
+        return { status: 200 as const, body: row };
+      }
+      // Já em processamento → não arrancar segundo pipeline
+      if (row.status === "processando_audio") {
+        return { status: 200 as const, body: row };
+      }
 
-    await db.update(reunioes).set({
-      status: "processando_audio",
-      resumo: "A transcrever segmentos de áudio e a gerar notas com IA…",
-      updatedAt: new Date(),
-    }).where(eq(reunioes.id, id));
+      const segs = await db
+        .select()
+        .from(recordingSegments)
+        .where(eq(recordingSegments.reuniaoId, id));
+      if (segs.length === 0 && !row.audioPath) {
+        return {
+          status: 400 as const,
+          body: { message: "Não há segmentos de áudio para processar." },
+        };
+      }
 
-    await runReuniaoSttPipeline(id);
-    const [updated] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
-    return c.json(updated ?? row);
+      const tenantId = getCurrentTenantId();
+      const nextGen = (row.processingGeneration ?? 0) + 1;
+      await db.update(reunioes).set({
+        status: "processando_audio",
+        resumo: "A transcrever segmentos de áudio e a gerar notas com IA…",
+        processingGeneration: nextGen,
+        processingStartedAt: new Date(),
+        processingCompletedAt: null,
+        updatedAt: new Date(),
+      }).where(and(eq(reunioes.id, id), eq(reunioes.tenantId, tenantId)));
+
+      await writeReuniaoAudit({
+        type: "meeting_ended",
+        reuniaoId: id,
+        actorUserId: actorUserId(c),
+        payload: { generation: nextGen, segments: segs.length },
+      });
+      await writeReuniaoAudit({
+        type: "recording_processing_started",
+        reuniaoId: id,
+        actorUserId: actorUserId(c),
+        payload: { generation: nextGen },
+      });
+
+      await runReuniaoSttPipeline(id, { expectedGeneration: nextGen });
+      const updated = await findReuniaoForCurrentTenant(id);
+      return { status: 200 as const, body: updated ?? row };
+    });
   })
   .get("/:id", async (c) => {
     const id = c.req.param("id");
-    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    const row = await findReuniaoForCurrentTenant(id);
     if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
     return c.json(row);
   })
@@ -347,6 +510,7 @@ export const reunioesRoutes = new Hono()
       if (Number.isNaN(dataReuniao.getTime())) return c.json({ message: "Data inválida." }, 400);
 
       let audioRelativePath: string | null = null;
+      const tenantId = getCurrentTenantId();
 
       if (uploadId || audioPathIn) {
         const resolved = resolveAudioFromBody(uploadId, audioPathIn);
@@ -371,6 +535,7 @@ export const reunioesRoutes = new Hono()
 
       if (audioRelativePath) {
         const [created] = await db.insert(reunioes).values({
+          tenantId,
           titulo,
           data: dataReuniao,
           tipo: "interna",
@@ -381,15 +546,30 @@ export const reunioesRoutes = new Hono()
           resumo: "A transcrever áudio e a gerar notas com IA…",
           audioPath: audioRelativePath,
           status: "processando_audio",
+          processingGeneration: 1,
+          processingStartedAt: new Date(),
         }).returning();
 
-        // Aguardar STT+LLM no pedido — o plugin Vite corta trabalho em background após a response
-        await runReuniaoSttPipeline(created.id);
-        const [updated] = await db.select().from(reunioes).where(eq(reunioes.id, created.id)).limit(1);
+        await writeReuniaoAudit({
+          type: "meeting_opened",
+          reuniaoId: created.id,
+          actorUserId: actorUserId(c),
+          payload: { legacyCreate: true },
+        });
+        await writeReuniaoAudit({
+          type: "recording_processing_started",
+          reuniaoId: created.id,
+          actorUserId: actorUserId(c),
+          payload: { generation: 1 },
+        });
+
+        await runReuniaoSttPipeline(created.id, { expectedGeneration: 1 });
+        const updated = await findReuniaoForCurrentTenant(created.id);
         return c.json(updated ?? created, 201);
       }
 
       const [created] = await db.insert(reunioes).values({
+        tenantId,
         titulo,
         data: dataReuniao,
         tipo: "interna",
@@ -409,8 +589,10 @@ export const reunioesRoutes = new Hono()
   })
   .patch("/:id", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json().catch(() => ({} as any));
+    const existing = await findReuniaoForCurrentTenant(id);
+    if (!existing) return c.json({ message: "Reunião não encontrada." }, 404);
 
+    const body = await c.req.json().catch(() => ({} as any));
     const patch: Partial<typeof reunioes.$inferInsert> = { updatedAt: new Date() };
     if (typeof body.titulo === "string") patch.titulo = body.titulo.trim();
     if (typeof body.participantes === "string" || body.participantes === null) patch.participantes = body.participantes;
@@ -425,29 +607,48 @@ export const reunioesRoutes = new Hono()
       patch.data = dt;
     }
 
-    const [updated] = await db.update(reunioes).set(patch).where(eq(reunioes.id, id)).returning();
+    const tenantId = getCurrentTenantId();
+    const [updated] = await db
+      .update(reunioes)
+      .set(patch)
+      .where(and(eq(reunioes.id, id), eq(reunioes.tenantId, tenantId)))
+      .returning();
     if (!updated) return c.json({ message: "Reunião não encontrada." }, 404);
     return c.json(updated);
   })
   .post("/:id/reprocessar", async (c) => {
     const id = c.req.param("id");
-    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    const row = await findReuniaoForCurrentTenant(id);
     if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
-    if (!row.audioPath) return c.json({ message: "Esta reunião não tem áudio guardado." }, 400);
 
-    const absolutePath = path.join(process.cwd(), row.audioPath);
-    if (!fs.existsSync(absolutePath)) {
-      return c.json({ message: "Ficheiro de áudio não encontrado no servidor." }, 404);
+    const segs = await db
+      .select()
+      .from(recordingSegments)
+      .where(eq(recordingSegments.reuniaoId, id));
+    if (segs.length === 0 && !row.audioPath) {
+      return c.json({ message: "Esta reunião não tem áudio guardado." }, 400);
     }
 
+    const tenantId = getCurrentTenantId();
+    const nextGen = (row.processingGeneration ?? 0) + 1;
     await db.update(reunioes).set({
       status: "processando_audio",
       resumo: "A regenerar transcrição e resumo…",
+      processingGeneration: nextGen,
+      processingStartedAt: new Date(),
+      processingCompletedAt: null,
       updatedAt: new Date(),
-    }).where(eq(reunioes.id, id));
+    }).where(and(eq(reunioes.id, id), eq(reunioes.tenantId, tenantId)));
 
-    await runReuniaoSttPipeline(id);
-    const [updated] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    await writeReuniaoAudit({
+      type: "recording_processing_started",
+      reuniaoId: id,
+      actorUserId: actorUserId(c),
+      payload: { generation: nextGen, reprocess: true },
+    });
+
+    await runReuniaoSttPipeline(id, { force: true, expectedGeneration: nextGen });
+    const updated = await findReuniaoForCurrentTenant(id);
     if (!updated) return c.json({ message: "Reunião não encontrada." }, 404);
     if (updated.status === "erro_audio") {
       return c.json({ ...updated, warning: updated.resumo || "Falha ao regenerar." });
@@ -456,7 +657,7 @@ export const reunioesRoutes = new Hono()
   })
   .patch("/:id/aprovar", async (c) => {
     const id = c.req.param("id");
-    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    const row = await findReuniaoForCurrentTenant(id);
     if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
     if (row.status === "aprovada") return c.json({ message: "Reunião já aprovada." }, 400);
     if (row.status === "processando_audio") {
@@ -472,18 +673,19 @@ export const reunioesRoutes = new Hono()
       resumo: row.resumo,
     });
 
+    const tenantId = getCurrentTenantId();
     const [updated] = await db.update(reunioes).set({
       status: "aprovada",
       pdfUrl,
       approvedAt: new Date(),
       updatedAt: new Date(),
-    }).where(eq(reunioes.id, id)).returning();
+    }).where(and(eq(reunioes.id, id), eq(reunioes.tenantId, tenantId))).returning();
 
     return c.json(updated);
   })
   .delete("/:id", async (c) => {
     const id = c.req.param("id");
-    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    const row = await findReuniaoForCurrentTenant(id);
     if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
 
     if (row.audioPath) {
@@ -491,6 +693,7 @@ export const reunioesRoutes = new Hono()
       try { if (fs.existsSync(abs)) fs.unlinkSync(abs); } catch { /* ignore */ }
     }
 
-    await db.delete(reunioes).where(eq(reunioes.id, id));
+    const tenantId = getCurrentTenantId();
+    await db.delete(reunioes).where(and(eq(reunioes.id, id), eq(reunioes.tenantId, tenantId)));
     return c.json({ message: "Eliminada." });
   });
