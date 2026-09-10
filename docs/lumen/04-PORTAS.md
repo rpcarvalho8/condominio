@@ -2,20 +2,22 @@
 
 **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
-> **Decisão fechada (ADR-001):** QR Code físico (afixado, impresso, ou reencaminhável como credencial) **não existe** no produto. Onboarding do condómino = **Convite individual** (`Invitation`): privado, uso único, revogável, com **verificação de contacto** antes de criar `Membership`.
+> **Decisão fechada (ADR-001):** QR Code físico (afixado, impresso ou reencaminhável como credencial) não existe no produto. Onboarding do condómino = Convite individual (`Invitation`): privado, uso único, revogável, com verificação de contacto antes de criar `Membership`.
 >
-> Precedência: ADR-LOG > 02-DOMINIO > 06-FATIAS > diagramas > resto. Modelo de lançamento (piloto vs comercial): ver `06-FATIAS.md` e `00-INDICE.md`. Gates: [PRODUCTION-GATES.md](PRODUCTION-GATES.md).
+> **Nota complementar (v6.1):** evidência de canal de comunicação alinha-se a convocatória / avisos (ADR-041) — ver Porta de Saída.
+>
+> Precedência: ADR-LOG > 02-DOMINIO > 06-FATIAS > diagramas > resto. Modelo de lançamento (piloto vs comercial): `06-FATIAS.md` e `00-INDICE.md`. Gates: [PRODUCTION-GATES.md](PRODUCTION-GATES.md).
 
 ---
 
-## Diretiva de Design (Vinculativa) — Apple-Grade + Identidade Sevilla
+## Diretiva de Design — Identidade Sevilla
 
-Aplica-se a Portal Admin, Portal Condómino e PWA. **Não reintroduzir** paletas creme/coral/terracota.
+Aplica-se a Portal Admin, Portal Condómino e PWA. Não reintroduzir paletas creme/coral/terracota.
 
 | Elemento | Especificação |
 |---|---|
-| Estética geral | Ultra-minimalista, whitespace generoso, micro-interações suaves, tipografia limpa, zero ruído visual |
-| Fundo dominante | Branco Puro `#FFFFFF` e Cinza Ultra-Leve `#F5F5F7` |
+| Estética geral | Minimalista, espaço em branco generoso, micro-interações suaves, tipografia limpa |
+| Fundo dominante | Branco `#FFFFFF` e cinza muito claro `#F5F5F7` |
 | Destaque primário | Vermelho Sevilha `#D0021B` / Vermelho-Escuro `#A80015` — CTA, alertas críticos, marca |
 | Delimitação secundária | Prata/cinza neutro — estados secundários, contraste sem saturação |
 
@@ -26,45 +28,41 @@ Aplica-se a Portal Admin, Portal Condómino e PWA. **Não reintroduzir** paletas
 | | **Piloto (F0–F3 Essencial)** | **Comercial geral (F5 + gates)** |
 |---|---|---|
 | Recrutamento | Pessoal; tolera mais fricção UX | Escala; experiência móvel completa obrigatória |
-| Votação | **Não é critério** | Disponível quando a governança (F5) estiver live |
+| Votação | Não é critério | Disponível quando a governação (F5) estiver live |
 | Actas | Consulta só se existirem `PUBLISHED` | Fluxo completo de Acta + votação |
 | Distribuição | Sem escala além do piloto enquanto F0–F2 instáveis | Após [PRODUCTION-GATES](PRODUCTION-GATES.md) |
 | Dinheiro / legal em produção | NO-GO até aos gates | Só com gates cumpridos |
 
-Detalhe das capacidades Essencial: `06-FATIAS.md` (Opção A).
+Capacidades Essencial: `06-FATIAS.md` (Opção A).
 
 ---
 
-## Experiência Móvel
+## Experiência móvel
 
-**Decisão:** PWA mobile-first (não app nativa) basta para lançar. App nativa tipicamente *aumenta* fricção para condóminos pouco tecnológicos (loja + instalação) face a um link de convite por email/SMS.
+**Decisão:** PWA mobile-first basta para lançar. App nativa costuma aumentar a fricção para condóminos pouco tecnológicos (loja + instalação) face a um link de convite por email/SMS.
 
 ### Obrigatório no telemóvel — lançamento comercial (sem votação até F5)
 
-Lista mínima **sem** exigir votação enquanto a governança não estiver live:
+Lista mínima sem exigir votação enquanto a governação não estiver live:
 
 - Ver saldo / dívidas (sempre do Ledger, nunca de cache)
 - Ver e descarregar Avisos de Débito / Recibos / Extrato
 - Criar ticket com foto
-- Ver atas **publicadas** e documentos
+- Ver atas publicadas e documentos
 - Aceitar convite e criar conta
 - Contactar o admin
 
-**Quando a governança (F5) estiver live:** votar com step-up de autenticação passa a integrar a lista móvel obrigatória do comercial geral.
+Quando a governação (F5) estiver live, votar com step-up de autenticação entra na lista móvel obrigatória do comercial geral. No piloto vale a mesma base Essencial, com mais fricção tolerada e sem votação como critério.
 
-**Piloto:** a mesma base Essencial; mais fricção tolerada; votação fora do critério.
-
-**Pode ficar para depois:** Reuniões Admin (admin-only), Centro de Operações completo, app nativa, escrita offline completa, biometria avançada, KYC verdadeiro.
+Pode ficar para depois: Reuniões Admin (admin-only), Centro de Operações completo, app nativa, escrita offline completa, biometria avançada, KYC verdadeiro.
 
 ### Spike PWA / iOS push (antes de fechar F3)
 
-Push em PWA no iOS Safari (16.4+) exige “Adicionar ao ecrã principal”. Validar com **spike técnico dedicado** antes de fechar F3. Se não for fiável, email continua o canal primário; push fica best-effort.
+Push em PWA no iOS Safari (16.4+) exige “Adicionar ao ecrã principal”. Validar com spike técnico dedicado antes de fechar F3. Se não for fiável, email continua o canal primário; push fica best-effort.
 
 ### Email e notificações (desde F0)
 
-- **Email = canal primário**, com envio, retry, estado de entrega e observabilidade (correlação + `AuditEvent` / `DomainEvent`).
-- **Não** se afirma “entrega garantida na caixa de entrada do utilizador” (filtros spam, ISP, dispositivo fora do nosso controlo).
-- Push = best-effort; nunca a única via para aviso crítico.
+Email é o canal primário: envio, retry, estado de entrega e observabilidade (correlação + `AuditEvent` / `DomainEvent`). Não se afirma “entrega garantida na caixa de entrada” — spam, ISP e dispositivo estão fora do nosso controlo. Push é best-effort e nunca a única via para aviso crítico.
 
 ---
 
@@ -104,11 +102,11 @@ Push em PWA no iOS Safari (16.4+) exige “Adicionar ao ecrã principal”. Vali
    └─ morada, NIF, IBAN(s)
 3. Upload Regulamento Interno (PDF ou foto)
    └─ LLM Jurídico extrai permilagens, regras, penalizações, limiar de obras
-4. Admin confirma/corrige permilagens — LINHA A LINHA
+4. Admin confirma/corrige permilagens — linha a linha
    └─ excerto do PDF de origem visível; Σ permilagens = 1000‰
 5. Upload contactos proprietários
    └─ PDF/Excel/foto ou manual
-   └─ TABELA DE PRÉ-VISUALIZAÇÃO (fração ↔ pessoa ↔ contacto)
+   └─ tabela de pré-visualização (fração ↔ pessoa ↔ contacto)
       antes de qualquer convite — nunca envio automático a partir do OCR
 6. Upload comprovativo IBAN do condomínio
    └─ PDF ou foto — ver retenção diferenciada abaixo
@@ -120,7 +118,7 @@ Push em PWA no iOS Safari (16.4+) exige “Adicionar ao ecrã principal”. Vali
       → Obligations a partir de deliberação/orçamento aprovado
 ```
 
-**Resultado:** tenant pronto, frações com Obligations, admin com Membership, banco ligado (se aplicável).
+Resultado: tenant pronto, frações com Obligations, admin com Membership, banco ligado (se aplicável).
 
 ### Comprovativo IBAN e retenção (ADR-030)
 
@@ -129,7 +127,7 @@ Push em PWA no iOS Safari (16.4+) exige “Adicionar ao ecrã principal”. Vali
 | **Instrumento legal** | Regulamento Interno, Actas | Retenção indefinida — o original *é* o instrumento |
 | **Documento pessoal / identificação** | Comprovativo IBAN (e eventual ID futuro) | Minimização RGPD: retenção limitada; após purga do conteúdo, persistem hash + metadados para auditoria |
 
-O upload do comprovativo IBAN **não** segue a mesma política de retenção que o Regulamento ou a Acta.
+O upload do comprovativo IBAN não segue a mesma política de retenção que o Regulamento ou a Acta.
 
 ### Lead magnet — relatório de reconciliação
 
@@ -138,7 +136,7 @@ Oferta de aquisição (não CRM interno). Linguagem: divergências auditáveis �
 | Modo | Quando | Limite |
 |---|---|---|
 | **A — Self-serve CSV** | Quando F1/F2 existirem | Utilizador carrega extrato; relatório gerado pelo motor de reconciliação |
-| **B — Assistido (piloto)** | Durante o piloto | Capado a **máx. 4 por mês** no piloto |
+| **B — Assistido (piloto)** | Durante o piloto | Capado a máx. 4 por mês no piloto |
 
 ---
 
@@ -148,11 +146,9 @@ Oferta de aquisição (não CRM interno). Linguagem: divergências auditáveis �
 
 ### Conceito
 
-- Admin cria `Invitation` para uma fração + contacto já registado (email/SMS)
-- Privado, uso único, revogável, expira em poucos dias
-- Sem impressão, afixação ou reutilização
+O admin cria um `Invitation` para uma fração e um contacto já registado (email/SMS). O convite é privado, de uso único, revogável e expira em poucos dias — sem impressão, afixação ou reutilização.
 
-### Ativação da Comunidade (lote com confirmação)
+### Ativação da comunidade (lote com confirmação)
 
 ```
 Contactos importados (OCR/LLM)
@@ -229,39 +225,33 @@ Sessão autenticada (better-auth)
 | **Validação Person ↔ Fraction ↔ Membership** | Sim (admin) | Correspondência operacional revista na pré-visualização e no Membership |
 | **KYC / verificação de identidade legal** | Não | **Future Decision** — fora do MVP |
 
-Usar sempre a expressão **verificação de contacto**, não “verificação de identidade”, neste documento e na UX.
+Usar sempre a expressão verificação de contacto, não “verificação de identidade”, neste documento e na UX.
 
 ### Step-up
 
-Alterar IBAN, alterar titular, ações financeiras sensíveis — e **votar quando F5 existir** — exigem confirmação adicional (ex.: código ao contacto verificado), não só a sessão base.
+Alterar IBAN, alterar titular, ações financeiras sensíveis — e votar quando F5 existir — exigem confirmação adicional (ex.: código ao contacto verificado), não só a sessão base.
 
 ### QR residual (único permitido)
 
-O link de um Convite **já emitido e enviado digitalmente** pode aparecer como QR **dentro do próprio email/SMS** — nunca impresso, nunca afixado, nunca reutilizável. Caso típico: novo proprietário após venda de fração.
+O link de um Convite já emitido e enviado digitalmente pode aparecer como QR dentro do próprio email/SMS — nunca impresso, nunca afixado, nunca reutilizável. Caso típico: novo proprietário após venda de fração.
 
 ### Design / PWA
 
-- PWA; tabs no fundo; mobile-first
-- Fundo branco/cinza Sevilla; CTA vermelho Sevilha
-- Spike iOS push antes de fechar F3 (ver acima)
+PWA; tabs no fundo; mobile-first. Fundo branco/cinza Sevilla; CTA vermelho Sevilha. Spike iOS push antes de fechar F3 (ver acima).
 
 ### Segurança
 
-- Uso único; revogável; rate limiting por IP + token
-- Reemissão: venda de fração → revogar Membership antigo → novo Convite (nunca QR reaproveitado)
+Uso único; revogável; rate limiting por IP + token. Reemissão: venda de fração → revogar Membership antigo → novo Convite (nunca QR reaproveitado).
 
 ### Kit de assembleia (fricção de venda)
 
-Ordem do dia / briefing leve para o piloto — reduz fricção comercial. **Não é CRM** nem pipeline de leads interno (o lead magnet de reconciliação é oferta externa; ver acima).
+Ordem do dia / briefing leve para o piloto — reduz fricção comercial. Não é CRM nem pipeline de leads interno (o lead magnet de reconciliação é oferta externa; ver acima).
 
 ---
 
 ## Porta 3: Portal Web (condómino autenticado)
 
-- Login email + password (better-auth); sessão ligada ao `Membership`
-- Mesmo conteúdo Essencial do onboarding, com sessão persistente
-- Extra: alterar dados pessoais (step-up se sensível), histórico completo
-- Votação: só quando F5 estiver live
+Login email + password (better-auth); sessão ligada ao `Membership`. Mesmo conteúdo Essencial do onboarding, com sessão persistente. Extra: alterar dados pessoais (step-up se sensível), histórico completo. Votação só quando F5 estiver live.
 
 ---
 
@@ -269,12 +259,10 @@ Ordem do dia / briefing leve para o piloto — reduz fricção comercial. **Não
 
 ### Comunicação (única boca)
 
-- Todo email, chat, notificação, acta, contrato e o link de Convite passam por este módulo
-- Nenhum outro módulo envia mensagens directamente
-- Templates para tom e marca consistentes
-- Observabilidade de envio/retry/estado — sem promessa de inbox garantida
+Todo email, chat, notificação, acta, contrato e o link de Convite passam por este módulo. Nenhum outro módulo envia mensagens directamente. Templates para tom e marca consistentes. Observabilidade de envio/retry/estado — sem promessa de inbox garantida.
+
+**Evidência de canal (governança):** convocatórias e avisos legais registam canal, destino, estado de entrega e recibo quando aplicável (`ConvocationDispatch` / `DeliberationNoticeDispatch` — ver 02-DOMINIO). Convocatória ≠ comunicação das deliberações aos ausentes (art. 1432.º n.º 9). Canal `unknown` ou autorização em falta → HUMAN REVIEW, nunca AUTO SEND (ADR-041).
 
 ### Validação em Camadas
 
-- Schema + Domain Rules + Legal Interpretation (LLM Jurídico, consultivo) → Risk Engine → AUTO / Aprovação admin / Escalação humana-legal
-- Ver `03-ORQUESTRA.md`
+Schema + Domain Rules + Legal Interpretation (LLM Jurídico, consultivo) → Risk Engine → AUTO / Aprovação admin / Escalação humana-legal. Ver `03-ORQUESTRA.md`.

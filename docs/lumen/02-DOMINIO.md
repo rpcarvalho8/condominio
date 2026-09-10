@@ -2,6 +2,8 @@
 
 **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
+> **Nota complementar (v6.1):** meio de convocatória por condómino (campos em `Membership`, sem entidade nova); `ConvocationDispatch` separado de `DeliberationNoticeDispatch` (art. 1432.º n.º 9); pipeline explícito convocatória → reunião → Acta → assinatura/subscrição → comunicação aos ausentes; ciclo de vida `Reuniao` com `RecordingSegment` (gravação contínua ≠ fim da reunião); ADRs 041–042. Contagem dos 10 dias e efeitos do recibo de email: **validação legal obrigatória** — não fechados neste pacote.
+>
 > **Nota desta revisão (v6.1):** consistency hardening — conjunto inicial de Roles inclui `Fiscalizacao` (capacidade de controlo, não entidade `ConselhoFiscal`); modelo de dinheiro com `cash_status` + `verification_method` e invariante registante ≠ verificador; especificação rigorosa da hash-chain do Ledger (deteção de adulteração, sem overclaim); máquina de estados da Acta alargada até `PUBLISHED`; retenção diferenciada por categoria; requisito arquitetural de saída do tenant / portabilidade; Knowledge Base legal e gates de produção apontados nos ADRs 036–040.
 >
 > **Nota v6 (mantida):** Acta distingue **assinatura** (presidente) de **subscrição** (todos os condóminos presentes), conforme art. 1.º do DL 268/94 (redação da Lei 8/2022); dois hashes distintos (aprovada vs. final); pagamentos em dinheiro com controlo de fraude; hash-chain no Ledger; meta-regra lei > regulamento; núcleo financeiro/governança nunca depende de LLM.
@@ -20,7 +22,10 @@
 | **Fração** | Unidade autónoma (apartamento, loja, garagem) |
 | **Permilagem** | Quota-parte (‰) da fração no total do prédio |
 | **Person** | Identidade única de uma pessoa — pode ter várias Memberships (ex: proprietária de A, representante de B) |
-| **Membership** | Vínculo entre uma Person, um Tenant, opcionalmente uma Fração, um Role e um Scope opcional — é isto que dá acesso, nunca um QR |
+| **Membership** | Vínculo entre uma Person, um Tenant, opcionalmente uma Fração, um Role e um Scope opcional — é isto que dá acesso, nunca um QR; inclui preferência de meio de convocatória (art. 1432.º), não uma entidade à parte |
+| **ConvocationDispatch** | Evidência de envio de convocatória (canal, destino, entrega, recibo, versão) — distinta da comunicação posterior das deliberações |
+| **DeliberationNoticeDispatch** | Evidência de comunicação das deliberações aos ausentes (art. 1432.º n.º 9) — **nunca** misturada com convocatória |
+| **RecordingSegment** | Segmento de áudio de uma `Reuniao` contínua (ordinal, início/fim, motivo de fecho) — falha técnica não termina a reunião |
 | **Role** | Papel dentro de um Membership. Conjunto inicial: `Owner`, `CoOwner`, `Proxy`, `Admin`, `PlatformAdmin`, `Fiscalizacao` — extensível; outros papéis (Accountant, Lawyer, etc.) ficam adiados |
 | **Fiscalizacao** | Role de **capacidade de controlo**: confirma ações sensíveis, não as cria. Não é obrigatório atribuir; não é uma entidade `ConselhoFiscal` com UI própria |
 | **Scope/Permission** | Restringe o alcance de um Role (ex: "Admin" não implica automaticamente acesso absoluto a tudo) — modelo de dados já preparado, RBAC completo não construído agora |
@@ -90,7 +95,11 @@
 ### Identidade & Acessos
 
 - `Person` — nome, NIF, email, telefone. Identidade única; pode ter múltiplas `Membership` (ex: proprietária da fração A, representante da fração B, admin de outro tenant)
-- `Membership` — person_id, tenant_id, fracao_id (nullable — admin de plataforma não tem fração), role, scope (opcional — restringe o alcance de um role; ex: "Admin" não implica automaticamente acesso absoluto a tudo), estado (ativo/revogado), criado_em, criado_por. **É isto que concede acesso — nunca um QR ou token físico**
+- `Membership` — person_id, tenant_id, fracao_id (nullable — admin de plataforma não tem fração), role, scope (opcional — restringe o alcance de um role; ex: "Admin" não implica automaticamente acesso absoluto a tudo), estado (ativo/revogado), criado_em, criado_por. **É isto que concede acesso — nunca um QR ou token físico.** Campos de **meio de convocatória** (não são entidade nova — ADR-026 / ADR-041):
+  - `convocation_channel`: `registered_mail` | `authorized_email` | `other_admissible` | `unknown` — meio preferido / aplicável a este vínculo (art. 1432.º n.ºs 1–3). O sistema **aplica** a configuração validada; **não “decide direito” sozinho**
+  - `convocation_email` — endereço a usar quando o canal é `authorized_email` (o email de login da Person pode diferir)
+  - `authorized_in_acta_id`, `authorized_at` — evidência da manifestação de vontade lavrada em acta (art. 1432.º n.º 2): qual acta e quando. Obrigatórios para AUTO SEND em `authorized_email`
+  - **Regra de envio:** canal `unknown`, canal em falta, ou `authorized_email` sem autorização/`convocation_email` válidos → **HUMAN REVIEW**, **nunca AUTO SEND**
 - `Role` — enumerável mas **extensível por design**. **Conjunto inicial obrigatório:** `Owner`, `CoOwner`, `Proxy` (representante), `Admin`, `PlatformAdmin`, `Fiscalizacao`. Outros papéis (Accountant, Lawyer, Technician, CommitteeMember) ficam previstos na estrutura mas **não implementados agora** — não construir o que não tem utilizador ainda
 - `Fiscalizacao` — **Role de capacidade de controlo**, não uma entidade `ConselhoFiscal` nem um módulo de UI obrigatório. Quem o tem pode **confirmar** ações sensíveis (ex.: passar dinheiro a `verified` pelo método `second_person`); **não cria** essas ações. **Não é obrigatório atribuir** este role a ninguém num tenant; o modelo tem de o permitir desde F0. Sem pessoa com `Fiscalizacao`, o único caminho de verificação de dinheiro é `bank_deposit` (ver invariante 24)
 - `Permission`/`Scope` — não se implementa um RBAC completo agora, mas o modelo de dados já separa "que role tenho" de "sobre o que exatamente esse role tem poder", para não bloquear autorização granular no futuro (ver ADR-LOG)
@@ -136,12 +145,27 @@
 
 ### Assembleia / Governança
 
-- `Reuniao` — data, convocatória, áudio_url (temporário — ver política de retenção e invariante 9), transcricao, acta
+- `Reuniao` — data prevista / realizada, referência à convocatória (versão), ciclo de vida e segmentos de áudio (ver secção **Reunião — ciclo de vida e gravação** abaixo). O campo legado `áudio_url` deixa de ser o modelo canónico: o áudio vive em `RecordingSegment[]` (temporário — política de retenção e invariante 9). Uma `Reuniao` tem **no máximo uma** `Acta`
+- `RecordingSegment` — reuniao_id, ordinal (ordem de consumo STT), started_at, ended_at (nullable enquanto aberto), reason_ended (`user_stop_segment` | `technical_interrupt` | `user_end_meeting`), storage_path, byte_size, status. Vários segmentos por reunião; falha técnica **não** fecha a reunião
+- `ConvocationDispatch` — evidência de envio da **convocatória** (pode modelar-se como registos tipados de outbox/auditoria, sem exigir entidade “enterprise” pesada): channel usado, destination, sent_at, delivery_state, receipt_at / receipt_ref, convocation_version, initiated_by, failures[], resend_of (nullable — aponta para o envio anterior se for reenvio). **Não** serve para comunicar deliberações
+- `DeliberationNoticeDispatch` — evidência da **comunicação das deliberações aos ausentes** (art. 1432.º n.º 9). Campos análogos de canal/destino/entrega/recibo, mas domínio e pipeline **separados** da convocatória — preferências e envios podem coincidir na prática; o modelo trata-os como fluxos distintos
 - `Acta` — reunião, texto, deliberações[], votos[], participantes[], estados e artefactos descritos na secção **Acta — máquina de estados (v6.1)** abaixo
 - `Participante` (parte de `Acta`, não entidade própria) — **snapshot histórico no momento da reunião**, não uma vista live de `Membership`: nome_apresentado, qualidade (ex: Owner/Proxy), fracao_id, permilagem_no_momento, membership_id (referência opaca ao vínculo de origem, se ainda existir), presente (bool), representado_por (snapshot do proxy, nullable), estado_subscricao (`pendente` / `assinatura_manuscrita` / `assinatura_eletronica_qualificada` / `declaracao_eletronica` / `nao_aplicavel_ausente`), subscrito_em, meio_usado. **Alterações posteriores a Membership não reescrevem Participante**
 - `Deliberacao` — assunto, tipo, resolution_rule_id (qual regra determinou quórum/maioria aplicável), resultado, votos[]
 - `Voto` — **snapshot histórico** (não Membership live): fração, sentido (sim/não/abstenção), permilagem_no_momento, nome/qualidade do votante, proxy se aplicável
 - `ResolutionRule` — tipo_deliberacao, base_legal (artigo do CC/DL 268/94), quórum_1ª_convocatória, quórum_2ª_convocatória, maioria_necessária, fonte (lei vs. regulamento do condomínio, quando mais exigente que a lei). Seed inicial com os valores do artigo 1432.º; **motor de regras, não percentagem hardcoded no código**. **Não inventar uma % universal de "aprovação da Acta"** — a regra de aprovação da Acta segue `ResolutionRule` / lei / regulamento, com **gate de advogado antes de produção**
+
+### Pipeline de assembleia (separação explícita)
+
+Ordem conceptual — cada passo é um domínio/evento distinto; **não colapsar**:
+
+1. **Convocatória** — meio por condómino (`Membership.convocation_*`) + evidência em `ConvocationDispatch`
+2. **Realização da assembleia** — `Reuniao` (`DRAFT` → `IN_PROGRESS` → `ENDED`) com `RecordingSegment[]`
+3. **Aprovação da Acta** — máquina de estados até `APPROVED` (eficácia das deliberações)
+4. **Assinatura / subscrição** — presidente assina; presentes subscrevem (`SIGNATURES_PENDING` → `FINAL` / `PUBLISHED`)
+5. **Comunicação das deliberações aos ausentes** — `DeliberationNoticeDispatch` (art. 1432.º n.º 9), **nunca** misturada com o passo 1
+
+**Validação legal obrigatória (não fechada neste pacote):** contagem exacta dos **10 dias** de antecedência (expedição vs. receção — jurisprudência divergente); validade prática e consequências do **recibo de receção por email** (n.º 3) se o condómino não o enviar; meios `other_admissible` concretos. O produto **não inventa** percentagens nem fecha esta disputa.
 
 ### Cross-cutting: Autoridade de Decisão
 
@@ -152,6 +176,39 @@
 
 - `AuditEvent` — who, what, when, tenant, before, after, reason, source, request_id. Campos adicionais quando a origem é uma ação de IA: model, model_version, prompt_version, knowledge_version, tools_called, confidence, policy_version, human_approval. Também regista ruturas/reparações da hash-chain (ver secção Ledger)
 - `DomainEvent` — evento publicado por qualquer mudança de estado relevante (ex: `ObligationCreated`, `PaymentAllocated`, `ActaAprovada`); consumido por Jobs, Audit, e futuramente pela camada de IA — infraestrutura desde F0, não esperar por F6
+
+---
+
+## Reunião — ciclo de vida e gravação (complemento v6.1)
+
+Ciclo de vida da `Reuniao` (Assembleia):
+
+`DRAFT → IN_PROGRESS → ENDED` → processamento (STT sobre segmentos → elaboração da Acta)
+
+| Estado | Significado |
+|--------|-------------|
+| `DRAFT` | Reunião criada / agendada; ainda sem gravação activa |
+| `IN_PROGRESS` | Assembleia em curso; pode haver gravação activa, pausada por interrupção técnica, ou idle com sessão aberta |
+| `ENDED` | **Só** por intenção humana explícita de terminar a reunião (`user_end_meeting` no segmento final ou acção equivalente). Depois segue STT/Acta |
+
+Sub-estados de gravação (derivados dos segmentos, não uma segunda máquina paralela obrigatória):
+
+| Sub-estado | Significado |
+|------------|-------------|
+| `recording` | Segmento aberto a gravar |
+| `interrupted` | Último segmento fechado com `technical_interrupt`; reunião continua `IN_PROGRESS` |
+| `idle_open` | Reunião aberta sem segmento a gravar (ex.: após `user_stop_segment`, antes de retomar ou terminar) |
+
+### `RecordingSegment`
+
+- `reuniao_id`, `ordinal` (inteiro crescente), `started_at`, `ended_at`, `reason_ended` (`user_stop_segment` | `technical_interrupt` | `user_end_meeting`), `storage_path`, `byte_size`, `status`
+- Persistência **progressiva** (chunks / upload resumível) — um ciclo MediaRecorder ≠ uma nova `Reuniao`
+- STT consome segmentos por **ordinal** crescente
+- **Uma Acta por Reuniao**; vários segmentos alimentam a mesma Acta
+
+### Áudio e retenção
+
+A política de retenção **não muda**: hard-delete do áudio da Assembleia após `Acta.APPROVED` (invariante 9) cobre **todos** os segmentos dessa `Reuniao` de uma vez. O mesmo princípio de continuidade aplica-se a reuniões admin com MediaRecorder (F4): segmentos onde houver gravação contínua; áudio admin continua a eliminar-se após extração do resumo.
 
 ---
 
@@ -191,7 +248,7 @@ Estados, nesta ordem:
 
 ### Áudio e APPROVED
 
-- Hard-delete do áudio da Assembleia **após** a Acta entrar em `APPROVED` (ver invariante 9)
+- Hard-delete do áudio da Assembleia **após** a Acta entrar em `APPROVED` (ver invariante 9) — aplica-se a **todos** os `RecordingSegment` da `Reuniao`
 - Se o job de eliminação falhar ou o fluxo ficar **preso depois de APPROVED** (ex.: nunca chega a `PRINT_READY` / `PUBLISHED`), o áudio **não** deve permanecer indefinidamente: política operacional = retry + alerta + eliminação forçada após prazo configurável, registando `AuditEvent`. O conteúdo aprovado (texto + hashes) é a referência; o áudio não é prova legal
 
 ### Correção legal (mantida)
@@ -331,8 +388,8 @@ Política **diferenciada por categoria** — **"guardar para sempre" não é uni
 | Instrumentos legais do condomínio (Regulamento Interno, Actas em estado final/publicado, deliberações) | Retenção longa / indefinida — o original **é** o instrumento legal |
 | Documentos financeiros gerados (`FinancialDocument`) | Retenção alinhada a obrigações legais/contabilísticas aplicáveis; reconstruíveis a partir do Ledger |
 | Documentos pessoais de onboarding (comprovativo IBAN, eventual ID) | Minimização RGPD — retenção limitada; após purga do conteúdo, **hash + metadados** persistem para auditoria |
-| Áudio de Assembleia | Hard-delete após `Acta.APPROVED` (com fallback se stuck) |
-| Áudio de Reunião Admin | Eliminado após extração do resumo |
+| Áudio de Assembleia | Hard-delete de **todos** os `RecordingSegment` após `Acta.APPROVED` (com fallback se stuck) |
+| Áudio de Reunião Admin | Eliminado após extração do resumo (todos os segmentos da sessão, se aplicável) |
 
 Prazos operacionais concretos (dias) para dados pessoais e áudio: **validar com advogado/DPO antes de produção**.
 
@@ -364,7 +421,7 @@ Formato e SLA de exportação: decisão de implementação posterior; a arquitet
 6. **A autoridade necessária para uma decisão operacional (adjudicar orçamento, renovar contrato) é determinada por `AuthorityRule`** (tipo de decisão → limiar de valor → regulamento do condomínio, se mais exigente) — substitui o "Orçamento > limiar → assembleia adjudica" hardcoded como regra única (mesma correção do ADR-005, aplicada agora a este domínio).
 7. `ReuniaoAdmin` só se torna visível a condóminos se explicitamente promovida para uma `Acta`/`Deliberacao` — nunca por defeito. **A promoção é sempre informativa/contextual, nunca documento probatório.** Se existir documento formal (contrato, proposta escrita), é esse — não o resumo gerado por LLM — que a acta deve referenciar como prova.
 8. **Fecho de mês (`AccountingPeriod`) nunca fica bloqueado.** Fecha sempre na data prevista, com três blocos explícitos e distintos: saldo contabilístico fechado (posted), movimentos pendentes de confirmação (pending), e ajustes lançados depois do fecho (adjustments_after_close). Estes três números nunca se somam silenciosamente num único "saldo" — ficam sempre visíveis em separado, para o relatório ser auditável.
-9. **Retenção de áudio (RGPD):** o áudio de `Reuniao` (Assembleia) é eliminado (hard-delete) após a Acta entrar em `APPROVED`; o áudio de `ReuniaoAdmin` é eliminado logo após a extração do resumo. Se o fluxo ficar preso após `APPROVED`, aplica-se retry + alerta + eliminação forçada com `AuditEvent`. Os prazos operacionais concretos são parâmetros a validar com advogado/DPO antes de produção.
+9. **Retenção de áudio (RGPD):** o áudio de `Reuniao` (Assembleia) — **todos** os `RecordingSegment` — é eliminado (hard-delete) após a Acta entrar em `APPROVED`; o áudio de `ReuniaoAdmin` é eliminado logo após a extração do resumo. Se o fluxo ficar preso após `APPROVED`, aplica-se retry + alerta + eliminação forçada com `AuditEvent`. Os prazos operacionais concretos são parâmetros a validar com advogado/DPO antes de produção.
 10. **Toda alteração de estado relevante gera um `AuditEvent`** — sem exceção, incluindo ações tomadas por especialistas de IA e eventos de rutura/reparação da hash-chain.
 11. **QR Code nunca é mecanismo de autenticação nem credencial de acesso.** O acesso de um condómino só existe através de um `Membership` criado pelo fluxo de `Invitation` (ver 04-PORTAS). Não existe, em nenhuma circunstância, um QR físico afixado numa fração, hall ou zona comum que conceda acesso a saldo, dívidas, documentos, recibos ou votação — esta é uma decisão arquitetural fechada (ver ADR-LOG).
 12. **`BankConnection` liga-se à conta bancária do condomínio, nunca à pessoa do admin.** Troca de administrador não deve, por si só, invalidar a ligação bancária existente — só se pede nova autorização se o consentimento em vigor realmente exigir.
@@ -374,7 +431,7 @@ Formato e SLA de exportação: decisão de implementação posterior; a arquitet
 16. **A recomendação de fornecedor considera "melhor valor" (preço + SLA + avaliação + histórico + garantias), nunca só o preço mais baixo.** Os pesos usados (`criterios_pesos`) ficam guardados e consultáveis.
 17. **Nunca apresentar uma confiança numérica artificialmente precisa quando os dados são fracos.** Se falta informação, a `confianca_recomendação` é qualitativa ("Média — faltam dados sobre garantia"), nunca um score como "87/100".
 18. **`AuthorityRule` responde "quem pode autorizar esta ação concreta, neste contexto", nunca "quem pode aprovar contratos".** `Contract` é um dos contextos que pode originar uma decisão — não é o centro da autoridade. O centro é a decisão em si, registada em `Approval`.
-19. **Uma entidade só se cria quando existe necessidade real de persistência, integridade ou comportamento que as entidades existentes não conseguem representar** — nunca "porque um sistema enterprise provavelmente teria uma". Por isto **não existe entidade `ConselhoFiscal`**: usa-se o Role `Fiscalizacao`.
+19. **Uma entidade só se cria quando existe necessidade real de persistência, integridade ou comportamento que as entidades existentes não conseguem representar** — nunca "porque um sistema enterprise provavelmente teria uma". Por isto **não existe entidade `ConselhoFiscal`**: usa-se o Role `Fiscalizacao`. Preferência de convocatória fica em campos de `Membership`, não numa entidade `ConvocationDeliveryPreference`.
 20. **Qualquer alteração material ao objeto de uma decisão depois de aprovada invalida essa `Approval` — nunca se reaproveita silenciosamente.** Inclui preço, fornecedor, duração, âmbito, condições, risco, ou autoridade necessária. `Orcamento.decision_brief_versao` incrementa; a `Approval` antiga fica marcada como referente a uma versão anterior.
 21. **Aprovação da Acta ≠ subscrição/assinatura da Acta (art. 1.º n.º 3 do DL 268/94).** A eficácia das deliberações depende da aprovação da ata, **independentemente de estar assinada**. Assinatura/subscrição é sobre o **documento**, não sobre a **validade da decisão**. Distinto também de voto de deliberação e de presença.
 22. **Modelo de assinatura/subscrição da Acta:** a lei distingue assinatura (presidente) de subscrição (todos os presentes), e admite manuscrita / eletrónica qualificada / declaração eletrónica. `Participante.estado_subscricao` regista por pessoa. Validar com advogado especializado em propriedade horizontal antes de produção.
@@ -385,3 +442,6 @@ Formato e SLA de exportação: decisão de implementação posterior; a arquitet
 27. **Funcionalidades financeiras/governança nucleares nunca dependem da disponibilidade de um provider LLM.** Ver saldo, votar, ver documentos, consultar Ledger têm de funcionar com Groq (ou qualquer LLM) em baixo — a IA é automação sobre o domínio, nunca dependência bloqueante.
 28. **Saída do tenant / portabilidade é requisito arquitetural** — exportação financeira, documentos, Actas, histórico operacional e auditoria relevante devem ser possíveis; implementação completa pode ser posterior, o desenho não a pode impossibilitar (ADR-037).
 29. **Efeitos assíncronos críticos (jobs, notificações, side-effects financeiros/governança) são idempotentes e observáveis desde F0** — retry seguro, deduplicação por chave, visibilidade de falha; "fire-and-forget" sem telemetria é insuficiente (ADR-038).
+30. **Convocatória ≠ comunicação das deliberações (art. 1432.º).** Meio e evidência de convocatória (`Membership.convocation_*` + `ConvocationDispatch`) são distintos de `DeliberationNoticeDispatch` (n.º 9). Canal `unknown` / autorização em falta → **HUMAN REVIEW**, nunca AUTO SEND. Contagem dos 10 dias e efeitos do recibo de email: **validação legal obrigatória** — o produto não fecha a disputa jurisprudencial.
+31. **Falha técnica de gravação nunca termina a `Reuniao`.** Só intenção humana (`user_end_meeting` / acção equivalente) passa a `ENDED`. Interrupção técnica → segmento com `technical_interrupt`; reunião permanece `IN_PROGRESS` (sub-estado `interrupted` / `idle_open`).
+32. **Uma Acta por `Reuniao`; STT consome `RecordingSegment` por ordinal.** Ciclos MediaRecorder são segmentos da mesma reunião, não reuniões novas. Hard-delete pós-`APPROVED` cobre todos os segmentos.

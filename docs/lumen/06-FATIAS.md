@@ -3,6 +3,8 @@
 **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
 > Cada fatia é entregável e testável independentemente.
+>
+> **Nota complementar (v6.1):** F5 inclui convocatória multi-canal (art. 1432.º) e gravação multi-segmento; continuidade MediaRecorder também em F4 (reuniões admin).
 > Nenhuma fatia posterior deve bloquear a anterior.
 > Precedência em caso de conflito: **ADR-LOG > 02-DOMINIO > 06-FATIAS > diagramas > resto** (ver `00-INDICE.md`).
 > Gates de produção: ver [PRODUCTION-GATES.md](PRODUCTION-GATES.md).
@@ -216,7 +218,7 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 | Approval | Snapshot da versão aprovada; alteração material invalida (ADR-027) |
 | Contract (leve) | Renovação + aviso prévio; sem procurement autónomo (Tier 3) |
 | Centro de Operações | Decisões/exceções, não navegação por objetos |
-| Reuniões Admin | Whisper/STT da `dev` possível; resumo informativo; áudio eliminado após resumo (RGPD) |
+| Reuniões Admin | Whisper/STT da `dev` possível; resumo informativo; áudio eliminado após resumo (RGPD). **Continuidade de gravação** (`RecordingSegment` / mesma sessão face a interrupção técnica) onde existir MediaRecorder — mesmo princípio que F5 (ADR-042) |
 
 **Critério:** ticket com prioridade; Decision Brief; Approval versionada; lembrete de contrato; reunião resumida com áudio purgado.
 
@@ -230,15 +232,17 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 | Item | Transplante (dev) | Detalhe |
 |------|-------------------|---------|
-| Áudio → texto | `stt.ts` (Whisper chunk 25MB) | Overlap ~30s + timestamps de diarização |
-| Acta automática | `atas-llm.ts` + helpers | LLM a partir da transcrição |
+| Áudio → texto | `stt.ts` (Whisper chunk 25MB) | Overlap ~30s + timestamps de diarização; consome `RecordingSegment` por ordinal |
+| Gravação multi-segmento | Novo (sobre MediaRecorder) | `Reuniao` contínua: `DRAFT → IN_PROGRESS → ENDED`; segmentos com `reason_ended`; falha técnica ≠ fim da reunião (ADR-042) |
+| Acta automática | `atas-llm.ts` + helpers | LLM a partir da transcrição; **uma Acta por Reuniao** |
 | ResolutionRule | Novo | Seed art. 1432.º; regulamento pode ser mais exigente |
 | Votação digital | `routes/atas.ts` | Por fração, ponderada; step-up |
-| Convocatória | Novo | LLM gera; camada jurídica revê |
+| Convocatória multi-canal | Novo | Meio por `Membership` (`registered_mail` / `authorized_email` / …); `ConvocationDispatch`; `unknown` → HUMAN REVIEW, nunca AUTO SEND (ADR-041) |
+| DeliberationNotice | Novo | Comunicação aos ausentes (art. 1432.º n.º 9) — **separada** da convocatória |
 | Deliberações | Novo | Eficazes a partir da **aprovação** da Acta (DL 268/94 art. 1.º n.º 3), independentemente de assinatura |
 | Fluxo Acta (estados) | Novo | Ver máquina de estados abaixo |
 | Voto remoto (futuro) | Novo | Só com assinatura oficial (CMD / CC) |
-| Retenção áudio | Novo | Hard-delete após aprovação; prazo com DPO/advogado antes de produção |
+| Retenção áudio | Novo | Hard-delete de **todos** os segmentos após aprovação; prazo com DPO/advogado antes de produção |
 
 ### Estados da Acta (v6.1)
 
@@ -260,7 +264,7 @@ DRAFT
 - Consulta no portal piloto/comercial: só Actas `PUBLISHED` (ou equivalente explícito de publicação)
 - Validar com advogado de propriedade horizontal antes de produção (ADR-034)
 
-**Critério:** áudio → transcrição → Acta; quórum via `ResolutionRule`; deliberação eficaz na aprovação; votação no portal; assinatura/subscrição; documento final vs. aprovado; áudio eliminado após aprovação.
+**Critério:** áudio multi-segmento → transcrição ordenada → Acta; convocatória por meio com evidência de envio; quórum via `ResolutionRule`; deliberação eficaz na aprovação; votação no portal; assinatura/subscrição; documento final vs. aprovado; comunicação de deliberações separada; áudio eliminado após aprovação.
 
 **Lançamento comercial geral:** F5 completo + [PRODUCTION-GATES.md](PRODUCTION-GATES.md).
 

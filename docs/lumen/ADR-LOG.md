@@ -4,6 +4,8 @@
 
 > Formato leve, não processo pesado: uma entrada por decisão, decisão + estado + justificação + o que fica em aberto. Objetivo é impedir que o projeto se torne um conjunto de documentos contraditórios à medida que cresce — não burocratizar decisões de 1 founder.
 >
+> **Nota complementar (v6.1):** ADRs 041–042 (convocatória por meio por condómino; `Reuniao` contínua + `RecordingSegment`). Estado ACEITE para arquitectura de produto; itens legais abertos assinalados como *legal validation required*.
+>
 > Estado possível: `ACEITE` (construir assim), `ACEITE — validar antes de produção` (a direção está certa, mas há um parâmetro concreto a confirmar com um profissional antes de ir a produção), `FECHADA — não reabrir` (decisão definitiva, não voltar a discutir sem novo facto material).
 
 ## Regra de Precedência (para quem implementa)
@@ -601,6 +603,56 @@ O piloto **não** autoriza a omitir invariantes de domínio (dinheiro, Ledger, A
 **Justificação:** misturar "já vendemos a toda a gente" com "ainda estamos a validar o piloto" cria pressão para saltar gates (ADR-039) e a prometer voto/email perfeitos cedo demais (ADR-035).
 
 **Impacto:** 04-PORTAS, 06-FATIAS, 07-BUSINESS-PLAN, ADR-035, ADR-039.
+
+---
+
+## ADR-041 — Convocatória por meio por condómino (art. 1432.º)
+
+**Estado:** ACEITE (arquitectura de produto). **Gates legais em aberto** — ver abaixo.
+
+**Decisão:**
+
+1. O meio de convocatória **não é uniforme** por tenant: regista-se **por `Membership`** (campos, não entidade nova — ADR-026):
+   - `convocation_channel`: `registered_mail` | `authorized_email` | `other_admissible` | `unknown`
+   - `convocation_email` quando o canal é `authorized_email`
+   - `authorized_in_acta_id`, `authorized_at` — evidência da manifestação de vontade lavrada em acta (art. 1432.º n.º 2)
+2. Evidência de envio: `ConvocationDispatch` (canal, destino, sent_at, delivery_state, receipt_at/receipt_ref, convocation_version, initiated_by, failures, resend_of) — pode ser outbox/auditoria tipada.
+3. **`DeliberationNoticeDispatch` é separado** (art. 1432.º n.º 9) — convocatória ≠ comunicação das deliberações aos ausentes.
+4. Canal `unknown`, em falta, ou email autorizado sem evidência/`convocation_email` → **HUMAN REVIEW**, **nunca AUTO SEND**.
+5. Pipeline explícito: convocatória → realização → aprovação da Acta → assinatura/subscrição → comunicação aos ausentes.
+
+**Justificação:** o art. 1432.º n.º 1 (carta registada / aviso com recibo) e n.ºs 2–3 (email só com vontade lavrada e recibo) tornam incorrecto um “enviar a todos por email” cego. Misturar convocatória com o n.º 9 corrompe auditoria e risco legal.
+
+**Legal validation required (não fechado neste ADR):**
+
+- Contagem exacta dos **10 dias** de antecedência (expedição vs. receção) — jurisprudência divergente; o produto **não** escolhe um lado.
+- Validade prática do recibo de receção por email e consequências se o condómino não o enviar.
+- Conteúdo concreto de `other_admissible`.
+
+**Impacto:** 02-DOMINIO, 04-PORTAS, 06-FATIAS F5, PRODUCTION-GATES, diagramas.
+
+---
+
+## ADR-042 — Reunião contínua + RecordingSegment
+
+**Estado:** ACEITE (arquitectura de produto). Retenção de áudio inalterada (ADR-011 / invariante 9); DPO confirma cobertura multi-segmento antes de produção.
+
+**Decisão:**
+
+1. Ciclo de vida da `Reuniao`: `DRAFT → IN_PROGRESS → ENDED`, depois processamento STT/Acta.
+2. Sub-estados de gravação derivados dos segmentos: `recording` | `interrupted` | `idle_open`.
+3. `RecordingSegment`: reuniao_id, ordinal, started_at, ended_at, reason_ended (`user_stop_segment` | `technical_interrupt` | `user_end_meeting`), storage_path, byte_size, status.
+4. **Intenção humana ≠ falha técnica:** `technical_interrupt` **nunca** põe a reunião em `ENDED`; só `user_end_meeting` (ou acção humana equivalente) o faz.
+5. Persistência progressiva (chunks / upload resumível); um ciclo MediaRecorder = segmento, **não** uma `Reuniao` nova.
+6. **Uma Acta por Reuniao**; STT consome segmentos por ordinal.
+7. Hard-delete após `Acta.APPROVED` cobre **todos** os segmentos da reunião (política v6.1 mantida).
+8. Continuidade de gravação aplica-se a qualquer fluxo MediaRecorder (Assembleia F5 e Reuniões Admin F4).
+
+**Justificação:** no código actual da Fonte, cada ciclo MediaRecorder + “Criar reunião” pode gerar um INSERT novo — isso parte a assembleia em várias “reuniões” e várias actas potenciais. O domínio LUMEN trata a reunião como sessão contínua com segmentos.
+
+**Em aberto:** nomes exactos no schema da Fonte (`rascunho` / `processando_audio`, etc.) alinham-se na implementação sem inventar máquina paralela desnecessária; retenção multi-segmento a confirmar com DPO (mesmo critério pós-`APPROVED`).
+
+**Impacto:** 02-DOMINIO, 06-FATIAS F4/F5, diagramas, implementação futura de recording.
 
 ---
 

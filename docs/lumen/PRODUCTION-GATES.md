@@ -4,6 +4,8 @@
 
 > Gates obrigatórios **antes** de dinheiro real, votos com efeitos, ou actos com consequências legais em produção multi-tenant.  
 > **Profissionais (advogado, DPO, contabilista, segurança) são gates — não designers do produto.** Validam e assinam critérios; não redesenham o LUMEN no Miro.
+>
+> **Nota complementar (v6.1):** linha Legal de convocatória art. 1432.º (meio por condómino; 10 dias e recibo de email = *legal validation required*).
 
 Narrativa comercial e limites de autonomia: [07-BUSINESS-PLAN](07-BUSINESS-PLAN.md). Domínio: [02-DOMINIO](02-DOMINIO.md). Orquestra: [03-ORQUESTRA](03-ORQUESTRA.md).
 
@@ -23,7 +25,7 @@ Piloto pode operar com âmbito reduzido (ex.: Essencial, sem votação) **desde 
 | Votação | Quórum/maioria via `ResolutionRule`; ponderação por permilagem; auditabilidade do voto | Advogado |
 | ResolutionRules | Seed legal + regulamento mais exigente; hierarquia lei > … documentada | Advogado |
 | Poderes / Authority | Quem pode autorizar o quê (`AuthorityRule` / roles); human override | Advogado |
-| Convocatórias / avisos | Prazos e canais mínimos legais respeitados ou explicitamente fora de âmbito | Advogado |
+| Convocatórias / avisos | Meio por condómino (art. 1432.º): carta registada / email autorizado com evidência em acta / outros admissíveis; `unknown` → HUMAN REVIEW (nunca AUTO SEND); `ConvocationDispatch` ≠ `DeliberationNoticeDispatch` (n.º 9). **Legal validation required:** contagem dos 10 dias (expedição vs. receção) e efeitos do recibo de email — **não fechados pelo produto** | Advogado |
 
 **FAIL se:** LLM ou Risk Engine aparecerem como decisor de deliberação ou de validade jurídica da Acta.
 

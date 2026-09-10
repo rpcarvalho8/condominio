@@ -2,6 +2,8 @@
 
 > **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
+> **Nota complementar (v6.1):** sequência de gravação multi-segmento (`RecordingSegment`); nota convocatória ≠ comunicação de deliberações (art. 1432.º n.º 9).
+>
 > **Nota v6.1:** Diagrama 0 com `Fiscalizacao` e hash-chain no Ledger; Domain Kernel com Outbox/idempotência; onboarding com verificação de contacto (não identidade plena) e portal sem voto por defeito em F3; sequência Acta sem Risk Engine a aprovar (aprovação = condóminos/`ResolutionRule`); financeiro com `cash_status` / `verification_method`; roadmap com Pilot gate (pós-F3 Essencial) e General commercial gate (pós-F5 + Production Gates); IoT fora do comercial (Tier 3).
 >
 > Todos os blocos são Mermaid válido, prontos a colar no Miro.
@@ -253,6 +255,43 @@ sequenceDiagram
         Portal->>Portal: Volta a DRAFT / nova SUBMITTED_FOR_APPROVAL<br/>(aprovação anterior invalidada se conteúdo mudou)
         Portal-->>Admin: Correção antes de nova submissão
     end
+```
+
+### 3.1b Gravação multi-segmento (Assembleia — complemento v6.1)
+
+> **Nota:** convocatória (`ConvocationDispatch`) ≠ comunicação das deliberações aos ausentes (`DeliberationNoticeDispatch`, art. 1432.º n.º 9). Falha técnica de MediaRecorder **nunca** põe a `Reuniao` em `ENDED`.
+
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant Portal as Portal Admin (PWA)
+    participant Seg as RecordingSegment
+    participant STT as Groq Whisper
+    participant Acta as Acta (1 por Reuniao)
+
+    Admin->>Portal: Inicia assembleia
+    Portal->>Portal: Reuniao DRAFT → IN_PROGRESS
+    Admin->>Portal: Inicia gravação
+    Portal->>Seg: Segmento ordinal=1 (recording)
+    Note over Portal,Seg: Persistência progressiva (chunks / upload)
+
+    alt Interrupção técnica (browser / MediaRecorder)
+        Portal->>Seg: Fecha segmento reason=technical_interrupt
+        Portal->>Portal: Sub-estado interrupted / idle_open<br/>Reuniao continua IN_PROGRESS
+        Admin->>Portal: Retoma gravação
+        Portal->>Seg: Segmento ordinal=2 (recording)
+    else Admin pára segmento sem terminar reunião
+        Portal->>Seg: reason=user_stop_segment
+        Portal->>Portal: idle_open — mesma Reuniao
+    end
+
+    Admin->>Portal: Terminar reunião (intenção humana)
+    Portal->>Seg: reason=user_end_meeting
+    Portal->>Portal: Reuniao → ENDED
+    Portal->>STT: Consome segmentos por ordinal
+    STT-->>Portal: Transcrição completa
+    Portal->>Acta: Elabora / actualiza a única Acta da Reuniao
+    Note over Acta: Após Acta.APPROVED — hard-delete de TODOS os segmentos
 ```
 
 ### 3.2 Reuniões Admin (F4.1)
