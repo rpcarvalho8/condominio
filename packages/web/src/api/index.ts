@@ -26,8 +26,12 @@ import { ticketsRoutes } from "./routes/tickets";
 import { emailInboxRoutes, scheduleEmailInboxSync } from "./routes/email-inbox";
 import { uploadsRoutes } from "./routes/uploads";
 import { createKernelRoutes } from "./routes/kernel";
+import { createPlatformRoutes } from "./routes/platform";
 import { db } from "./database";
 import { getKernelTenantId } from "./lib/tenant";
+import { getPlatformDb } from "./platform/database";
+import { createLocalFileTenantProvisioner } from "./infra/tenant-db-provisioner";
+import { requireActiveTenant } from "./application/platform/provision-tenant";
 import { rehydrateDividasFromDB } from "./lib/identity-matrix";
 
 // ─── Sync imediato no arranque do servidor ────────────────────────────────────
@@ -174,9 +178,25 @@ scheduleAvisosCron(); // agora é no-op, mantém o export activo
 // ─── Recibos cron (mantido para compatibilidade — funcionalidade migrada para transicao-cron) ──
 scheduleRecibosCron();
 
-const kernelRoutes = createKernelRoutes({
+const enforceTenantDirectory =
+  String(process.env.PLATFORM_ENFORCE_DIRECTORY ?? "").trim() === "1";
+
+const kernelDeps = {
   db,
   getTenantId: getKernelTenantId,
+  assertTenantActive: enforceTenantDirectory
+    ? async (tenantId: string) => {
+        await requireActiveTenant(getPlatformDb(), tenantId);
+      }
+    : undefined,
+};
+
+const kernelRoutes = createKernelRoutes(kernelDeps);
+
+const platformRoutes = createPlatformRoutes({
+  kernel: kernelDeps,
+  platformDb: getPlatformDb(),
+  provisioner: createLocalFileTenantProvisioner(),
 });
 
 const app = new Hono()
@@ -220,7 +240,8 @@ const app = new Hono()
   .route("/tickets", ticketsRoutes)
   .route("/email-inbox", emailInboxRoutes)
   .route("/uploads", uploadsRoutes)
-  .route("/kernel", kernelRoutes);
+  .route("/kernel", kernelRoutes)
+  .route("/platform", platformRoutes);
 
 scheduleEmailInboxSync();
 

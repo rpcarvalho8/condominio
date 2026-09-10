@@ -7,6 +7,11 @@ export type KernelDeps = {
   db: KernelDb;
   getTenantId: () => string;
   now?: () => Date;
+  /**
+   * Optional TenantDirectory gate (F0-B).
+   * When set, unknown/inactive tenants fail closed with 403.
+   */
+  assertTenantActive?: (tenantId: string) => Promise<void>;
 };
 
 export function kernelNow(deps: KernelDeps): Date {

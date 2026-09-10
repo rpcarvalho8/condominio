@@ -41,6 +41,14 @@ export function createRequireActiveMembership(deps: KernelDeps) {
       return c.json({ message: "Contexto de tenant inválido" }, 403);
     }
 
+    if (deps.assertTenantActive) {
+      try {
+        await deps.assertTenantActive(tenantId);
+      } catch {
+        return c.json({ message: "Contexto de tenant inválido" }, 403);
+      }
+    }
+
     const personRepo = createPersonRepo(deps.db);
     const membershipRepo = createMembershipRepo(deps.db);
     const person = await personRepo.findByUserId(user.id);
