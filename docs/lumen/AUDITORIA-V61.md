@@ -51,6 +51,7 @@ Auditoria adversarial após aplicar o hardening. Precedência: **ADR-LOG > 02-DO
 | Versões misturadas v3–v6 no pacote original | Uniformizado **v6.1** + data 2026-09-10 |
 | Business plan misturava BuildingMind como marca activa | LUMEN primario; BuildingMind = nome antigo |
 | IoT no tier Enterprise | Removido do comercial → Tier 3 Future |
+| Checklist founder sem critério champion/≤60 dias | Acrescentado em `07` + WIP limit em `06` |
 
 ### Future Decisions (registadas, não introduzidas no core)
 
