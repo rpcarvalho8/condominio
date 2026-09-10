@@ -1,9 +1,9 @@
 import { Hono } from "hono";
-import { desc, eq } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 import fs from "node:fs";
 import path from "node:path";
 import { db } from "../database";
-import { reunioes } from "../database/schema";
+import { reunioes, recordingSegments } from "../database/schema";
 import { requireAdmin } from "../middleware/auth";
 import { transcribeAudioFilePath } from "../lib/stt";
 import { gerarResumoReuniao } from "../lib/reuniao-llm";
@@ -55,7 +55,32 @@ function resolveAudioFromBody(uploadId: string, audioPathIn: string): {
 /** STT + LLM → UPDATE do registo. Corre após create/reprocess (await no pedido HTTP). */
 async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
   const [row] = await db.select().from(reunioes).where(eq(reunioes.id, reuniaoId)).limit(1);
-  if (!row?.audioPath) {
+  if (!row) {
+    return;
+  }
+
+  const segments = await db
+    .select()
+    .from(recordingSegments)
+    .where(eq(recordingSegments.reuniaoId, reuniaoId))
+    .orderBy(asc(recordingSegments.ordinal));
+
+  const audioJobs: Array<{ absolutePath: string; label: string }> = [];
+  for (const seg of segments) {
+    if (!seg.storagePath) continue;
+    const absolutePath = path.join(process.cwd(), seg.storagePath);
+    if (fs.existsSync(absolutePath)) {
+      audioJobs.push({ absolutePath, label: path.basename(absolutePath) });
+    }
+  }
+  if (audioJobs.length === 0 && row.audioPath) {
+    const absolutePath = path.join(process.cwd(), row.audioPath);
+    if (fs.existsSync(absolutePath)) {
+      audioJobs.push({ absolutePath, label: path.basename(absolutePath) });
+    }
+  }
+
+  if (audioJobs.length === 0) {
     await db.update(reunioes).set({
       status: "erro_audio",
       resumo: "Sem ficheiro de áudio associado.",
@@ -64,21 +89,23 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
     return;
   }
 
-  const absolutePath = path.join(process.cwd(), row.audioPath);
-  if (!fs.existsSync(absolutePath)) {
-    await db.update(reunioes).set({
-      status: "erro_audio",
-      resumo: "Ficheiro de áudio não encontrado no disco.",
-      updatedAt: new Date(),
-    }).where(eq(reunioes.id, reuniaoId));
-    return;
-  }
-
   try {
-    console.log("[STT] Iniciando transcrição do áudio...", { reuniaoId, path: row.audioPath });
-    const transcricao = await transcribeAudioFilePath(absolutePath, path.basename(row.audioPath), {
-      cacheKey: `reuniao_${reuniaoId}`,
-    });
+    const parts: string[] = [];
+    for (let i = 0; i < audioJobs.length; i++) {
+      const job = audioJobs[i]!;
+      console.log("[STT] Transcrevendo segmento...", { reuniaoId, i: i + 1, path: job.absolutePath });
+      const text = await transcribeAudioFilePath(job.absolutePath, job.label, {
+        cacheKey: `reuniao_${reuniaoId}_s${i + 1}`,
+      });
+      if (text?.trim()) {
+        parts.push(
+          audioJobs.length > 1
+            ? `--- Segmento ${i + 1}/${audioJobs.length} ---\n${text.trim()}`
+            : text.trim(),
+        );
+      }
+    }
+    const transcricao = parts.join("\n\n");
     if (!transcricao?.trim()) {
       await db.update(reunioes).set({
         status: "erro_audio",
@@ -92,6 +119,7 @@ async function runReuniaoSttPipeline(reuniaoId: string): Promise<void> {
     console.log("[STT] Transcrição concluída. Invocando LLM...", {
       reuniaoId,
       chars: transcricao.length,
+      segments: audioJobs.length,
     });
 
     let tipo = row.tipo || "interna";
@@ -157,6 +185,144 @@ export const reunioesRoutes = new Hono()
   .get("/", async (c) => {
     const rows = await db.select().from(reunioes).orderBy(desc(reunioes.data), desc(reunioes.createdAt));
     return c.json(rows);
+  })
+  /** Abre uma reunião em curso (antes / ao iniciar a primeira gravação). */
+  .post("/open", async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({} as any));
+      const titulo = String(body.titulo ?? "").trim();
+      const dataRaw = String(body.data ?? "").trim();
+      const participantes = String(body.participantes ?? "").trim() || null;
+      if (!titulo) return c.json({ message: "Título é obrigatório." }, 400);
+      if (!dataRaw) return c.json({ message: "Data é obrigatória." }, 400);
+      const dataReuniao = new Date(dataRaw);
+      if (Number.isNaN(dataReuniao.getTime())) return c.json({ message: "Data inválida." }, 400);
+
+      const [created] = await db.insert(reunioes).values({
+        titulo,
+        data: dataReuniao,
+        tipo: "interna",
+        fornecedorNome: null,
+        participantes,
+        transcricao: null,
+        resumoJson: null,
+        resumo: "Reunião em curso — gravação contínua (vários segmentos possíveis).",
+        audioPath: null,
+        status: "em_curso",
+      }).returning();
+
+      return c.json(created, 201);
+    } catch (error: any) {
+      return c.json({ message: String(error?.message ?? "Erro inesperado.") }, 500);
+    }
+  })
+  .get("/:id/segments", async (c) => {
+    const id = c.req.param("id");
+    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
+    const segs = await db
+      .select()
+      .from(recordingSegments)
+      .where(eq(recordingSegments.reuniaoId, id))
+      .orderBy(asc(recordingSegments.ordinal));
+    return c.json({ reuniao: row, segments: segs });
+  })
+  /** Persiste um segmento de áudio na mesma reunião (não cria reunião nova). */
+  .post("/:id/segments", async (c) => {
+    try {
+      const id = c.req.param("id");
+      const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+      if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
+      if (row.status !== "em_curso" && row.status !== "rascunho") {
+        return c.json({
+          message: "Só se podem acrescentar segmentos a uma reunião em curso.",
+        }, 400);
+      }
+
+      const body = await c.req.parseBody();
+      const uploadId = String(body.uploadId ?? "").trim();
+      const audioPathIn = String(body.audioPath ?? "").trim();
+      const reasonEnded = String(body.reasonEnded ?? "user_stop_segment").trim();
+      const allowedReasons = new Set([
+        "user_stop_segment",
+        "technical_interrupt",
+        "user_end_meeting",
+      ]);
+      if (!allowedReasons.has(reasonEnded)) {
+        return c.json({ message: "reasonEnded inválido." }, 400);
+      }
+
+      const resolved = resolveAudioFromBody(uploadId, audioPathIn);
+      if ("error" in resolved) return c.json({ message: resolved.error }, resolved.status);
+
+      const existing = await db
+        .select()
+        .from(recordingSegments)
+        .where(eq(recordingSegments.reuniaoId, id));
+      const ordinal = existing.length + 1;
+      const byteSize = fs.existsSync(resolved.absolutePath)
+        ? fs.statSync(resolved.absolutePath).size
+        : 0;
+
+      const [seg] = await db.insert(recordingSegments).values({
+        reuniaoId: id,
+        ordinal,
+        startedAt: new Date(),
+        endedAt: new Date(),
+        reasonEnded,
+        storagePath: resolved.relativePath,
+        byteSize,
+        status: "closed",
+      }).returning();
+
+      // Compat: audioPath aponta para o primeiro segmento
+      if (!row.audioPath) {
+        await db.update(reunioes).set({
+          audioPath: resolved.relativePath,
+          status: "em_curso",
+          updatedAt: new Date(),
+        }).where(eq(reunioes.id, id));
+      } else {
+        await db.update(reunioes).set({
+          status: "em_curso",
+          updatedAt: new Date(),
+        }).where(eq(reunioes.id, id));
+      }
+
+      return c.json({ segment: seg, reuniaoId: id }, 201);
+    } catch (error: any) {
+      return c.json({ message: String(error?.message ?? "Erro inesperado.") }, 500);
+    }
+  })
+  /**
+   * Termina a reunião por intenção humana e dispara STT sobre todos os segmentos.
+   * Falha técnica NÃO deve chamar este endpoint.
+   */
+  .post("/:id/end-meeting", async (c) => {
+    const id = c.req.param("id");
+    const [row] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    if (!row) return c.json({ message: "Reunião não encontrada." }, 404);
+    if (row.status === "aprovada") {
+      return c.json({ message: "Reunião já aprovada." }, 400);
+    }
+
+    const segs = await db
+      .select()
+      .from(recordingSegments)
+      .where(eq(recordingSegments.reuniaoId, id));
+    if (segs.length === 0 && !row.audioPath) {
+      return c.json({ message: "Não há segmentos de áudio para processar." }, 400);
+    }
+
+    await db.update(reunioes).set({
+      status: "processando_audio",
+      resumo: "A transcrever segmentos de áudio e a gerar notas com IA…",
+      updatedAt: new Date(),
+    }).where(eq(reunioes.id, id));
+
+    await runReuniaoSttPipeline(id);
+    const [updated] = await db.select().from(reunioes).where(eq(reunioes.id, id)).limit(1);
+    return c.json(updated ?? row);
   })
   .get("/:id", async (c) => {
     const id = c.req.param("id");

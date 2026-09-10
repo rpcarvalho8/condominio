@@ -298,14 +298,41 @@ export const reunioes = sqliteTable("reunioes", {
   /** JSON estruturado da reunião conforme layout do tipo */
   resumoJson: text("resumo_json"),
   resumo: text("resumo"),
-  status: text("status").notNull().default("rascunho"), // "rascunho" | "processando_audio" | "erro_audio" | "aprovada"
+  /**
+   * Ciclo de vida (gravação contínua):
+   * "em_curso" | "terminada" | "rascunho" | "processando_audio" | "erro_audio" | "aprovada"
+   * `em_curso` = reunião aberta (pode ter vários RecordingSegment).
+   * Falha técnica NÃO passa a terminada.
+   */
+  status: text("status").notNull().default("rascunho"),
   pdfUrl: text("pdf_url"),
   approvedAt: integer("approved_at", { mode: "timestamp" }),
+  /** Legado: primeiro/único ficheiro. Preferir recording_segments. */
   audioPath: text("audio_path"),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+/** Segmentos de áudio de uma única Reunião (MediaRecorder pode reiniciar sem nova reunião). */
+export const recordingSegments = sqliteTable("recording_segments", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  reuniaoId: text("reuniao_id")
+    .notNull()
+    .references(() => reunioes.id, { onDelete: "cascade" }),
+  ordinal: integer("ordinal").notNull(),
+  startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
+  endedAt: integer("ended_at", { mode: "timestamp" }),
+  /** user_stop_segment | technical_interrupt | user_end_meeting */
+  reasonEnded: text("reason_ended"),
+  storagePath: text("storage_path"),
+  byteSize: integer("byte_size").notNull().default(0),
+  /** open | closed */
+  status: text("status").notNull().default("open"),
+  createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
 });

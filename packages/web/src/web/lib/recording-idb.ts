@@ -13,6 +13,8 @@ export type PersistedRecordingStatus =
 export type PersistedSession = {
   id: string;
   target: "ata" | "reuniao";
+  /** Quando target=reuniao: id da reunião aberta (continua após interrupções). */
+  reuniaoId?: string | null;
   draft: { titulo: string; data: string; participantes?: string };
   mimeType: string;
   status: PersistedRecordingStatus;
@@ -32,7 +34,7 @@ export type PersistedChunk = {
 };
 
 const DB_NAME = "condominio-recordings";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_SESSIONS = "sessions";
 const STORE_CHUNKS = "chunks";
 
@@ -50,6 +52,7 @@ function openDb(): Promise<IDBDatabase> {
         const chunks = db.createObjectStore(STORE_CHUNKS, { keyPath: ["sessionId", "seq"] });
         chunks.createIndex("bySession", "sessionId", { unique: false });
       }
+      // v2: campo reuniaoId opcional nas sessões (sem migração de schema IDB necessária)
     };
   });
 }
