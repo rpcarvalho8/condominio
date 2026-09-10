@@ -392,8 +392,9 @@ export const recordingSegments = sqliteTable(
 );
 
 /**
- * AuditEvent genérico ( Domínio Kernel / ADR-009 ).
- * Usado por reuniões/gravação; extensível a outros agregados.
+ * AuditEvent genérico (Domain Kernel / ADR-009).
+ * who/what/when/before/after/reason/source/request_id — invariante 10.
+ * Usado por reuniões/gravação e pelo kernel (Membership create/revoke).
  */
 export const auditEvents = sqliteTable(
   "audit_events",
@@ -404,7 +405,13 @@ export const auditEvents = sqliteTable(
     entityType: text("entity_type").notNull(),
     entityId: text("entity_id").notNull(),
     actorUserId: text("actor_user_id"),
+    actorPersonId: text("actor_person_id"),
     payloadJson: text("payload_json"),
+    beforeJson: text("before_json"),
+    afterJson: text("after_json"),
+    reason: text("reason"),
+    source: text("source"),
+    requestId: text("request_id"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -412,6 +419,70 @@ export const auditEvents = sqliteTable(
   (t) => ({
     tenantCreatedIdx: index("audit_events_tenant_created_idx").on(t.tenantId, t.createdAt),
     entityIdx: index("audit_events_entity_idx").on(t.entityType, t.entityId),
+    requestIdx: index("audit_events_request_id_idx").on(t.requestId),
+  }),
+);
+
+/**
+ * Domain Kernel v0.1 — Identidade (ADR-006 / ADR-031).
+ * Role é extensível; conjunto inicial obrigatório inclui Fiscalizacao (não ConselhoFiscal).
+ */
+export const roles = sqliteTable("roles", {
+  code: text("code").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const persons = sqliteTable(
+  "persons",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    userId: text("user_id"),
+    name: text("name").notNull(),
+    nif: text("nif"),
+    email: text("email").notNull(),
+    phone: text("phone"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    userIdUq: uniqueIndex("persons_user_id_uq").on(t.userId),
+    emailUq: uniqueIndex("persons_email_uq").on(t.email),
+    nifUq: uniqueIndex("persons_nif_uq").on(t.nif),
+  }),
+);
+
+export const memberships = sqliteTable(
+  "memberships",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    personId: text("person_id").notNull().references(() => persons.id),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id"),
+    roleCode: text("role_code").notNull().references(() => roles.code),
+    scope: text("scope"),
+    status: text("status").notNull().default("active"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    revokedAt: integer("revoked_at", { mode: "timestamp" }),
+    revokedByPersonId: text("revoked_by_person_id"),
+  },
+  (t) => ({
+    personTenantStatusIdx: index("memberships_person_tenant_status_idx").on(
+      t.personId,
+      t.tenantId,
+      t.status,
+    ),
+    tenantStatusIdx: index("memberships_tenant_status_idx").on(t.tenantId, t.status),
   }),
 );
 // --- ATAS DE ASSEMBLEIA ---

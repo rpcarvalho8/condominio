@@ -30,6 +30,7 @@ export async function writeReuniaoAudit(input: {
       entityId: input.reuniaoId,
       actorUserId: input.actorUserId ?? null,
       payloadJson: input.payload ? JSON.stringify(input.payload) : null,
+      source: "reuniao",
     });
   } catch (e) {
     // Auditoria nunca deve derrubar o fluxo de negócio; logar e continuar.

@@ -18,3 +18,11 @@ export function getCurrentTenantId(): string {
   if (fromEnv) return fromEnv;
   return CONDOMINIO.nif;
 }
+
+/**
+ * Tenant context for Domain Kernel paths.
+ * Empty string is invalid — middleware must 403 (fail closed), even with a single tenant.
+ */
+export function getKernelTenantId(): string {
+  return String(getCurrentTenantId() ?? "").trim();
+}

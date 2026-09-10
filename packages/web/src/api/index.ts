@@ -25,6 +25,7 @@ import { reunioesRoutes, reunioesPdfRoutes } from "./routes/reunioes";
 import { ticketsRoutes } from "./routes/tickets";
 import { emailInboxRoutes, scheduleEmailInboxSync } from "./routes/email-inbox";
 import { uploadsRoutes } from "./routes/uploads";
+import { kernelRoutes } from "./routes/kernel";
 import { rehydrateDividasFromDB } from "./lib/identity-matrix";
 
 // ─── Sync imediato no arranque do servidor ────────────────────────────────────
@@ -211,7 +212,8 @@ const app = new Hono()
   .route("/reunioes", reunioesRoutes)
   .route("/tickets", ticketsRoutes)
   .route("/email-inbox", emailInboxRoutes)
-  .route("/uploads", uploadsRoutes);
+  .route("/uploads", uploadsRoutes)
+  .route("/kernel", kernelRoutes);
 
 scheduleEmailInboxSync();
 

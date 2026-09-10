@@ -6,6 +6,8 @@ export const user = sqliteTable("user", {
   email: text("email").notNull().unique(),
   emailVerified: integer("email_verified", { mode: "boolean" }).notNull(),
   image: text("image"),
+  // LEGACY (Fonte): do not use for new kernel paths — see application/auth/legacy-user-role-adapter.ts.
+  // Authorization for /api/kernel/* reads Membership (ADR-006).
   role: text("role").notNull().default("condómino"), // "admin" | "condómino"
   fracaoId: text("fracao_id"),                        // linked fração for condómino users
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
