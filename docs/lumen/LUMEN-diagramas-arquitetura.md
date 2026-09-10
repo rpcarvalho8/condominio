@@ -6,7 +6,7 @@
 >
 > **Nota v6.1:** Diagrama 0 com `Fiscalizacao` e hash-chain no Ledger; Domain Kernel com Outbox/idempotência; onboarding com verificação de contacto (não identidade plena) e portal sem voto por defeito em F3; sequência Acta sem Risk Engine a aprovar (aprovação = condóminos/`ResolutionRule`); financeiro com `cash_status` / `verification_method`; roadmap com Pilot gate (pós-F3 Essencial) e General commercial gate (pós-F5 + Production Gates); IoT fora do comercial (Tier 3).
 >
-> Todos os blocos são Mermaid válido, prontos a colar no Miro.
+> Blocos Mermaid válidos, prontos a colar no Miro.
 
 ---
 

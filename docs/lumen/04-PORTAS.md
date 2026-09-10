@@ -261,7 +261,7 @@ Login email + password (better-auth); sessão ligada ao `Membership`. Mesmo cont
 
 Todo email, chat, notificação, acta, contrato e o link de Convite passam por este módulo. Nenhum outro módulo envia mensagens directamente. Templates para tom e marca consistentes. Observabilidade de envio/retry/estado — sem promessa de inbox garantida.
 
-**Evidência de canal (governança):** convocatórias e avisos legais registam canal, destino, estado de entrega e recibo quando aplicável (`ConvocationDispatch` / `DeliberationNoticeDispatch` — ver 02-DOMINIO). Convocatória ≠ comunicação das deliberações aos ausentes (art. 1432.º n.º 9). Canal `unknown` ou autorização em falta → HUMAN REVIEW, nunca AUTO SEND (ADR-041).
+**Evidência de canal (governação):** convocatórias e avisos legais registam canal, destino, estado de entrega e recibo quando aplicável (`ConvocationDispatch` / `DeliberationNoticeDispatch` — ver 02-DOMINIO). Convocatória ≠ comunicação das deliberações aos ausentes (art. 1432.º n.º 9). Canal `unknown` ou autorização em falta → HUMAN REVIEW, nunca AUTO SEND (ADR-041).
 
 ### Validação em Camadas
 

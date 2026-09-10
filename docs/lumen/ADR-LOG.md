@@ -2,19 +2,19 @@
 
 **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
-> Formato leve, não processo pesado: uma entrada por decisão, decisão + estado + justificação + o que fica em aberto. Objetivo é impedir que o projeto se torne um conjunto de documentos contraditórios à medida que cresce — não burocratizar decisões de 1 founder.
+> Formato leve: uma entrada por decisão — decisão, estado, justificação e o que fica em aberto. Objectivo: impedir documentos contraditórios à medida que o projecto cresce, sem burocratizar decisões de um founder.
 >
 > **Nota complementar (v6.1):** ADRs 041–042 (convocatória por meio por condómino; `Reuniao` contínua + `RecordingSegment`). Estado ACEITE para arquitectura de produto; itens legais abertos assinalados como *legal validation required*.
 >
-> Estado possível: `ACEITE` (construir assim), `ACEITE — validar antes de produção` (a direção está certa, mas há um parâmetro concreto a confirmar com um profissional antes de ir a produção), `FECHADA — não reabrir` (decisão definitiva, não voltar a discutir sem novo facto material).
+> Estados possíveis: `ACEITE` (construir assim); `ACEITE — validar antes de produção` (direcção certa, parâmetro a confirmar com profissional antes de produção); `FECHADA — não reabrir` (definitiva, sem novo facto material).
 
 ## Regra de Precedência (para quem implementa)
 
-Se qualquer documento contradizer outro — e vai acontecer, à medida que o projeto envelhece — a ordem de autoridade é:
+Se qualquer documento contradizer outro — e vai acontecer — a ordem de autoridade é:
 
 **ADR-LOG (aceite) > 02-DOMINIO > 06-FATIAS > diagramas de arquitetura > qualquer outro texto**
 
-Concretamente: se um agente de código (Claude, Codex, ou humano) encontrar "QR batch" ou "retenção de 10% sobre pagamento" nalgum ficheiro, isso **não é a especificação atual** — é texto que uma revisão posterior já invalidou. O ADR-LOG é sempre a fonte de verdade sobre *o que foi decidido e porquê*; os outros documentos descrevem *como isso se manifesta*, e podem ficar temporariamente desatualizados entre revisões sem que isso mude a decisão.
+Se um agente de código (ou humano) encontrar "QR batch" ou "retenção de 10% sobre pagamento" nalgum ficheiro, isso não é a especificação actual — é texto que uma revisão posterior já invalidou. O ADR-LOG é a fonte de verdade sobre o que foi decidido e porquê; os outros documentos descrevem como isso se manifesta, e podem ficar temporariamente desatualizados entre revisões sem mudar a decisão.
 
 ---
 
@@ -246,7 +246,7 @@ Concretamente: se um agente de código (Claude, Codex, ou humano) encontrar "QR 
 
 **Decisão:** o CAC *blended* usado nas projeções financeiras (08) deixa de incluir a premissa de conversão via parcerias institucionais (APEGAC/ANACON). Esses canais são testados como experiências de baixo compromisso, e só entram no CAC modelado depois de gerarem conversões reais mensuráveis.
 
-**Justificação:** associações profissionais representam precisamente os administradores que o produto visa substituir — modelar financeiramente um canal com esse conflito de interesse estrutural, sem teste, é otimismo não fundamentado.
+**Justificação:** associações profissionais representam os administradores que o produto visa substituir — modelar financeiramente um canal com esse conflito de interesse estrutural, sem teste, é optimismo não fundamentado.
 
 **Impacto:** 07-BUSINESS-PLAN, 08-PLANO-FINANCEIRO.
 
@@ -332,7 +332,7 @@ Concretamente: se um agente de código (Claude, Codex, ou humano) encontrar "QR 
 
 **Decisão:** uma entidade só se cria quando existe necessidade real de persistência, integridade ou comportamento que as entidades existentes não conseguem representar adequadamente — nunca "porque um sistema enterprise provavelmente teria uma". Consequência v6.1: **não** criar entidade `ConselhoFiscal` — usar Role `Fiscalizacao`.
 
-**Justificação:** é a regra geral por trás da redução de 12 entidades propostas para 3 (ADR-023/024) — vale a pena declará-la explicitamente para se aplicar a decisões futuras, não só a esta.
+**Justificação:** é a regra geral por trás da redução de 12 entidades propostas para 3 (ADR-023/024) — declara-se explicitamente para aplicar a decisões futuras, não só a esta.
 
 **Impacto:** princípio transversal, referenciado em 02-DOMINIO.
 
@@ -446,7 +446,7 @@ Concretamente: se um agente de código (Claude, Codex, ou humano) encontrar "QR 
 
 **Decisão:** ver saldo, votar, ver documentos, consultar o Ledger têm de funcionar mesmo se o provider LLM (Groq ou outro) estiver indisponível. A IA é uma camada de automação sobre o domínio, nunca uma dependência bloqueante do domínio em si.
 
-**Justificação:** sem esta declaração explícita, é fácil introduzir sem querer uma chamada LLM no caminho crítico de uma rota financeira/de governança — o que tornaria uma funcionalidade nuclear do produto dependente da disponibilidade de um provider externo.
+**Justificação:** sem esta declaração explícita, é fácil introduzir sem querer uma chamada LLM no caminho crítico de uma rota financeira/de governação — o que tornaria uma funcionalidade nuclear do produto dependente da disponibilidade de um provider externo.
 
 **Impacto:** 02-DOMINIO, 03-ORQUESTRA, 06-FATIAS (F0, requisito cross-cutting).
 

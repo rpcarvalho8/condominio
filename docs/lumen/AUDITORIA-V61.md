@@ -2,7 +2,7 @@
 
 **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
-Auditoria adversarial após aplicar o hardening. Precedência: **ADR-LOG > 02-DOMINIO > 06-FATIAS > diagramas > resto**.
+Auditoria adversarial após o hardening. Precedência: ADR-LOG > 02-DOMINIO > 06-FATIAS > diagramas > resto.
 
 ---
 
@@ -30,12 +30,12 @@ Auditoria adversarial após aplicar o hardening. Precedência: **ADR-LOG > 02-DO
 
 | Conclusão GPT | Posição v6.1 | Porquê / alternativa |
 |---------------|--------------|----------------------|
-| Opção B (comercial geral só com F5) como única | **Opção A refinada** | Piloto Essencial (F0–F3 sem voto) é coerente; comercial geral gated por F5 + gates |
-| % universal de aprovação da Acta | **Rejeitada** | `ResolutionRule` + lei/regulamento + gate advogado; sem inventar lei |
-| Checkpoint / âncora externa no core hash-chain | **Future Decision** | Útil contra atacante que reescreve a BD; não é necessário para F2 |
-| Identity verification verdadeira no MVP | **Fora** | Contact verification + validação admin Pessoa↔Fração↔Membership |
-| Expandir arquitectura por entusiasmo | **Fora** | v6.1 = consistency hardening, não nova arquitectura |
-| “Email garantido” no sentido de entrega ao utilizador | **Rejeitada** | Email = canal primário com envio/retry/estado/observabilidade; inbox fora do nosso controlo |
+| Opção B (comercial geral só com F5) como única | Opção A refinada | Piloto Essencial (F0–F3 sem voto) é coerente; comercial geral gated por F5 + gates |
+| % universal de aprovação da Acta | Rejeitada | `ResolutionRule` + lei/regulamento + gate advogado; sem inventar lei |
+| Checkpoint / âncora externa no core hash-chain | Future Decision | Útil contra atacante que reescreve a BD; não é necessário para F2 |
+| Identity verification verdadeira no MVP | Fora | Contact verification + validação admin Pessoa↔Fração↔Membership |
+| Expandir arquitectura por entusiasmo | Fora | v6.1 = consistency hardening, não nova arquitectura |
+| “Email garantido” no sentido de entrega ao utilizador | Rejeitada | Email = canal primário com envio/retry/estado/observabilidade; inbox fora do nosso controlo |
 
 ---
 
@@ -48,7 +48,7 @@ Auditoria adversarial após aplicar o hardening. Precedência: **ADR-LOG > 02-DO
 | PRODUCTION-GATES cash em português legado | Alinhado ao modelo canónico inglês de estados |
 | Orquestra ainda dizia email “garantido” | Reformulado para observabilidade sem promessa de inbox |
 | Índice listava AUDITORIA antes de existir | Este ficheiro fecha o loop |
-| Versões misturadas v3–v6 no pacote original | Uniformizado **v6.1** + data 2026-09-10 |
+| Versões misturadas v3–v6 no pacote original | Uniformizado v6.1 + data 2026-09-10 |
 | Business plan misturava BuildingMind como marca activa | LUMEN primario; BuildingMind = nome antigo |
 | IoT no tier Enterprise | Removido do comercial → Tier 3 Future |
 | Checklist founder sem critério champion/≤60 dias | Acrescentado em `07` + WIP limit em `06` |
@@ -68,22 +68,22 @@ Auditoria adversarial após aplicar o hardening. Precedência: **ADR-LOG > 02-DO
 
 | Área | Veredicto | Porquê (curto) |
 |------|-----------|----------------|
-| **F0** | **GO** | Domain Kernel, Roles (incl. Fiscalizacao), Events/Jobs/Audit, async idempotente, TenantDirectory — especificação implementável |
-| **F1** | **GO** | Ingestão + constituição como vertical slice; gates humanos em OCR/convites definidos |
-| **F2** | **GO** (após F0+F1) | Cash/hash-chain/Ledger/BankConnection especificados; não começar sem kernel |
-| **F3** | **GO** como contrato de piloto | Onboarding por convite + PWA Essencial; **sem** votação como critério; spike iOS push obrigatório antes de fechar F3 |
-| **F4** | **Contrato** / freeze no piloto | Ops/orçamentos — não distribuir além do piloto até F0–F2 estáveis / 10 pagos |
-| **F5** | **Contrato** / gate comercial | Acta+voto necessários ao comercial geral; validação advogado antes de produção |
-| **F6** | **NO-GO implementação** | Orquestra só depois de tenant+ingestão; LLM nunca no caminho crítico de saldo/voto |
-| **Production (dinheiro/votos/legal)** | **NO-GO** | Exige Production Readiness Gates PASS (ou WAIVED justificado) |
-| **Pilot launch (Essencial)** | **GO documental** | Critérios claros; execução de código ainda por fazer |
-| **General commercial launch** | **NO-GO** | F5 + gates + liability/seguro a validar |
+| **F0** | GO | Domain Kernel, Roles (incl. Fiscalizacao), Events/Jobs/Audit, async idempotente, TenantDirectory — especificação implementável |
+| **F1** | GO | Ingestão + constituição como vertical slice; gates humanos em OCR/convites definidos |
+| **F2** | GO (após F0+F1) | Cash/hash-chain/Ledger/BankConnection especificados; não começar sem kernel |
+| **F3** | GO como contrato de piloto | Onboarding por convite + PWA Essencial; sem votação como critério; spike iOS push obrigatório antes de fechar F3 |
+| **F4** | Contrato / freeze no piloto | Ops/orçamentos — não distribuir além do piloto até F0–F2 estáveis / 10 pagos |
+| **F5** | Contrato / gate comercial | Acta+voto necessários ao comercial geral; validação advogado antes de produção |
+| **F6** | NO-GO implementação | Orquestra só depois de tenant+ingestão; LLM nunca no caminho crítico de saldo/voto |
+| **Production (dinheiro/votos/legal)** | NO-GO | Exige Production Readiness Gates PASS (ou WAIVED justificado) |
+| **Pilot launch (Essencial)** | GO documental | Critérios claros; execução de código ainda por fazer |
+| **General commercial launch** | NO-GO | F5 + gates + liability/seguro a validar |
 
 ---
 
 ## E. Última regra
 
-Não expandir a arquitectura por entusiasmo. Decisões maduras foram fechadas (ADR-036…040 + emendas). Melhorias futuras ficam como Future Decision. O objectivo desta ronda era **v6.1 — consistency hardening**, não uma arquitectura nova.
+Não expandir a arquitectura por entusiasmo. Decisões maduras foram fechadas (ADR-036…040 + emendas). Melhorias futuras ficam como Future Decision. O objectivo desta ronda era v6.1 — consistency hardening, não uma arquitectura nova.
 
 ### Checklist adversarial (segunda passagem)
 

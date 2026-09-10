@@ -4,7 +4,7 @@
 **Branch de referência documental:** `cursor/lumen-v61-docs-1c40`  
 **Estado:** análise fechada; implementação selectiva dos pontos com acordo
 
-Este documento responde à **Parte P** do pedido. A v6.1 permanece fechada: não se reabre a arquitectura geral nem se inicia F0 por iniciativa própria.
+Este documento responde à Parte P do pedido. A v6.1 permanece fechada: não se reabre a arquitectura geral nem se inicia F0 por iniciativa própria.
 
 ---
 
@@ -14,11 +14,11 @@ Este documento responde à **Parte P** do pedido. A v6.1 permanece fechada: não
 2. **Convocatória por condómino (Parte B).** O meio não é uniforme: art. 1432.º n.º 1 (carta registada / aviso com recibo) e n.ºs 2–3 (email só se vontade lavrada em acta com endereço e recibo de receção). Separar convocatória de comunicação posterior de deliberações (n.º 9) é correcto.
 3. **UNKNOWN → HUMAN REVIEW**, nunca AUTO SEND.
 4. **Gravação ≠ fim da reunião (Partes C–O).** A implementação actual em `RecordingContext` / `reunioes.tsx` / `POST /api/reunioes` trata cada ciclo MediaRecorder + “Criar reunião” como um `INSERT` novo. Não existe `RecordingSegment`. Não há limite de 30–40 min no código — a interrupção é técnica/browser e o utilizador, ao gravar de novo e criar outra vez, gera uma segunda `Reuniao`.
-5. **Separar `Reuniao` de `RecordingSegment`**, com persistência progressiva (já há chunks IndexedDB + upload resumível — preservar).
-6. **Intenção humana ≠ falha técnica** tem de existir no domínio/estado, não só no UI.
-7. **Uma Acta / uma Reuniao**, vários segmentos ordenados para STT.
-8. **Retenção de áudio v6.1** mantém-se (hard-delete após Acta `APPROVED`).
-9. **AuditEvent** nas transições relevantes, sem spam.
+5. Separar `Reuniao` de `RecordingSegment`, com persistência progressiva (já há chunks IndexedDB + upload resumível — preservar).
+6. Intenção humana ≠ falha técnica tem de existir no domínio/estado, não só no UI.
+7. Uma Acta / uma Reuniao, vários segmentos ordenados para STT.
+8. Retenção de áudio v6.1 mantém-se (hard-delete após Acta `APPROVED`).
+9. `AuditEvent` nas transições relevantes, sem spam.
 
 ---
 
@@ -26,21 +26,21 @@ Este documento responde à **Parte P** do pedido. A v6.1 permanece fechada: não
 
 | Ponto | Posição |
 |-------|---------|
-| Nomes exactos `SCHEDULED → STARTED → RECORDING → …` | Concordo com a *ideia*; os nomes finais alinham-se ao domínio LUMEN e, no código actual da Fonte, aos estados existentes (`rascunho`, `processando_audio`, …) sem inventar máquina paralela desnecessária. Proposta canónica abaixo. |
-| Criar entidade `ConvocationDeliveryPreference` | **Desnecessário** como entidade própria. Preferência = campos no `Membership` (ou Person+Membership) + evidência de autorização (acta/data). Entidade nova só se o histórico de mudanças o exigir — ADR-026: não criar entidade enterprise cedo. |
-| “O LUMEN determina o meio juridicamente aplicável” | O sistema **aplica configuração/regra validada** e bloqueia AUTO quando `UNKNOWN`. Não “decide direito” sozinho. |
-| Resolver só no frontend | Discordo de o fazer *só* no frontend — mas a primeira correcção útil liga sessão de gravação a `reuniaoId` **e** modelo de segmentos no backend. |
+| Nomes exactos `SCHEDULED → STARTED → RECORDING → …` | Concordo com a ideia; os nomes finais alinham-se ao domínio LUMEN e, no código actual da Fonte, aos estados existentes (`rascunho`, `processando_audio`, …) sem inventar máquina paralela desnecessária. Proposta canónica abaixo. |
+| Criar entidade `ConvocationDeliveryPreference` | Desnecessário como entidade própria. Preferência = campos no `Membership` (ou Person+Membership) + evidência de autorização (acta/data). Entidade nova só se o histórico de mudanças o exigir — ADR-026: não criar entidade enterprise cedo. |
+| “O LUMEN determina o meio juridicamente aplicável” | O sistema aplica configuração/regra validada e bloqueia AUTO quando `UNKNOWN`. Não “decide direito” sozinho. |
+| Resolver só no frontend | Discordo de o fazer só no frontend — mas a primeira correcção útil liga sessão de gravação a `reuniaoId` e modelo de segmentos no backend. |
 | Media streaming sofisticado | Fora de âmbito. Segmentos + chunks existentes bastam. |
-| Contagem dos 10 dias (envio vs receção) | **Jurisprudência divergente** (ex.: Ac. TC 80/2005 vs TR Porto 2019). Não fechar no produto → `legal validation required`. |
+| Contagem dos 10 dias (envio vs receção) | Jurisprudência divergente (ex.: Ac. TC 80/2005 vs TR Porto 2019). Não fechar no produto → `legal validation required`. |
 
 ---
 
 ## C. Questões legais (`legal validation required`)
 
-1. Contagem exacta dos **10 dias** de antecedência (expedição vs receção).
-2. Validade prática do **recibo de receção por email** (n.º 3) e consequências se o condómino não enviar recibo.
+1. Contagem exacta dos 10 dias de antecedência (expedição vs receção).
+2. Validade prática do recibo de receção por email (n.º 3) e consequências se o condómino não enviar recibo.
 3. Meios alternativos além de carta registada / aviso com recibo / email autorizado.
-4. Relação entre preferência de convocatória e preferência de **comunicação de deliberações** (n.º 9) — podem coincidir ou divergir; validar se o modelo as trata como preferências distintas (proposta: sim).
+4. Relação entre preferência de convocatória e preferência de comunicação de deliberações (n.º 9) — podem coincidir ou divergir; validar se o modelo as trata como preferências distintas (proposta: sim).
 5. Retenção de áudio com múltiplos segmentos — política DPO já na v6.1; confirmar se a eliminação pós-`APPROVED` cobre todos os segmentos de uma vez.
 
 ---
@@ -65,12 +65,15 @@ Este documento responde à **Parte P** do pedido. A v6.1 permanece fechada: não
 
 ### Convocatória
 
-- Campos em `Membership` (não entidade nova):  
-  `convocation_channel`: `registered_mail` | `authorized_email` | `other_admissible` | `unknown`  
-  `convocation_email` (se email), `authorized_in_acta_id`, `authorized_at`  
-- `ConvocationDispatch` (registo de envio, pode ser tabela de outbox/audit tipada): meio, destino, timestamps, estado, recibo, versão da convocatória, actor, falhas, reenvio.  
-- `DeliberationNoticeDispatch` **separado** (art. 1432.º n.º 9).  
-- Regra: se canal `unknown` ou autorização em falta → **HUMAN REVIEW**, sem envio automático.
+Campos em `Membership` (não entidade nova):  
+`convocation_channel`: `registered_mail` | `authorized_email` | `other_admissible` | `unknown`  
+`convocation_email` (se email), `authorized_in_acta_id`, `authorized_at`
+
+`ConvocationDispatch` (registo de envio; pode ser tabela de outbox/audit tipada): meio, destino, timestamps, estado, recibo, versão da convocatória, actor, falhas, reenvio.
+
+`DeliberationNoticeDispatch` separado (art. 1432.º n.º 9).
+
+Regra: se canal `unknown` ou autorização em falta → HUMAN REVIEW, sem envio automático.
 
 ### Gravação
 
@@ -84,7 +87,7 @@ Sub-estado de gravação (na reunião ou derivado dos segmentos):
 
 `RecordingSegment`: `reuniao_id`, `ordinal`, `started_at`, `ended_at`, `reason_ended` (`user_stop_segment` | `technical_interrupt` | `user_end_meeting`), `storage_path`, `byte_size`, `status`.
 
-**Invariante:** falha técnica **nunca** transita a reunião para `ENDED`.
+Invariante: falha técnica nunca transita a reunião para `ENDED`.
 
 ---
 
@@ -101,7 +104,7 @@ Ficheiros afectados:
 - `packages/web/src/web/pages/reunioes.tsx` + `RecordingBar.tsx` — UX “Retomar gravação” / “Terminar reunião”
 - Testes unitários / de domínio para os 6 cenários pedidos
 
-**Não** misturar este fix com F0 multi-tenant.
+Não misturar este fix com F0 multi-tenant.
 
 ---
 
@@ -130,7 +133,7 @@ Ficheiros afectados:
 
 | Âmbito | Acção |
 |--------|--------|
-| Documentação (A, B, domínio segmentos, ADRs, linguagem) | **Implementar** na branch `cursor/lumen-v61-docs-1c40` |
-| Código gravação multi-segmento | **Implementar** na branch `cursor/reuniao-recording-segments-1c40` |
-| F0 / orquestra / multi-tenant | **Não** iniciar |
-| Fechar contagem dos 10 dias / recibo email | **Não** — `legal validation required` |
+| Documentação (A, B, domínio segmentos, ADRs, linguagem) | Implementar na branch `cursor/lumen-v61-docs-1c40` |
+| Código gravação multi-segmento | Implementar na branch `cursor/reuniao-recording-segments-1c40` |
+| F0 / orquestra / multi-tenant | Não iniciar |
+| Fechar contagem dos 10 dias / recibo email | Não — `legal validation required` |

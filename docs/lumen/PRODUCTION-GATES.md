@@ -2,18 +2,16 @@
 
 > **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
-> Gates obrigatórios **antes** de dinheiro real, votos com efeitos, ou actos com consequências legais em produção multi-tenant.  
-> **Profissionais (advogado, DPO, contabilista, segurança) são gates — não designers do produto.** Validam e assinam critérios; não redesenham o LUMEN no Miro.
->
-> **Nota complementar (v6.1):** linha Legal de convocatória art. 1432.º (meio por condómino; 10 dias e recibo de email = *legal validation required*).
+> Gates obrigatórios antes de dinheiro real, votos com efeitos, ou actos com consequências legais em produção multi-tenant.  
+> Profissionais (advogado, DPO, contabilista, segurança) são gates — não designers do produto. Validam e assinam critérios; não redesenham o LUMEN no Miro.
 
 Narrativa comercial e limites de autonomia: [07-BUSINESS-PLAN](07-BUSINESS-PLAN.md). Domínio: [02-DOMINIO](02-DOMINIO.md). Orquestra: [03-ORQUESTRA](03-ORQUESTRA.md).
 
 ## Regra geral
 
-Nenhum tenant pago em modo "produção plena" (para além do piloto controlado) sem os cinco blocos abaixo em estado **PASS** ou **WAIVED com justificação escrita e prazo**.
+Nenhum tenant pago em modo "produção plena" (para além do piloto controlado) sem os cinco blocos abaixo em estado PASS ou WAIVED com justificação escrita e prazo.
 
-Piloto pode operar com âmbito reduzido (ex.: Essencial, sem votação) **desde que** os gates do âmbito activo estejam cobertos.
+O piloto pode operar com âmbito reduzido (ex.: Essencial, sem votação) desde que os gates do âmbito activo estejam cobertos.
 
 ---
 
@@ -21,13 +19,13 @@ Piloto pode operar com âmbito reduzido (ex.: Essencial, sem votação) **desde 
 
 | Gate | Critério (resumo) | Owner profissional |
 |------|-------------------|--------------------|
-| Actas | Máquina de estados, aprovação por condóminos/`ResolutionRule`, assinatura vs subscrição, dois hashes; Risk Engine **não** aprova Acta | Advogado |
+| Actas | Máquina de estados, aprovação por condóminos/`ResolutionRule`, assinatura vs subscrição, dois hashes; Risk Engine não aprova Acta | Advogado |
 | Votação | Quórum/maioria via `ResolutionRule`; ponderação por permilagem; auditabilidade do voto | Advogado |
 | ResolutionRules | Seed legal + regulamento mais exigente; hierarquia lei > … documentada | Advogado |
 | Poderes / Authority | Quem pode autorizar o quê (`AuthorityRule` / roles); human override | Advogado |
-| Convocatórias / avisos | Meio por condómino (art. 1432.º): carta registada / email autorizado com evidência em acta / outros admissíveis; `unknown` → HUMAN REVIEW (nunca AUTO SEND); `ConvocationDispatch` ≠ `DeliberationNoticeDispatch` (n.º 9). **Legal validation required:** contagem dos 10 dias (expedição vs. receção) e efeitos do recibo de email — **não fechados pelo produto** | Advogado |
+| Convocatórias / avisos | Art. 1432.º: prazos e canais por condómino; `ConvocationDispatch` ≠ `DeliberationNoticeDispatch`; canal `unknown` → HUMAN REVIEW; contagem dos 10 dias / recibo email = legal validation required | Advogado |
 
-**FAIL se:** LLM ou Risk Engine aparecerem como decisor de deliberação ou de validade jurídica da Acta.
+FAIL se LLM ou Risk Engine aparecerem como decisor de deliberação ou de validade jurídica da Acta.
 
 ---
 
@@ -73,7 +71,7 @@ Piloto pode operar com âmbito reduzido (ex.: Essencial, sem votação) **desde 
 | Gate | Critério (resumo) | Owner profissional |
 |------|-------------------|--------------------|
 | Responsabilidade | Termos / disclaimer: LUMEN assiste; decisões no órgão competente | Advogado |
-| Seguro | RC admin autogerido = add-on a **validar** (não assumir) | Negócio + seguradora |
+| Seguro | RC admin autogerido = add-on a validar (não assumir) | Negócio + seguradora |
 | Limites de autonomia | LLM nunca decide dinheiro/votos; approval gates; human override | Produto + advogado |
 | Escalações | Caminho claro para humano/advogado real em risco elevado | Produto |
 

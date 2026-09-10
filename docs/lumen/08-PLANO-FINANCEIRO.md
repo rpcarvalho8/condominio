@@ -2,16 +2,16 @@
 
 > **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
-> **Documento esqueleto.** Células `TBD` são intencionais. **Não inventar taxas de conversão, CAC fechados, nem SOM Y1/Y3** até o piloto os medir. Narrativa comercial e funil: [07-BUSINESS-PLAN](07-BUSINESS-PLAN.md).
+> Documento esqueleto. Células `TBD` são intencionais. Não inventar taxas de conversão, CAC fechados, nem SOM Y1/Y3 até o piloto os medir. Narrativa comercial e funil: [07-BUSINESS-PLAN](07-BUSINESS-PLAN.md).
 
 ## Princípios deste plano
 
-1. **Risco nº1 = aquisição de clientes**, não custo de tokens.
-2. **Não usar CAC institucional** (APEGAC/ANACON, administradoras, imobiliárias com conflito) como premissa financeira — no máximo experiência sem número modelado.
-3. **SAM** = hipótese não validada; **SOM Y1/Y3** = TBD pós-piloto.
-4. **Não** projectar ARR a partir de "50.000 × 44€" como mercado endereçável.
-5. Validação de negócio: **5 → 20 → 40** tenants com CAC e win-rate **medidos**.
-6. No piloto vende-se **só Essencial** (29€/mês). Profissional/Enterprise fora do modelo até gates (ver 07).
+1. Risco nº1 = aquisição de clientes, não custo de tokens.
+2. Não usar CAC institucional (APEGAC/ANACON, administradoras, imobiliárias com conflito) como premissa financeira — no máximo experiência sem número modelado.
+3. SAM = hipótese não validada; SOM Y1/Y3 = TBD pós-piloto.
+4. Não projectar ARR a partir de "50.000 × 44€" como mercado endereçável.
+5. Validação de negócio: 5 → 20 → 40 tenants com CAC e win-rate medidos.
+6. No piloto vende-se só Essencial (29€/mês). Profissional/Enterprise fora do modelo até gates (ver 07).
 
 ## 1. Custos fixos (placeholders)
 
@@ -30,14 +30,14 @@
 
 | Rubrica | Estimativa | Fonte / nota |
 |---------|------------|--------------|
-| Tokens LLM (uso típico Essencial) | ordem de grandeza &lt; €0,50/tenant/mês | **Secundário**; validar com logs reais pós-piloto; OpenRouter/Groq pricing |
+| Tokens LLM (uso típico Essencial) | ordem de grandeza &lt; €0,50/tenant/mês | Secundário; validar com logs reais pós-piloto; OpenRouter/Groq pricing |
 | Whisper (se usado) | pass-through + margem (ver 07) | Só com atas/reuniões |
 | Enable Banking (se add-on activo) | custo API fornecedor + margem | Validar com fornecedor |
 | Storage / egress por tenant | TBD | |
 | Suporte humano (minutos × custo/hora) | TBD | Crítico no piloto assisted |
 | **Custo variável médio / tenant / mês** | **TBD** | |
 
-> Tokens são linha de custo a monitorizar, **não** o driver do runway nem o risco nº1.
+Tokens são linha de custo a monitorizar, não o driver do runway nem o risco nº1.
 
 ## 3. Receita unitária (piloto)
 
@@ -48,11 +48,11 @@
 | Enterprise | 99€ | Fora até F6 (Y1+) | — |
 | Add-ons | ver 07 | Opcional | TBD |
 
-Preço de lançamento (−30%) só na fase early adopters **após** regra de capacidade (07) — não misturar com SOM de pitch.
+Preço de lançamento (−30%) só na fase early adopters após regra de capacidade (07) — não misturar com SOM de pitch.
 
 ## 4. Grelha de CAC por canal directo
 
-Preencher só com dados observados. Canais institucionais **excluídos** desta grelha.
+Preencher só com dados observados. Canais institucionais excluídos desta grelha.
 
 | Canal | Leads / mês | Custo canal / mês | CAC (custo ÷ tenants pagos) | Win-rate (voto sim ÷ leads que chegaram a assembleia) | Time to assembly (dias) | Drop-off before vote | Notas |
 |-------|------------:|------------------:|----------------------------:|-----------------------------------------------------:|------------------------:|---------------------:|-------|
@@ -61,9 +61,9 @@ Preencher só com dados observados. Canais institucionais **excluídos** desta g
 | Notário / construtora (constituição PH) | TBD | TBD | TBD | TBD | TBD | TBD | Sem conflito de administradora |
 | Lead magnet relatório (modo A self-serve) | TBD | TBD | TBD | TBD | TBD | TBD | Quando F1/F2 existirem |
 | Lead magnet relatório (modo B assisted) | ≤4/mês | tempo founder | TBD | TBD | TBD | TBD | Cap duro de capacidade |
-| Institucional (APEGAC/ANACON, etc.) | — | — | **Não modelar** | — | — | — | Só experiência; ver 07 |
+| Institucional (APEGAC/ANACON, etc.) | — | — | Não modelar | — | — | — | Só experiência; ver 07 |
 
-**Fórmulas (quando houver dados):**
+Fórmulas (quando houver dados):
 
 ```
 CAC_canal = custo_atribuído_canal / nº_tenants_pagos_origem_canal
@@ -88,11 +88,11 @@ Não preencher com cenários optimistas inventados. Actualizar após cada patama
 | | Condomínios | ARR | Estatuto |
 |---|------------:|----:|----------|
 | TAM | ~500.000 | — | Macro; não acionável |
-| SAM | ~50.000 (hipótese) | **não calcular como se fosse endereço** | Hipótese não validada |
-| SOM Y1 | **TBD pós-piloto** | **TBD** | Só após CAC/win-rate medidos |
-| SOM Y3 | **TBD pós-piloto** | **TBD** | Idem |
+| SAM | ~50.000 (hipótese) | não calcular como se fosse endereço | Hipótese não validada |
+| SOM Y1 | TBD pós-piloto | TBD | Só após CAC/win-rate medidos |
+| SOM Y3 | TBD pós-piloto | TBD | Idem |
 
-Critério de validação (07): **5 → 20 → 40** com medição — substitui metas de pitch.
+Critério de validação (07): 5 → 20 → 40 com medição — substitui metas de pitch.
 
 ## 7. O que este documento proíbe explicitamente
 
@@ -104,4 +104,4 @@ Critério de validação (07): **5 → 20 → 40** com medição — substitui m
 
 ## 8. Ligação à narrativa
 
-Tudo o que é posicionamento, funil deliberativo, capacidade, pricing e riscos de negócio está em [07-BUSINESS-PLAN](07-BUSINESS-PLAN.md). Este ficheiro só guarda números auditáveis e o sítio onde os TBDs serão preenchidos.
+Posicionamento, funil deliberativo, capacidade, pricing e riscos de negócio estão em [07-BUSINESS-PLAN](07-BUSINESS-PLAN.md). Este ficheiro só guarda números auditáveis e o sítio onde os TBDs serão preenchidos.

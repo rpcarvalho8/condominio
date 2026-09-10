@@ -2,12 +2,12 @@
 
 **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
-> Cada fatia é entregável e testável independentemente.
+> Cada fatia é entregável e testável independentemente. Nenhuma fatia posterior deve bloquear a anterior.
 >
 > **Nota complementar (v6.1):** F5 inclui convocatória multi-canal (art. 1432.º) e gravação multi-segmento; continuidade MediaRecorder também em F4 (reuniões admin).
-> Nenhuma fatia posterior deve bloquear a anterior.
-> Precedência em caso de conflito: **ADR-LOG > 02-DOMINIO > 06-FATIAS > diagramas > resto** (ver `00-INDICE.md`).
-> Gates de produção: ver [PRODUCTION-GATES.md](PRODUCTION-GATES.md).
+>
+> Precedência em caso de conflito: ADR-LOG > 02-DOMINIO > 06-FATIAS > diagramas > resto (ver `00-INDICE.md`).
+> Gates de produção: [PRODUCTION-GATES.md](PRODUCTION-GATES.md).
 
 ---
 
@@ -17,7 +17,7 @@ Dois limiares distintos. Não confundir piloto com comercial geral.
 
 ### Pilot launch (lançamento piloto)
 
-**Âmbito:** F0–F3 com capacidades **Essencial**:
+Âmbito: F0–F3 com capacidades Essencial:
 
 | Capacidade Essencial | Notas |
 |---|---|
@@ -30,13 +30,13 @@ Dois limiares distintos. Não confundir piloto com comercial geral.
 | Documentos financeiros | Download de avisos/recibos/extrato |
 | Consulta de Actas | **Só se existirem Actas em estado `PUBLISHED`** — não obriga fluxo de votação |
 
-**Votação NÃO é critério do piloto.** Pode existir mais tarde (F5); o piloto Essencial fecha sem ela.
+**Votação não é critério do piloto.** Pode existir mais tarde (F5); o piloto Essencial fecha sem ela.
 
 ### General commercial launch (lançamento comercial geral)
 
-Exige **F5** (votação digital + fluxo completo de Acta) **e** cumprimento dos [Production Readiness Gates](PRODUCTION-GATES.md).
+Exige F5 (votação digital + fluxo completo de Acta) e cumprimento dos [Production Readiness Gates](PRODUCTION-GATES.md).
 
-Dinheiro real em escala, ops de produção e decisões legais vinculativas via produto = **NO-GO** até aos gates (ver `00-INDICE.md`).
+Dinheiro real em escala, ops de produção e decisões legais vinculativas via produto = NO-GO até aos gates (ver `00-INDICE.md`).
 
 ---
 
@@ -97,7 +97,7 @@ F6  Orquestra LLM               ░░░░░░░░░░░░░░░░
 | Audit Log | `AuditEvent` (who/what/when/before/after/reason/source) — entidade operacional, não “logging” |
 | Policy Engine (esqueleto) | Aloja depois `SettlementPolicy` (F2), `ResolutionRule` (F5), `AuthorityRule` (F4) |
 | **Notificações (cross-cutting)** | Email = canal primário desde F0, com envio / retry / estado de entrega / observabilidade. **Não** promete “entrega garantida na caixa de entrada do utilizador”. Push em F3, best-effort |
-| **Independência de LLM** | Rotas de finanças/governança (saldo, dívida, documentos, voto quando existir) **não podem depender de LLM** no caminho crítico |
+| **Independência de LLM** | Rotas de finanças/governação (saldo, dívida, documentos, voto quando existir) não podem depender de LLM no caminho crítico |
 | Deploy | Fly.io / Railway; BD em Turso |
 | PWA shell | Branco puro / cinza ultra-leve + vermelho Sevilha — ver Diretiva de Design em `04-PORTAS.md` |
 

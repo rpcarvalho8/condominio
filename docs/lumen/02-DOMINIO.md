@@ -2,17 +2,17 @@
 
 **Versão: v6.1 | Data: 2026-09-10 | Estado: ACEITE (consistency hardening)**
 
-> **Nota complementar (v6.1):** meio de convocatória por condómino (campos em `Membership`, sem entidade nova); `ConvocationDispatch` separado de `DeliberationNoticeDispatch` (art. 1432.º n.º 9); pipeline explícito convocatória → reunião → Acta → assinatura/subscrição → comunicação aos ausentes; ciclo de vida `Reuniao` com `RecordingSegment` (gravação contínua ≠ fim da reunião); ADRs 041–042. Contagem dos 10 dias e efeitos do recibo de email: **validação legal obrigatória** — não fechados neste pacote.
+> **Nota complementar (v6.1):** meio de convocatória por condómino (campos em `Membership`, sem entidade nova); `ConvocationDispatch` separado de `DeliberationNoticeDispatch` (art. 1432.º n.º 9); pipeline explícito convocatória → reunião → Acta → assinatura/subscrição → comunicação aos ausentes; ciclo de vida `Reuniao` com `RecordingSegment` (gravação contínua ≠ fim da reunião); ADRs 041–042. Contagem dos 10 dias e efeitos do recibo de email: validação legal obrigatória — não fechados neste pacote.
 >
-> **Nota desta revisão (v6.1):** consistency hardening — conjunto inicial de Roles inclui `Fiscalizacao` (capacidade de controlo, não entidade `ConselhoFiscal`); modelo de dinheiro com `cash_status` + `verification_method` e invariante registante ≠ verificador; especificação rigorosa da hash-chain do Ledger (deteção de adulteração, sem overclaim); máquina de estados da Acta alargada até `PUBLISHED`; retenção diferenciada por categoria; requisito arquitetural de saída do tenant / portabilidade; Knowledge Base legal e gates de produção apontados nos ADRs 036–040.
+> **Nota desta revisão (v6.1):** consistency hardening — Roles iniciais incluem `Fiscalizacao` (capacidade de controlo, não entidade `ConselhoFiscal`); dinheiro com `cash_status` + `verification_method` e invariante registante ≠ verificador; hash-chain do Ledger como evidência de adulteração (sem overclaim); Acta até `PUBLISHED`; retenção por categoria; Tenant Exit / portabilidade; Knowledge Base legal e gates de produção nos ADRs 036–040.
 >
-> **Nota v6 (mantida):** Acta distingue **assinatura** (presidente) de **subscrição** (todos os condóminos presentes), conforme art. 1.º do DL 268/94 (redação da Lei 8/2022); dois hashes distintos (aprovada vs. final); pagamentos em dinheiro com controlo de fraude; hash-chain no Ledger; meta-regra lei > regulamento; núcleo financeiro/governança nunca depende de LLM.
+> **Nota v6 (mantida):** Acta distingue assinatura (presidente) de subscrição (condóminos presentes), conforme art. 1.º do DL 268/94 (redação da Lei 8/2022); dois hashes (aprovada vs. final); pagamentos em dinheiro com controlo de fraude; hash-chain no Ledger; meta-regra lei > regulamento; núcleo financeiro/governação nunca depende de LLM.
 >
-> **Nota v4/v5 (mantida):** estados explícitos a `Payment` (válido mesmo sem `Allocation`), fluxo `Ledger → AccountingPeriod → Reports` unidirecional, `Scope`/`Permission` leve em `Membership`, `BankConnection` (ligada à conta do condomínio, não ao admin), `FinancialDocument` (nunca fonte de verdade), `TenantDirectory` como requisito de F0.
+> **Nota v4/v5 (mantida):** estados explícitos em `Payment` (válido mesmo sem `Allocation`); fluxo `Ledger → AccountingPeriod → Reports` unidirecional; `Scope`/`Permission` leve em `Membership`; `BankConnection` ligada à conta do condomínio; `FinancialDocument` nunca fonte de verdade; `TenantDirectory` como requisito de F0.
 >
-> **Nota v3 (mantida):** correção do FCR, Obligation/Payment/Allocation/Ledger substitui `Quota.pago`, `Membership` substitui `user.role` fixo, remoção **definitiva** do QR físico, `ResolutionRule` (quórum não hardcoded), `AccountingPeriod` (três blocos), `AuditEvent` obrigatório.
+> **Nota v3 (mantida):** correcção do FCR; Obligation/Payment/Allocation/Ledger substitui `Quota.pago`; `Membership` substitui `user.role` fixo; remoção definitiva do QR físico; `ResolutionRule` (quórum não hardcoded); `AccountingPeriod` (três blocos); `AuditEvent` obrigatório.
 >
-> Esta não é uma lista de patches — é o mesmo domínio, com as fronteiras que faltavam.
+> Não é uma lista de patches — é o mesmo domínio, com as fronteiras que faltavam.
 
 ## Glossário
 
@@ -24,10 +24,10 @@
 | **Person** | Identidade única de uma pessoa — pode ter várias Memberships (ex: proprietária de A, representante de B) |
 | **Membership** | Vínculo entre uma Person, um Tenant, opcionalmente uma Fração, um Role e um Scope opcional — é isto que dá acesso, nunca um QR; inclui preferência de meio de convocatória (art. 1432.º), não uma entidade à parte |
 | **ConvocationDispatch** | Evidência de envio de convocatória (canal, destino, entrega, recibo, versão) — distinta da comunicação posterior das deliberações |
-| **DeliberationNoticeDispatch** | Evidência de comunicação das deliberações aos ausentes (art. 1432.º n.º 9) — **nunca** misturada com convocatória |
+| **DeliberationNoticeDispatch** | Evidência de comunicação das deliberações aos ausentes (art. 1432.º n.º 9) — nunca misturada com convocatória |
 | **RecordingSegment** | Segmento de áudio de uma `Reuniao` contínua (ordinal, início/fim, motivo de fecho) — falha técnica não termina a reunião |
 | **Role** | Papel dentro de um Membership. Conjunto inicial: `Owner`, `CoOwner`, `Proxy`, `Admin`, `PlatformAdmin`, `Fiscalizacao` — extensível; outros papéis (Accountant, Lawyer, etc.) ficam adiados |
-| **Fiscalizacao** | Role de **capacidade de controlo**: confirma ações sensíveis, não as cria. Não é obrigatório atribuir; não é uma entidade `ConselhoFiscal` com UI própria |
+| **Fiscalizacao** | Role de capacidade de controlo: confirma ações sensíveis, não as cria. Não é obrigatório atribuir; não é uma entidade `ConselhoFiscal` com UI própria |
 | **Scope/Permission** | Restringe o alcance de um Role (ex: "Admin" não implica automaticamente acesso absoluto a tudo) — modelo de dados já preparado, RBAC completo não construído agora |
 | **Convite (Invitation)** | Mecanismo único de onboarding de uma pessoa a uma fração — privado, de uso único, revogável, expira; inclui **verificação de contacto** (email/telefone), não verificação de identidade civil |
 | **Obligation (Obrigação)** | Valor que uma fração deve, por rubrica e período — deriva sempre de uma deliberação/orçamento aprovado, nunca inventada por um algoritmo |
@@ -439,9 +439,9 @@ Formato e SLA de exportação: decisão de implementação posterior; a arquitet
 24. **Pagamentos em dinheiro — `cash_status` + `verification_method`:** `registered` → `verified` (`second_person` | `bank_deposit`) → `deposited`. Evidência fotográfica obrigatória. Em `second_person`, registante ≠ verificador. Sem `Fiscalizacao` atribuída: só `bank_deposit`. Proibido Admin regista → Admin confirma. Obligation nunca liquidada definitivamente só em `registered`. Prazo de depósito: config do tenant, **default 5 dias úteis**. Ortogonal a `estado_alocação`.
 25. **Retenção diferenciada por categoria** — "keep forever" **não** é universal. Instrumentos legais (Regulamento, Actas) vs. documentos pessoais (ADR-030): lógicas distintas (instrumento legal vs. minimização RGPD).
 26. **Meta-regra de conflito legal explícita:** lei (obrigatória, piso mínimo) > regulamento do condomínio (pode ser mais exigente que a lei, nunca pode contrariá-la). Toda `ResolutionRule`/`AuthorityRule` que consulte "lei vs. regulamento" segue esta hierarquia sem exceção.
-27. **Funcionalidades financeiras/governança nucleares nunca dependem da disponibilidade de um provider LLM.** Ver saldo, votar, ver documentos, consultar Ledger têm de funcionar com Groq (ou qualquer LLM) em baixo — a IA é automação sobre o domínio, nunca dependência bloqueante.
+27. **Funcionalidades financeiras/governação nucleares nunca dependem da disponibilidade de um provider LLM.** Ver saldo, votar, ver documentos, consultar Ledger têm de funcionar com Groq (ou qualquer LLM) em baixo — a IA é automação sobre o domínio, nunca dependência bloqueante.
 28. **Saída do tenant / portabilidade é requisito arquitetural** — exportação financeira, documentos, Actas, histórico operacional e auditoria relevante devem ser possíveis; implementação completa pode ser posterior, o desenho não a pode impossibilitar (ADR-037).
-29. **Efeitos assíncronos críticos (jobs, notificações, side-effects financeiros/governança) são idempotentes e observáveis desde F0** — retry seguro, deduplicação por chave, visibilidade de falha; "fire-and-forget" sem telemetria é insuficiente (ADR-038).
+29. **Efeitos assíncronos críticos (jobs, notificações, side-effects financeiros/governação) são idempotentes e observáveis desde F0** — retry seguro, deduplicação por chave, visibilidade de falha; "fire-and-forget" sem telemetria é insuficiente (ADR-038).
 30. **Convocatória ≠ comunicação das deliberações (art. 1432.º).** Meio e evidência de convocatória (`Membership.convocation_*` + `ConvocationDispatch`) são distintos de `DeliberationNoticeDispatch` (n.º 9). Canal `unknown` / autorização em falta → **HUMAN REVIEW**, nunca AUTO SEND. Contagem dos 10 dias e efeitos do recibo de email: **validação legal obrigatória** — o produto não fecha a disputa jurisprudencial.
 31. **Falha técnica de gravação nunca termina a `Reuniao`.** Só intenção humana (`user_end_meeting` / acção equivalente) passa a `ENDED`. Interrupção técnica → segmento com `technical_interrupt`; reunião permanece `IN_PROGRESS` (sub-estado `interrupted` / `idle_open`).
 32. **Uma Acta por `Reuniao`; STT consome `RecordingSegment` por ordinal.** Ciclos MediaRecorder são segmentos da mesma reunião, não reuniões novas. Hard-delete pós-`APPROVED` cobre todos os segmentos.
