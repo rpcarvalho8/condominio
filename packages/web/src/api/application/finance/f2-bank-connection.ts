@@ -56,7 +56,13 @@ function noticeKey(tenantId: string, connectionId: string, validUntil: Date | nu
   return `f2:reauth:${tenantId}:${connectionId}:${until}`;
 }
 
-function looksLikeEmail(value: string): boolean {
+/**
+ * Fallback explícito quando não há Membership Admin/gestor activa com email.
+ * Endereço inválido de propósito — nunca um IBAN da conta do condomínio.
+ */
+export const BANK_REAUTH_ADMIN_FALLBACK = "admin@invalid";
+
+export function looksLikeEmail(value: string): boolean {
   const v = value.trim();
   if (!v.includes("@") || /\s/.test(v)) return false;
   // IBAN (PTxx…) must never be treated as a mailbox.
@@ -107,7 +113,15 @@ async function assertAuthorizedMembership(
     throw new DomainError(
       "membership_inactive",
       "authorizedByMembershipId não está activo",
-      400,
+      403,
+    );
+  }
+  // Gestor da conta do condomínio = Admin/PlatformAdmin. Owner de fração não autoriza (ADR-014).
+  if (!canManageFinance(String(row.roleCode))) {
+    throw new DomainError(
+      "authorizer_role_forbidden",
+      "authorizedByMembershipId exige papel de gestor (Admin/PlatformAdmin)",
+      403,
     );
   }
 }
@@ -227,7 +241,9 @@ async function issueReauthNotice(
     payload: {
       connectionId: input.connection.id,
       accountIban: input.connection.accountIban,
+      adminEmail: notifyEmails[0] ?? BANK_REAUTH_ADMIN_FALLBACK,
       notifyEmails,
+      authorizedByMembershipId: input.connection.authorizedByMembershipId,
       consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
       leadDays: BANK_REAUTH_LEAD_DAYS,
     },

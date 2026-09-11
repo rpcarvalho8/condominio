@@ -34,8 +34,8 @@ O plano (`06-FATIAS.md`) distingue:
 | `AccountingPeriod` open/close | ✅ | |
 | `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+**soma `openAmountCents`** |
 | Rotas `/api/f2/*` + migration `0006`/`0007` | ✅ | `applyF2FinanceSchema`; UNIQUE `(tenant_id, external_ref)` em `payments` e `f2_bank_movements` |
-| Aviso proactivo de reautorização `BankConnection` | ✅ | Lead 14 dias; outbox `notify.bank_reauth` para **email do Admin/PlatformAdmin**, nunca IBAN; `authorizedByMembershipId` validado no tenant |
-| Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; ingest transaccional + idempotente em conflito UNIQUE; sem Allocation automática; sem `Quota.pago`; `POST /payments/candidates` rejeita `csvText` > 512k chars e `movements[]` > 500 |
+| Aviso proactivo de reautorização `BankConnection` | ✅ | Lead 14 dias; outbox `notify.bank_reauth` para o **email** da Person da Membership Admin/gestor activa (`adminEmail` no payload); fallback `admin@invalid`; **nunca** o IBAN; `authorizedByMembershipId` validado (activo + tenant + papel gestor) |
+| Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; ingest transaccional + idempotente em conflito UNIQUE; match de nome por **tokens/palavras completas** (ANA ≠ JOANA/MARIANA); sem Allocation automática; sem `Quota.pago`; `POST /payments/candidates` rejeita `csvText` > 512k chars e `movements[]` > 500 |
 | Job avisos dia 1 (UTC) | ✅ | `GenerateMonthlyPaymentNotices` → `issuePaymentNotice` com montante = aberto restante |
 | Recibos na confirmação de Allocation + sweep | ✅ | Outbox `f2.issue_receipt` + `/jobs/receipt-sweep` |
 
@@ -59,7 +59,8 @@ O plano (`06-FATIAS.md`) distingue:
 ## Transplante Fonte (o que se reutilizou)
 
 - Extração de pagador no descritivo SEPA/Santander e CSV multi-banco → `f2-csv-movements.ts` / `f2-identity.ts` (cópia genérica; **não** importa `identity-matrix.ts` nem `csv-bank-parser.ts`, que puxam `Quota` / PII / mapas do prédio).
-- Match tenant-scoped: `constitution_fracoes` + `owner_contact_drafts` confirmados. Resultado = `Payment` candidato, nunca cascata Fonte.
+- Match tenant-scoped: `constitution_fracoes` + `owner_contact_drafts` confirmados. Nome por igualdade normalizada ou tokens completos (nunca substring: ANA ≠ JOANA). Resultado = `Payment` candidato, nunca cascata Fonte.
+- Canal `email` do aviso de reauth: `Person.email` do Admin/gestor activo. Sem email → placeholder `admin@invalid`. O IBAN da conta fica no payload só como contexto, nunca como `notification_delivery.destination`.
 
 ## Como testar
 

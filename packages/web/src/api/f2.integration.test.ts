@@ -36,6 +36,7 @@ import {
   MAX_CANDIDATE_MOVEMENTS,
 } from "./application/finance/f2-candidates";
 import {
+  BANK_REAUTH_ADMIN_FALLBACK,
   sweepBankReauthNotices,
   upsertBankConnection,
 } from "./application/finance/f2-bank-connection";
@@ -896,8 +897,10 @@ describe("F2 BankConnection aviso proactivo de reautorização", () => {
       [TENANT],
     );
     expect(deliveries.rows.length).toBe(1);
-    expect(String(deliveries.rows[0]!.destination)).toBe("none");
+    expect(String(deliveries.rows[0]!.destination)).toBe(BANK_REAUTH_ADMIN_FALLBACK);
+    expect(String(deliveries.rows[0]!.destination)).toContain("@");
     expect(String(deliveries.rows[0]!.destination)).not.toBe(iban);
+    expect(String(deliveries.rows[0]!.destination).startsWith("PT")).toBe(false);
     expect(String(deliveries.rows[0]!.status)).toBe("skipped");
   });
 
@@ -926,6 +929,22 @@ describe("F2 BankConnection aviso proactivo de reautorização", () => {
         authorizedByMembershipId: otherId,
       }),
     ).rejects.toMatchObject({ code: "membership_not_found" });
+
+    const owner = await seedActor({
+      userId: "user-owner-authz",
+      roleCode: "Owner",
+      name: "Owner Authz",
+      email: "owner-authz@test",
+    });
+    const ownerMem = await client.execute(`SELECT id FROM memberships WHERE person_id = ?`, [
+      owner.id,
+    ]);
+    await expect(
+      upsertBankConnection(deps, {
+        tenantId: TENANT,
+        authorizedByMembershipId: String(ownerMem.rows[0]!.id),
+      }),
+    ).rejects.toMatchObject({ code: "authorizer_role_forbidden", httpStatus: 403 });
   });
 });
 
@@ -1142,10 +1161,13 @@ describe("F2 identity — limiar de código de fração", () => {
     expect(extractFracaoCodeFromDescription("FRACAO 12B", ["12B"])).toBe("12B");
   });
 
-  test("nome ANA não casa com MARIANA (substring); igualdade/tokens sim", () => {
+  test("nome ANA não casa com MARIANA/JOANA (substring); igualdade/tokens sim", () => {
     expect(identityNameMatches("ANA", "MARIANA")).toBe(false);
     expect(identityNameMatches("ANA", "Mariana Silva")).toBe(false);
     expect(identityNameMatches("MARIANA", "ANA")).toBe(false);
+    expect(identityNameMatches("ANA", "JOANA")).toBe(false);
+    expect(identityNameMatches("JOANA", "ANA")).toBe(false);
+    expect(identityNameMatches("ANA", "JOANA SILVA")).toBe(false);
     expect(identityNameMatches("Mariana Silva", "MARIANA SILVA")).toBe(true);
     expect(identityNameMatches("MARIA SILVA", "Maria Silva Santos")).toBe(true);
     expect(identityNameMatches("JOAO COSTA", "Joao")).toBe(false);
@@ -1329,6 +1351,34 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
           status: 403,
         });
       }
+    }
+  });
+
+  test("sem membership → 403 nas rotas novas", async () => {
+    const person = await createPersonRepo(deps.db).insert({
+      id: crypto.randomUUID(),
+      userId: "user-no-membership",
+      name: "Sem Membership",
+      email: "no-membership@test",
+      createdAt: new Date(),
+    });
+    currentUser = { id: person.userId!, email: "no-membership@test" };
+
+    for (const route of managerRoutes) {
+      const res = await app.request(route.path, {
+        method: route.method,
+        headers: route.body ? { "content-type": "application/json" } : undefined,
+        body: route.body ? JSON.stringify(route.body) : undefined,
+      });
+      expect({
+        path: route.path,
+        method: route.method,
+        status: res.status,
+      }).toEqual({
+        path: route.path,
+        method: route.method,
+        status: 403,
+      });
     }
   });
 });

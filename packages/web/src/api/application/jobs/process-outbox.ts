@@ -5,7 +5,11 @@ import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createContentUploadRepo } from "../../infra/repos/content-upload-repo";
 import { createNotificationDeliveryRepo } from "../../infra/repos/notification-delivery-repo";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
-import { resolveFinanceManagerEmails } from "../finance/f2-bank-connection";
+import {
+  BANK_REAUTH_ADMIN_FALLBACK,
+  looksLikeEmail,
+  resolveFinanceManagerEmails,
+} from "../finance/f2-bank-connection";
 
 export type OutboxHandler = (job: OutboxJob, deps: KernelDeps) => Promise<void>;
 
@@ -89,22 +93,26 @@ async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise
 
   const liveEmails = await resolveFinanceManagerEmails(deps, job.tenantId);
   const payloadEmails = Array.isArray(job.payload.notifyEmails)
-    ? job.payload.notifyEmails
-        .map((e) => String(e ?? "").trim())
-        .filter((e) => e.includes("@") && !/^[A-Z]{2}\d{2}/i.test(e.replace(/\s/g, "")))
+    ? job.payload.notifyEmails.map((e) => String(e ?? "").trim()).filter(looksLikeEmail)
     : [];
-  const notifyEmails = liveEmails.length > 0 ? liveEmails : payloadEmails;
-  const destination = notifyEmails[0] ?? null;
-  const iban = String(job.payload.accountIban ?? "").trim();
-  if (destination && iban && destination.replace(/\s/g, "") === iban.replace(/\s/g, "")) {
-    throw new Error("reauth_destination_must_not_be_iban");
+  const payloadAdmin =
+    typeof job.payload.adminEmail === "string" && looksLikeEmail(job.payload.adminEmail)
+      ? [job.payload.adminEmail.trim()]
+      : [];
+  const notifyEmails = liveEmails.length > 0 ? liveEmails : [...payloadEmails, ...payloadAdmin];
+  let destination = notifyEmails[0] ?? BANK_REAUTH_ADMIN_FALLBACK;
+  if (!looksLikeEmail(destination)) destination = BANK_REAUTH_ADMIN_FALLBACK;
+
+  const iban = String(job.payload.accountIban ?? "").trim().replace(/\s/g, "");
+  if (iban && destination.replace(/\s/g, "").toUpperCase() === iban.toUpperCase()) {
+    destination = BANK_REAUTH_ADMIN_FALLBACK;
   }
 
-  const hasMailbox = Boolean(destination);
+  const hasMailbox = notifyEmails.length > 0 && looksLikeEmail(destination);
   await repo.insert({
     tenantId: job.tenantId,
     channel: "email",
-    destination: hasMailbox ? destination! : "none",
+    destination,
     template: "bank_reauth_required",
     status: hasMailbox ? "attempted" : "skipped",
     providerMessageId: `local-${job.id}`,
@@ -117,7 +125,7 @@ async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise
     entityType: "notification_delivery",
     entityId: job.idempotencyKey,
     payload: {
-      destination: hasMailbox ? destination : "none",
+      destination,
       notifyEmails,
       template: "bank_reauth_required",
       jobId: job.id,
