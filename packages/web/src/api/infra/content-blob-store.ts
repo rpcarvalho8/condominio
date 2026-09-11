@@ -3,21 +3,53 @@ import fs from "node:fs";
 import path from "node:path";
 import { DomainError } from "../domain/errors";
 
-const DEFAULT_ROOT =
-  String(process.env.CONTENT_BLOB_ROOT ?? "").trim() ||
-  path.join(process.cwd(), "data", "content");
+export const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
+
+function defaultContentBlobRoot(): string {
+  return (
+    String(process.env.CONTENT_BLOB_ROOT ?? "").trim() ||
+    path.join(process.cwd(), "data", "content")
+  );
+}
+
+function resolveBlobRoot(root?: string): string {
+  const raw = root?.trim() || defaultContentBlobRoot();
+  return path.resolve(raw);
+}
 
 function tenantDir(root: string, tenantId: string): string {
   const safe = tenantId.replace(/[^a-zA-Z0-9._-]/g, "_");
   return path.join(root, safe);
 }
 
+function assertInsideRoot(absolutePath: string, root: string): string {
+  const resolved = path.resolve(absolutePath);
+  const resolvedRoot = path.resolve(root);
+  const rel = path.relative(resolvedRoot, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new DomainError("invalid_hash", "contentHash inválido", 400);
+  }
+  return resolved;
+}
+
+/** Rejects anything that is not a 64-char lowercase sha256 hex digest. */
+export function assertSha256ContentHash(contentHash: string): string {
+  const hash = contentHash.trim().toLowerCase();
+  if (!SHA256_HEX_RE.test(hash)) {
+    throw new DomainError("invalid_hash", "contentHash deve ser sha256 hex", 400);
+  }
+  return hash;
+}
+
 export function contentBlobPath(
   tenantId: string,
   contentHash: string,
-  root = DEFAULT_ROOT,
+  root?: string,
 ): string {
-  return path.join(tenantDir(root, tenantId), `${contentHash}.bin`);
+  const hash = assertSha256ContentHash(contentHash);
+  const resolvedRoot = resolveBlobRoot(root);
+  const absolutePath = path.join(tenantDir(resolvedRoot, tenantId), `${hash}.bin`);
+  return assertInsideRoot(absolutePath, resolvedRoot);
 }
 
 /**
@@ -36,8 +68,7 @@ export async function storeContentBlob(input: {
     throw new DomainError("empty_file", "Ficheiro vazio", 400);
   }
   const contentHash = createHash("sha256").update(buf).digest("hex");
-  const root = input.root ?? DEFAULT_ROOT;
-  const absolutePath = contentBlobPath(tenantId, contentHash, root);
+  const absolutePath = contentBlobPath(tenantId, contentHash, input.root);
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
   if (!fs.existsSync(absolutePath)) {
     fs.writeFileSync(absolutePath, buf);
@@ -50,11 +81,7 @@ export function readContentBlob(input: {
   contentHash: string;
   root?: string;
 }): Buffer {
-  const absolutePath = contentBlobPath(
-    input.tenantId,
-    input.contentHash.trim().toLowerCase(),
-    input.root ?? DEFAULT_ROOT,
-  );
+  const absolutePath = contentBlobPath(input.tenantId, input.contentHash, input.root);
   if (!fs.existsSync(absolutePath)) {
     throw new DomainError("blob_missing", "Conteúdo do ficheiro não encontrado em disco", 404);
   }

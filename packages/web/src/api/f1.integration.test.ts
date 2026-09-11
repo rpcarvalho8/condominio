@@ -5,8 +5,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
+import { Hono } from "hono";
 import fs from "node:fs";
 import path from "node:path";
+import * as XLSX from "xlsx";
 import * as schema from "./database/schema";
 import {
   approveBudgetAndCreateObligations,
@@ -16,6 +18,7 @@ import {
   listConstitutionFracoes,
   registerIngestDocument,
 } from "./application/constitution/f1-constitution";
+import { F1_MAX_UPLOAD_BYTES } from "./application/constitution/f1-upload-guard";
 import {
   extractDocumentFromStoredContent,
   uploadIngestDocumentFile,
@@ -25,13 +28,37 @@ import { BUDGET_LINE_KINDS, INGEST_DOCUMENT_KINDS } from "./domain/constitution"
 import { applyDomainKernelSchema } from "./infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "./infra/f1-schema";
 import type { KernelDeps } from "./infra/kernel-deps";
+import { createMembershipRepo } from "./infra/repos/membership-repo";
+import { createPersonRepo } from "./infra/repos/person-repo";
+import type { KernelAuthUser, KernelVariables } from "./middleware/membership";
+import { createF1Routes } from "./routes/f1";
 
 const DB_PATH = path.join(import.meta.dir, "..", "..", ".tmp-test-f1.db");
 const BLOB_ROOT = path.join(import.meta.dir, "..", "..", ".tmp-test-f1-content");
+process.env.CONTENT_BLOB_ROOT = BLOB_ROOT;
 
 let client: ReturnType<typeof createClient>;
 let deps: KernelDeps;
+let f1App: Hono;
+let currentUser: KernelAuthUser | null = null;
 const TENANT = "tenant-f1";
+const ADMIN_USER_ID = "user-f1-admin";
+
+function buildF1App() {
+  return new Hono<{ Variables: KernelVariables }>()
+    .use(async (c, next) => {
+      c.set("user", currentUser);
+      await next();
+    })
+    .route("/f1", createF1Routes(deps));
+}
+
+function xlsxFracoes(rows: Array<[string, number]>): Buffer {
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([["codigo", "permilagem"], ...rows]);
+  XLSX.utils.book_append_sheet(wb, ws, "fracoes");
+  return Buffer.from(XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer);
+}
 
 beforeAll(async () => {
   process.env.CONTENT_BLOB_ROOT = BLOB_ROOT;
@@ -51,6 +78,23 @@ beforeAll(async () => {
   await applyF1ConstitutionSchema(client);
   const db = drizzle(client, { schema });
   deps = { db, getTenantId: () => TENANT };
+  const personRepo = createPersonRepo(deps.db);
+  const membershipRepo = createMembershipRepo(deps.db);
+  const person = await personRepo.insert({
+    id: crypto.randomUUID(),
+    userId: ADMIN_USER_ID,
+    name: "Admin F1",
+    email: "admin-f1@example.test",
+    createdAt: new Date(),
+  });
+  await membershipRepo.insert({
+    id: crypto.randomUUID(),
+    personId: person.id,
+    tenantId: TENANT,
+    roleCode: "Admin",
+    createdAt: new Date(),
+  });
+  f1App = buildF1App();
 });
 
 beforeEach(async () => {
@@ -282,5 +326,118 @@ describe("F1 constituição", () => {
       budgetId: budget.budget.id,
     });
     expect(approved.obligations.length).toBe(4);
+  });
+
+  test("upload Excel → extract-from-file produz frações", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "fracoes.xlsx",
+      bytes: xlsxFracoes([
+        ["A", 550],
+        ["B", 450],
+      ]),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(extracted.lines).toHaveLength(2);
+    expect(
+      extracted.lines
+        .map((l) => JSON.parse(l.payloadJson) as { codigo: string })
+        .map((p) => p.codigo)
+        .sort(),
+    ).toEqual(["A", "B"]);
+  });
+
+  test("upload texto com padrões ‰ → extract-from-file", async () => {
+    const text = ["Fração A — 600‰", "Fração B — 400‰", ""].join("\n");
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "fracoes.txt",
+      bytes: Buffer.from(text, "utf8"),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(extracted.lines).toHaveLength(2);
+    expect(extracted.lines.every((l) => l.sourceExcerpt.includes("‰"))).toBe(true);
+  });
+
+  test("extract-from-file duplicado → 409", async () => {
+    const csv = ["codigo,permilagem", "A,1000", ""].join("\n");
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "uma.csv",
+      bytes: Buffer.from(csv, "utf8"),
+    });
+    await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    await expect(
+      extractDocumentFromStoredContent(deps, {
+        tenantId: TENANT,
+        documentId: document.id,
+      }),
+    ).rejects.toMatchObject({ code: "already_extracted", httpStatus: 409 });
+  });
+
+  test("registerIngestDocument rejeita contentHash com path traversal", async () => {
+    await expect(
+      registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename: "x.csv",
+        contentHash: "../../etc/passwd",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_hash", httpStatus: 400 });
+  });
+});
+
+describe("F1 HTTP upload guards", () => {
+  test("Content-Length acima do máximo → 400 sem exigir body enorme", async () => {
+    currentUser = { id: ADMIN_USER_ID, email: "admin-f1@example.test", name: "Admin F1" };
+    const res = await f1App.request("/f1/documents/upload", {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=----f1",
+        "content-length": String(F1_MAX_UPLOAD_BYTES + 1),
+      },
+      body: "tiny",
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { message: string };
+    expect(json.message.toLowerCase()).toContain("grande");
+  });
+
+  test("PDF / tipo fora da allowlist → 400", async () => {
+    currentUser = { id: ADMIN_USER_ID, email: "admin-f1@example.test", name: "Admin F1" };
+    const form = new FormData();
+    form.set("kind", INGEST_DOCUMENT_KINDS.regulamento);
+    form.set("file", new File(["%PDF-1.4 fake"], "regulamento.pdf", { type: "application/pdf" }));
+    const res = await f1App.request("/f1/documents/upload", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { message: string };
+    expect(json.message.toLowerCase()).toMatch(/tipo|csv|excel/);
+  });
+
+  test("CSV dentro do limite → 201", async () => {
+    currentUser = { id: ADMIN_USER_ID, email: "admin-f1@example.test", name: "Admin F1" };
+    const form = new FormData();
+    form.set("kind", INGEST_DOCUMENT_KINDS.regulamento);
+    form.set(
+      "file",
+      new File(["codigo,permilagem\nA,1000\n"], "fracoes.csv", { type: "text/csv" }),
+    );
+    const res = await f1App.request("/f1/documents/upload", { method: "POST", body: form });
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as { document: { filename: string; contentHash: string } };
+    expect(json.document.filename).toBe("fracoes.csv");
+    expect(json.document.contentHash).toMatch(/^[a-f0-9]{64}$/);
   });
 });

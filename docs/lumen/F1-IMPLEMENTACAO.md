@@ -11,7 +11,7 @@
 
 | Capacidade | Estado | Notas |
 |---|---|---|
-| Upload real de ficheiro (bytes em disco) | ✅ | `POST /api/f1/documents/upload` + content-addressed blob |
+| Upload real de ficheiro (bytes em disco) | ✅ | `POST /api/f1/documents/upload` + content-addressed blob; max 10MB; só csv/xlsx/xls/txt |
 | `content_uploads` + `ingest_documents` | ✅ | Upload ≠ confirmação |
 | Extracção CSV/Excel → `extract_lines` | ✅ | Determinística; `sourceExcerpt` = linha de origem |
 | Extracção texto com padrões ‰ | ✅ | Heurística; sem OCR |
@@ -22,6 +22,8 @@
 | Rotas `/api/f1/*` | ✅ | Membership + manager |
 
 ## Ainda fora do critério pleno / adaptadores seguintes
+
+Este PR **não** fecha a F1. Falta, de propósito:
 
 - Extrator LLM/OCR real de PDF binário e foto (substituível pelo mesmo `StructuredExtraction`)
 - Object storage cloud (hoje: disco local `data/content`)
@@ -36,7 +38,8 @@ cd packages/web && bun run test:f1
 
 ## API (resumo)
 
-- `POST /api/f1/documents/upload` (multipart: `kind` + `file`)
+- `POST /api/f1/documents/upload` (multipart: `kind` + `file`; 400 se >10MB ou tipo fora de csv/xlsx/xls/txt)
+- `contentHash` em blob/register/extract é só sha256 hex (`/^[a-f0-9]{64}$/`)
 - `POST /api/f1/documents`
 - `POST /api/f1/documents/:id/extract`
 - `POST /api/f1/documents/:id/extract-from-file`
