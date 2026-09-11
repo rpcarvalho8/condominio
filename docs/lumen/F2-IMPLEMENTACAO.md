@@ -29,7 +29,7 @@ O plano (`06-FATIAS.md`) distingue:
 | Cash `registered → verified → deposited` (ADR-028) | ✅ | Fiscalizacao `second_person`; `bank_deposit`/`deposited` exigem movimento tenant-scoped |
 | Cash `registered` não liquida Obligation | ✅ | |
 | `SettlementPolicy` + `legal_basis` | ✅ | Seed default |
-| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | `BEGIN IMMEDIATE`; retry unique `(tenant_id, sequence)`; `open_amount >=` |
+| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | Mutex por tenant + `BEGIN IMMEDIATE`; retry unique `(tenant_id, sequence)`; `open_amount >=` |
 | `AccountingPeriod` open/close | ✅ | |
 | `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+montante |
 | Rotas `/api/f2/*` + migration `0006` | ✅ | `applyF2FinanceSchema` |

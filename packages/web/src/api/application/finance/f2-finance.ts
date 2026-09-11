@@ -41,6 +41,28 @@ type Actor = {
 
 const LEDGER_WRITE_RETRIES = 8;
 
+/** In-process per-tenant queue (ADR-029). Complements BEGIN IMMEDIATE:
+ * local libSQL busy-waits synchronously, which would deadlock two async writers. */
+const tenantMutexes = new Map<string, Promise<void>>();
+
+async function withTenantMutex<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = tenantMutexes.get(tenantId) ?? Promise.resolve();
+  let unlock: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  tenantMutexes.set(
+    tenantId,
+    prev.catch(() => undefined).then(() => held),
+  );
+  await prev.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    unlock();
+  }
+}
+
 function isUniqueConstraintError(err: unknown): boolean {
   const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
   return (
@@ -733,7 +755,9 @@ export async function allocatePayment(
     actor?: Actor;
   },
 ) {
-  return withTenantLedgerLockRetry(deps, (locked) => allocatePaymentLocked(locked, input));
+  return withTenantMutex(input.tenantId, () =>
+    withTenantLedgerLockRetry(deps, (locked) => allocatePaymentLocked(locked, input)),
+  );
 }
 
 async function allocatePaymentLocked(

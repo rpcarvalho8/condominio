@@ -519,20 +519,23 @@ describe("F2 ADR-029 hash-chain concurrency", () => {
 
     const clientA = createClient({ url: DB_URL });
     const clientB = createClient({ url: DB_URL });
-    await clientA.execute("PRAGMA busy_timeout=8000");
-    await clientB.execute("PRAGMA busy_timeout=8000");
-    const depsA: KernelDeps = { db: drizzle(clientA, { schema }), getTenantId: () => TENANT };
-    const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT };
+    try {
+      await clientA.execute("PRAGMA busy_timeout=250");
+      await clientB.execute("PRAGMA busy_timeout=250");
+      const depsA: KernelDeps = { db: drizzle(clientA, { schema }), getTenantId: () => TENANT };
+      const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT };
 
-    const settled = await Promise.allSettled([
-      allocatePayment(depsA, { tenantId: TENANT, paymentId: p1.id }),
-      allocatePayment(depsB, { tenantId: TENANT, paymentId: p2.id }),
-    ]);
-    clientA.close();
-    clientB.close();
+      const settled = await Promise.allSettled([
+        allocatePayment(depsA, { tenantId: TENANT, paymentId: p1.id }),
+        allocatePayment(depsB, { tenantId: TENANT, paymentId: p2.id }),
+      ]);
 
-    const fulfilled = settled.filter((s) => s.status === "fulfilled");
-    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+      const fulfilled = settled.filter((s) => s.status === "fulfilled");
+      expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      clientA.close();
+      clientB.close();
+    }
 
     const seq = await client.execute(
       `SELECT sequence FROM ledger_entries WHERE tenant_id = ? ORDER BY sequence`,
@@ -557,7 +560,7 @@ describe("F2 ADR-029 hash-chain concurrency", () => {
       [keep.id],
     );
     expect(Number(allocSum.rows[0]!.t)).toBe(10_000);
-  });
+  }, 20_000);
 
   test("mesmo payment alocado duas vezes em paralelo não duplica", async () => {
     const { fracao } = await seedFracaoWithObligations();
@@ -570,19 +573,21 @@ describe("F2 ADR-029 hash-chain concurrency", () => {
 
     const clientA = createClient({ url: DB_URL });
     const clientB = createClient({ url: DB_URL });
-    await clientA.execute("PRAGMA busy_timeout=8000");
-    await clientB.execute("PRAGMA busy_timeout=8000");
-    const depsA: KernelDeps = { db: drizzle(clientA, { schema }), getTenantId: () => TENANT };
-    const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT };
+    try {
+      await clientA.execute("PRAGMA busy_timeout=250");
+      await clientB.execute("PRAGMA busy_timeout=250");
+      const depsA: KernelDeps = { db: drizzle(clientA, { schema }), getTenantId: () => TENANT };
+      const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT };
 
-    const settled = await Promise.allSettled([
-      allocatePayment(depsA, { tenantId: TENANT, paymentId: payment.id }),
-      allocatePayment(depsB, { tenantId: TENANT, paymentId: payment.id }),
-    ]);
-    clientA.close();
-    clientB.close();
-
-    expect(settled.filter((s) => s.status === "fulfilled").length).toBe(2);
+      const settled = await Promise.allSettled([
+        allocatePayment(depsA, { tenantId: TENANT, paymentId: payment.id }),
+        allocatePayment(depsB, { tenantId: TENANT, paymentId: payment.id }),
+      ]);
+      expect(settled.filter((s) => s.status === "fulfilled").length).toBe(2);
+    } finally {
+      clientA.close();
+      clientB.close();
+    }
 
     const allocs = await client.execute(
       `SELECT COALESCE(SUM(amount_cents), 0) AS t FROM allocations WHERE payment_id = ?`,
@@ -592,7 +597,7 @@ describe("F2 ADR-029 hash-chain concurrency", () => {
 
     const chain = await validateLedgerChain(deps, { tenantId: TENANT });
     expect(chain.ok).toBe(true);
-  });
+  }, 20_000);
 });
 
 describe("F2 HTTP Fiscalizacao vs gestor", () => {
