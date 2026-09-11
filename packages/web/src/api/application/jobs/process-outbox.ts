@@ -5,6 +5,7 @@ import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createContentUploadRepo } from "../../infra/repos/content-upload-repo";
 import { createNotificationDeliveryRepo } from "../../infra/repos/notification-delivery-repo";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
+import { resolveFinanceManagerEmails } from "../finance/f2-bank-connection";
 
 export type OutboxHandler = (job: OutboxJob, deps: KernelDeps) => Promise<void>;
 
@@ -86,29 +87,44 @@ async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise
   const existing = await repo.findByIdempotency(job.tenantId, job.idempotencyKey);
   if (existing) return;
 
-  const destination = String(job.payload.accountIban ?? "").trim() || `tenant:${job.tenantId}:bank-reauth`;
+  const liveEmails = await resolveFinanceManagerEmails(deps, job.tenantId);
+  const payloadEmails = Array.isArray(job.payload.notifyEmails)
+    ? job.payload.notifyEmails
+        .map((e) => String(e ?? "").trim())
+        .filter((e) => e.includes("@") && !/^[A-Z]{2}\d{2}/i.test(e.replace(/\s/g, "")))
+    : [];
+  const notifyEmails = liveEmails.length > 0 ? liveEmails : payloadEmails;
+  const destination = notifyEmails[0] ?? null;
+  const iban = String(job.payload.accountIban ?? "").trim();
+  if (destination && iban && destination.replace(/\s/g, "") === iban.replace(/\s/g, "")) {
+    throw new Error("reauth_destination_must_not_be_iban");
+  }
+
+  const hasMailbox = Boolean(destination);
   await repo.insert({
     tenantId: job.tenantId,
     channel: "email",
-    destination,
+    destination: hasMailbox ? destination! : "none",
     template: "bank_reauth_required",
-    status: "attempted",
+    status: hasMailbox ? "attempted" : "skipped",
     providerMessageId: `local-${job.id}`,
     idempotencyKey: job.idempotencyKey,
   });
 
   await createAuditEventRepo(deps.db).append({
     tenantId: job.tenantId,
-    type: "notification.email.attempted",
+    type: hasMailbox ? "notification.email.attempted" : "notification.email.skipped",
     entityType: "notification_delivery",
     entityId: job.idempotencyKey,
     payload: {
-      destination,
+      destination: hasMailbox ? destination : "none",
+      notifyEmails,
       template: "bank_reauth_required",
       jobId: job.id,
       connectionId: job.payload.connectionId ?? null,
+      accountIban: job.payload.accountIban ?? null,
     },
-    reason: "outbox_bank_reauth_notice",
+    reason: hasMailbox ? "outbox_bank_reauth_notice" : "outbox_bank_reauth_notice_no_manager_email",
     source: "outbox",
     requestId: job.correlationId,
   });

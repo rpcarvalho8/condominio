@@ -34,7 +34,7 @@ O plano (`06-FATIAS.md`) distingue:
 | `AccountingPeriod` open/close | ✅ | |
 | `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+**soma `openAmountCents`** |
 | Rotas `/api/f2/*` + migration `0006`/`0007` | ✅ | `applyF2FinanceSchema`; UNIQUE `(tenant_id, external_ref)` em `payments` e `f2_bank_movements` |
-| Aviso proactivo de reautorização `BankConnection` | ✅ | Lead 14 dias; outbox `notify.bank_reauth`; **não** é sync PSD2 |
+| Aviso proactivo de reautorização `BankConnection` | ✅ | Lead 14 dias; outbox `notify.bank_reauth` para **email do Admin/PlatformAdmin**, nunca IBAN; `authorizedByMembershipId` validado no tenant |
 | Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; ingest transaccional + idempotente em conflito UNIQUE; sem Allocation automática; sem `Quota.pago`; `POST /payments/candidates` rejeita `csvText` > 512k chars e `movements[]` > 500 |
 | Job avisos dia 1 (UTC) | ✅ | `GenerateMonthlyPaymentNotices` → `issuePaymentNotice` com montante = aberto restante |
 | Recibos na confirmação de Allocation + sweep | ✅ | Outbox `f2.issue_receipt` + `/jobs/receipt-sweep` |

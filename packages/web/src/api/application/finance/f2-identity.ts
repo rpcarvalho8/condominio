@@ -40,12 +40,25 @@ export function extractPayerFromDescription(descricao?: string | null): string |
     /(?:TRF\.?\s*IMED\.?|TRANSF(?:ERENCIA)?(?:\s*IMED(?:IATA)?)?|TRF\s+CRED\s+(?:SEPA\+|INTRABANC)?)\s*DE\s+(.+?)(?:\s*[-–]\s*\d{5,}|\s*$)/i,
   );
   if (m1?.[1]) {
-    const name = m1[1].replace(/\s+DA\s*$/i, "").trim();
+    const name = stripFracaoSuffix(m1[1]);
     if (name.length >= 3) return name;
   }
   const m2 = raw.match(/^DE\s+(.+?)(?:\s*[-–]\s*\d{5,})\s*$/i);
-  if (m2?.[1] && m2[1].trim().length >= 3) return m2[1].trim();
+  if (m2?.[1]) {
+    const name = stripFracaoSuffix(m2[1]);
+    if (name.length >= 3) return name;
+  }
   return null;
+}
+
+/** Remove sufixo «FRAÇÃO A» / «FRACAO 12B» do nome extraído do descritivo. */
+function stripFracaoSuffix(raw: string): string {
+  const noDa = raw.replace(/\s+DA\s*$/i, "").trim();
+  const parts = normalizeIdentityText(noDa).split(" ").filter(Boolean);
+  if (parts.length >= 3 && /^FRAC[A-Z0-9]*$/.test(parts[parts.length - 2]!)) {
+    return parts.slice(0, -2).join(" ");
+  }
+  return noDa;
 }
 
 function escapeRegExp(value: string): string {
@@ -106,15 +119,32 @@ export async function loadTenantIdentity(
   }));
 }
 
+function identityNameTokens(s: string): string[] {
+  return normalizeIdentityText(s)
+    .split(" ")
+    .filter((t) => t.length >= 3);
+}
+
+/**
+ * Nome do pagador vs contacto confirmado: igualdade exacta ou tokens completos.
+ * Não usa substring bidireccional (ANA ⊄ MARIANA).
+ */
+export function identityNameMatches(payerName: string, storedName: string): boolean {
+  const payer = normalizeIdentityText(payerName);
+  const stored = normalizeIdentityText(storedName);
+  if (payer.length < 3 || stored.length < 3) return false;
+  if (payer === stored) return true;
+  const payerTok = identityNameTokens(payerName);
+  const storedTok = identityNameTokens(storedName);
+  if (payerTok.length === 0 || storedTok.length === 0) return false;
+  const storedSet = new Set(storedTok);
+  return payerTok.every((t) => storedSet.has(t));
+}
+
 function uniqueNameHits(name: string, rows: TenantIdentityRow[]): TenantIdentityRow[] {
   const needle = normalizeIdentityText(name);
   if (needle.length < 3) return [];
-  return rows.filter((r) =>
-    r.names.some((n) => {
-      const hay = normalizeIdentityText(n);
-      return hay.includes(needle) || needle.includes(hay);
-    }),
-  );
+  return rows.filter((r) => r.names.some((n) => identityNameMatches(name, n)));
 }
 
 /**
@@ -132,7 +162,8 @@ export async function matchCandidateIdentity(
 ): Promise<IdentityMatch> {
   const rows = await loadTenantIdentity(deps, input.tenantId);
   const extracted = extractPayerFromDescription(input.description);
-  const payerName = (input.debtorName?.trim() || extracted || "").trim() || null;
+  const rawPayer = (input.debtorName?.trim() || extracted || "").trim();
+  const payerName = rawPayer ? stripFracaoSuffix(rawPayer) || rawPayer : null;
   const criteria: string[] = [];
   let fracao: TenantIdentityRow | null = null;
   let confidence = 0;

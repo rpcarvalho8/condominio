@@ -4,12 +4,14 @@
  * Sync Enable Banking / PSD2 fica para depois dos testes adversariais do kernel.
  */
 import { and, eq } from "drizzle-orm";
-import { condoBankConnections } from "../../database/schema";
+import { condoBankConnections, memberships, persons } from "../../database/schema";
 import {
   BANK_CONSENT_STATUS,
   BANK_REAUTH_LEAD_DAYS,
 } from "../../domain/finance";
 import { DomainError } from "../../domain/errors";
+import { MEMBERSHIP_STATUS } from "../../domain/membership";
+import { canManageFinance } from "../../domain/roles";
 import { OUTBOX_JOB_TYPES } from "../../domain/outbox";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
@@ -54,6 +56,62 @@ function noticeKey(tenantId: string, connectionId: string, validUntil: Date | nu
   return `f2:reauth:${tenantId}:${connectionId}:${until}`;
 }
 
+function looksLikeEmail(value: string): boolean {
+  const v = value.trim();
+  if (!v.includes("@") || /\s/.test(v)) return false;
+  // IBAN (PTxx…) must never be treated as a mailbox.
+  if (/^[A-Z]{2}\d{2}/i.test(v.replace(/\s/g, ""))) return false;
+  return true;
+}
+
+/** Active Admin / PlatformAdmin emails for the tenant — never IBAN. */
+export async function resolveFinanceManagerEmails(
+  deps: KernelDeps,
+  tenantId: string,
+): Promise<string[]> {
+  const rows = await deps.db
+    .select({
+      email: persons.email,
+      roleCode: memberships.roleCode,
+    })
+    .from(memberships)
+    .innerJoin(persons, eq(persons.id, memberships.personId))
+    .where(
+      and(eq(memberships.tenantId, tenantId), eq(memberships.status, MEMBERSHIP_STATUS.active)),
+    );
+  const emails = rows
+    .filter((r) => canManageFinance(String(r.roleCode)))
+    .map((r) => String(r.email ?? "").trim())
+    .filter(looksLikeEmail);
+  return [...new Set(emails)];
+}
+
+async function assertAuthorizedMembership(
+  deps: KernelDeps,
+  tenantId: string,
+  membershipId: string,
+) {
+  const [row] = await deps.db
+    .select()
+    .from(memberships)
+    .where(eq(memberships.id, membershipId))
+    .limit(1);
+  if (!row || row.tenantId !== tenantId) {
+    throw new DomainError(
+      "membership_not_found",
+      "authorizedByMembershipId inexistente neste tenant",
+      400,
+    );
+  }
+  if (row.status !== MEMBERSHIP_STATUS.active) {
+    throw new DomainError(
+      "membership_inactive",
+      "authorizedByMembershipId não está activo",
+      400,
+    );
+  }
+}
+
 export async function upsertBankConnection(
   deps: KernelDeps,
   input: {
@@ -80,6 +138,11 @@ export async function upsertBankConnection(
         ? BANK_CONSENT_STATUS.reauthorizationRequired
         : consentStatus;
 
+  const authorizedBy = input.authorizedByMembershipId?.trim() || null;
+  if (authorizedBy) {
+    await assertAuthorizedMembership(deps, input.tenantId, authorizedBy);
+  }
+
   const existing = await deps.db
     .select()
     .from(condoBankConnections)
@@ -93,7 +156,7 @@ export async function upsertBankConnection(
     consentStatus: status,
     consentValidUntil,
     reauthorizationRequired: needs && consentStatus !== BANK_CONSENT_STATUS.revoked ? 1 : 0,
-    authorizedByMembershipId: input.authorizedByMembershipId ?? null,
+    authorizedByMembershipId: authorizedBy ?? existing[0]?.authorizedByMembershipId ?? null,
     lastSyncAt: input.lastSyncAt ?? existing[0]?.lastSyncAt ?? null,
     lastError: input.lastError ?? null,
     revokedAt: consentStatus === BANK_CONSENT_STATUS.revoked ? now : null,
@@ -155,6 +218,7 @@ async function issueReauthNotice(
   },
 ) {
   const now = kernelNow(deps);
+  const notifyEmails = await resolveFinanceManagerEmails(deps, input.tenantId);
   const key = noticeKey(input.tenantId, input.connection.id, input.connection.consentValidUntil);
   const outbox = await createOutboxRepo(deps.db).enqueue({
     tenantId: input.tenantId,
@@ -163,6 +227,7 @@ async function issueReauthNotice(
     payload: {
       connectionId: input.connection.id,
       accountIban: input.connection.accountIban,
+      notifyEmails,
       consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
       leadDays: BANK_REAUTH_LEAD_DAYS,
     },
