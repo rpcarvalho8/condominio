@@ -81,10 +81,75 @@ async function handleRegisterUpload(job: OutboxJob, deps: KernelDeps): Promise<v
   });
 }
 
+async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const repo = createNotificationDeliveryRepo(deps.db);
+  const existing = await repo.findByIdempotency(job.tenantId, job.idempotencyKey);
+  if (existing) return;
+
+  const destination = String(job.payload.accountIban ?? "").trim() || `tenant:${job.tenantId}:bank-reauth`;
+  await repo.insert({
+    tenantId: job.tenantId,
+    channel: "email",
+    destination,
+    template: "bank_reauth_required",
+    status: "attempted",
+    providerMessageId: `local-${job.id}`,
+    idempotencyKey: job.idempotencyKey,
+  });
+
+  await createAuditEventRepo(deps.db).append({
+    tenantId: job.tenantId,
+    type: "notification.email.attempted",
+    entityType: "notification_delivery",
+    entityId: job.idempotencyKey,
+    payload: {
+      destination,
+      template: "bank_reauth_required",
+      jobId: job.id,
+      connectionId: job.payload.connectionId ?? null,
+    },
+    reason: "outbox_bank_reauth_notice",
+    source: "outbox",
+    requestId: job.correlationId,
+  });
+}
+
+async function handleIssueReceipt(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const paymentId = String(job.payload.paymentId ?? "");
+  if (!paymentId) throw new Error("paymentId required");
+  const { issueReceiptForPayment } = await import("../finance/f2-finance");
+  await issueReceiptForPayment(deps, {
+    tenantId: job.tenantId,
+    paymentId,
+    actor: { requestId: job.correlationId },
+  });
+}
+
+async function handleMonthlyPaymentNotices(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const { generateMonthlyPaymentNotices } = await import("../finance/f2-jobs");
+  await generateMonthlyPaymentNotices(deps, {
+    tenantId: job.tenantId,
+    actor: { requestId: job.correlationId },
+    force: true,
+  });
+}
+
+async function handleSweepReceipts(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const { sweepReceiptsForAllocatedPayments } = await import("../finance/f2-jobs");
+  await sweepReceiptsForAllocatedPayments(deps, {
+    tenantId: job.tenantId,
+    actor: { requestId: job.correlationId },
+  });
+}
+
 const HANDLERS: Record<string, OutboxHandler> = {
   [OUTBOX_JOB_TYPES.notifyMembershipCreated]: handleNotifyMembershipCreated,
   [OUTBOX_JOB_TYPES.persistReuniaoAudit]: handlePersistReuniaoAudit,
   [OUTBOX_JOB_TYPES.registerUpload]: handleRegisterUpload,
+  [OUTBOX_JOB_TYPES.bankReauthNotice]: handleBankReauthNotice,
+  [OUTBOX_JOB_TYPES.issueReceipt]: handleIssueReceipt,
+  [OUTBOX_JOB_TYPES.generateMonthlyPaymentNotices]: handleMonthlyPaymentNotices,
+  [OUTBOX_JOB_TYPES.sweepReceipts]: handleSweepReceipts,
 };
 
 export function backoffMs(attempts: number): number {

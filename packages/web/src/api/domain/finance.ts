@@ -58,6 +58,28 @@ export const FINANCIAL_DOC_TYPES = {
   accountStatement: "AccountStatement",
 } as const;
 
+/** Ciclo de vida BankConnection (ADR-014) — conta do condomínio, não do admin. */
+export const BANK_CONSENT_STATUS = {
+  pending: "pending",
+  authorized: "authorized",
+  expired: "expired",
+  revoked: "revoked",
+  reauthorizationRequired: "reauthorization_required",
+} as const;
+
+/** Aviso proactivo: consentimento a expirar dentro deste prazo (não é sync PSD2). */
+export const BANK_REAUTH_LEAD_DAYS = 14;
+
+export const CANDIDATE_SOURCES = {
+  csv: "csv",
+  reconciliation: "reconciliation",
+  identityMatrix: "identity_matrix",
+  manual: "manual",
+} as const;
+
+export type BankConsentStatus = (typeof BANK_CONSENT_STATUS)[keyof typeof BANK_CONSENT_STATUS];
+export type CandidateSource = (typeof CANDIDATE_SOURCES)[keyof typeof CANDIDATE_SOURCES];
+
 /** Ordem default de imputação (SettlementPolicy seed). */
 export const DEFAULT_SETTLEMENT_ORDER = [
   "divida_antiga",

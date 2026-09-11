@@ -483,6 +483,11 @@ export async function registerPayment(
     payerReference?: string | null;
     evidenceUploadId?: string | null;
     bankMovementId?: string | null;
+    candidateSource?: string | null;
+    candidateConfidence?: number | null;
+    externalRef?: string | null;
+    allocationStatus?: string | null;
+    receivedAt?: Date | null;
     actor?: Actor;
   },
 ) {
@@ -520,6 +525,11 @@ export async function registerPayment(
 
   const now = kernelNow(deps);
   const isCash = input.paymentMethod === PAYMENT_METHODS.cash;
+  const allocationStatus =
+    input.allocationStatus ??
+    (input.fracaoId && input.candidateSource
+      ? ALLOCATION_STATUS.identificado
+      : ALLOCATION_STATUS.naoAlocadoPendente);
   const [row] = await deps.db
     .insert(payments)
     .values({
@@ -527,14 +537,17 @@ export async function registerPayment(
       tenantId: input.tenantId,
       fracaoId: input.fracaoId ?? null,
       amountCents: input.amountCents,
-      receivedAt: now,
+      receivedAt: input.receivedAt ?? now,
       payerReference: input.payerReference ?? null,
       paymentMethod: input.paymentMethod,
-      allocationStatus: ALLOCATION_STATUS.naoAlocadoPendente,
+      allocationStatus,
       cashStatus: isCash ? CASH_STATUS.registered : null,
       registeredByPersonId: input.actor?.personId ?? null,
       evidenceUploadId: input.evidenceUploadId ?? null,
       bankMovementId: input.bankMovementId ?? null,
+      candidateSource: input.candidateSource ?? null,
+      candidateConfidence: input.candidateConfidence ?? null,
+      externalRef: input.externalRef ?? null,
       createdAt: now,
       updatedAt: now,
     })
@@ -790,6 +803,12 @@ async function allocatePaymentLocked(
       .select()
       .from(allocations)
       .where(eq(allocations.paymentId, payment.id));
+    const { enqueueReceiptForPaymentJob } = await import("./f2-jobs");
+    await enqueueReceiptForPaymentJob(deps, {
+      tenantId: input.tenantId,
+      paymentId: payment.id,
+      correlationId: input.actor?.requestId ?? null,
+    });
     return { payment, allocations: existing, idempotent: true };
   }
 
@@ -832,6 +851,12 @@ async function allocatePaymentLocked(
         updatedAt: kernelNow(deps),
       })
       .where(eq(payments.id, payment.id));
+    const { enqueueReceiptForPaymentJob } = await import("./f2-jobs");
+    await enqueueReceiptForPaymentJob(deps, {
+      tenantId: input.tenantId,
+      paymentId: payment.id,
+      correlationId: input.actor?.requestId ?? null,
+    });
     return { payment, allocations: already, idempotent: true };
   }
 
@@ -980,6 +1005,13 @@ async function allocatePaymentLocked(
     aggregateType: "payment",
     aggregateId: payment.id,
     payload: { allocations: created.length, allocationStatus: status },
+    correlationId: input.actor?.requestId ?? null,
+  });
+
+  const { enqueueReceiptForPaymentJob } = await import("./f2-jobs");
+  await enqueueReceiptForPaymentJob(deps, {
+    tenantId: input.tenantId,
+    paymentId: payment.id,
     correlationId: input.actor?.requestId ?? null,
   });
 

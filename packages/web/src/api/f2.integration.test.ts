@@ -28,9 +28,26 @@ import {
   validateLedgerChain,
   verifyCashPayment,
 } from "./application/finance/f2-finance";
+import {
+  ingestCandidateMovements,
+  ingestCandidatesFromCsv,
+} from "./application/finance/f2-candidates";
+import {
+  sweepBankReauthNotices,
+  upsertBankConnection,
+} from "./application/finance/f2-bank-connection";
+import {
+  generateMonthlyPaymentNotices,
+  runF2CalendarSweep,
+  sweepReceiptsForAllocatedPayments,
+} from "./application/finance/f2-jobs";
+import { processOutbox } from "./application/jobs/process-outbox";
+import { ownerContactDrafts } from "./database/schema";
 import { BUDGET_LINE_KINDS, INGEST_DOCUMENT_KINDS } from "./domain/constitution";
 import {
   ALLOCATION_STATUS,
+  BANK_CONSENT_STATUS,
+  CANDIDATE_SOURCES,
   CASH_STATUS,
   PAYMENT_METHODS,
   VERIFICATION_METHOD,
@@ -141,6 +158,17 @@ beforeAll(async () => {
   await applyDomainKernelSchema(client);
   await applyF1ConstitutionSchema(client);
   await applyF2FinanceSchema(client);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS quotas (
+      id TEXT PRIMARY KEY NOT NULL,
+      fracao_id TEXT NOT NULL,
+      tipo TEXT NOT NULL DEFAULT 'condominio',
+      mes INTEGER NOT NULL,
+      ano INTEGER NOT NULL,
+      valor REAL NOT NULL,
+      pago INTEGER NOT NULL DEFAULT 0
+    )
+  `);
   const db = drizzle(client, { schema });
   deps = { db, getTenantId: () => TENANT };
   app = buildApp();
@@ -148,6 +176,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   currentUser = null;
+  deps.now = undefined;
   for (const table of [
     "financial_documents",
     "allocations",
@@ -157,16 +186,21 @@ beforeEach(async () => {
     "f2_bank_movements",
     "settlement_policies",
     "accounting_periods",
+    "condo_bank_connections",
     "obligations",
     "annual_budget_lines",
     "annual_budgets",
     "constitution_fracoes",
     "extract_lines",
     "ingest_documents",
+    "owner_contact_drafts",
     "memberships",
     "persons",
     "audit_events",
     "domain_events",
+    "outbox_jobs",
+    "notification_deliveries",
+    "quotas",
   ]) {
     await client.execute(`DELETE FROM ${table}`);
   }
@@ -759,5 +793,244 @@ describe("F2 PaymentNotice e Recibo", () => {
         obligationIds: obs.map((o) => o.id),
       }),
     ).rejects.toMatchObject({ code: "obligation_fracao_mismatch" });
+  });
+});
+
+async function seedConfirmedOwner(fracaoCodigo: string, personName: string) {
+  await deps.db.insert(ownerContactDrafts).values({
+    id: crypto.randomUUID(),
+    tenantId: TENANT,
+    fracaoCodigo,
+    personName,
+    status: "confirmed",
+    sourceExcerpt: `${personName} — ${fracaoCodigo}`,
+    createdAt: new Date(),
+  });
+}
+
+describe("F2 BankConnection aviso proactivo de reautorização", () => {
+  test("consentimento a expirar em 14 dias gera aviso idempotente; longe do prazo não avisa", async () => {
+    const far = await upsertBankConnection(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+      consentStatus: BANK_CONSENT_STATUS.authorized,
+      consentValidUntil: "2027-01-01T00:00:00.000Z",
+    });
+    expect(far.reauthorizationRequired).toBe(0);
+
+    const skipped = await sweepBankReauthNotices(deps, { tenantId: TENANT });
+    expect(skipped.noticed.filter((n) => n.noticed).length).toBe(0);
+
+    deps.now = () => new Date("2026-09-10T12:00:00.000Z");
+    const due = await upsertBankConnection(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+      consentStatus: BANK_CONSENT_STATUS.authorized,
+      consentValidUntil: "2026-09-20T00:00:00.000Z",
+    });
+    expect(due.reauthorizationRequired).toBe(1);
+    expect(due.consentStatus).toBe(BANK_CONSENT_STATUS.reauthorizationRequired);
+
+    const first = await sweepBankReauthNotices(deps, { tenantId: TENANT });
+    expect(first.noticed.some((n) => n.noticed)).toBe(true);
+
+    const drain = await processOutbox(deps);
+    expect(drain.completed).toBeGreaterThanOrEqual(1);
+
+    const deliveries = await client.execute(
+      `SELECT template, status FROM notification_deliveries WHERE tenant_id = ?`,
+      [TENANT],
+    );
+    expect(deliveries.rows.some((r) => r.template === "bank_reauth_required")).toBe(true);
+
+    const second = await sweepBankReauthNotices(deps, { tenantId: TENANT });
+    expect(second.noticed.every((n) => n.noticed === false)).toBe(true);
+
+    const audits = await client.execute(
+      `SELECT type FROM audit_events WHERE tenant_id = ? AND type = 'bank_connection.reauthorization_notice'`,
+      [TENANT],
+    );
+    expect(audits.rows.length).toBe(1);
+  });
+});
+
+describe("F2 Payments candidatos (CSV / identity-matrix / reconciliação)", () => {
+  test("CSV + nome confirmado cria Payment identificado sem Allocation e sem Quota.pago", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    await seedConfirmedOwner("A", "Maria Silva");
+    await client.execute({
+      sql: `INSERT INTO quotas (id, fracao_id, tipo, mes, ano, valor, pago) VALUES (?, ?, 'condominio', 9, 2026, 50, 0)`,
+      args: ["quota-fonte-1", fracao.id],
+    });
+
+    const csv = [
+      "Conta condomínio",
+      "Seq;Data Operação;Data Valor;Mês;Ano;Tipo;Descritivo;Montante;Saldo",
+      "csv-1;01-09-2026;01-09-2026;9;2026;Entrada;TRF CRED SEPA+ DE MARIA SILVA;50,00;1000,00",
+    ].join("\n");
+
+    const ingested = await ingestCandidatesFromCsv(deps, { tenantId: TENANT, csvText: csv });
+    expect(ingested.created).toBe(1);
+    const row = ingested.results[0]!;
+    expect(row.fracaoId).toBe(fracao.id);
+    expect(row.allocationStatus).toBe(ALLOCATION_STATUS.identificado);
+    expect(row.created).toBe(true);
+
+    const again = await ingestCandidatesFromCsv(deps, { tenantId: TENANT, csvText: csv });
+    expect(again.created).toBe(0);
+    expect(again.results[0]!.paymentId).toBe(row.paymentId);
+
+    const allocs = await client.execute(`SELECT COUNT(*) AS n FROM allocations`);
+    expect(Number(allocs.rows[0]!.n)).toBe(0);
+
+    const pago = await client.execute(`SELECT pago FROM quotas WHERE id = 'quota-fonte-1'`);
+    expect(Number(pago.rows[0]!.pago)).toBe(0);
+
+    const unmatched = await ingestCandidateMovements(deps, {
+      tenantId: TENANT,
+      movements: [
+        {
+          amountCents: 12_00,
+          description: "TRF CRED SEPA+ DE DESCONHECIDO XPTO",
+          externalRef: "unk-1",
+          source: CANDIDATE_SOURCES.identityMatrix,
+        },
+      ],
+    });
+    expect(unmatched.results[0]!.fracaoId).toBeNull();
+    expect(unmatched.results[0]!.allocationStatus).toBe(ALLOCATION_STATUS.naoAlocadoPendente);
+
+    const pagoAfter = await client.execute(`SELECT pago FROM quotas WHERE id = 'quota-fonte-1'`);
+    expect(Number(pagoAfter.rows[0]!.pago)).toBe(0);
+  });
+
+  test("HTTP candidatos por identity-matrix / reconciliação não aloca", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    await seedConfirmedOwner("A", "Joao Costa");
+    const admin = await seedActor({
+      userId: "user-admin-cand",
+      roleCode: "Admin",
+      name: "Admin Cand",
+      email: "admin-cand@test",
+    });
+    currentUser = { id: admin.userId!, email: "admin-cand@test" };
+
+    const res = await app.request("/f2/payments/candidates", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        movements: [
+          {
+            amountCents: 4300,
+            description: "TRF CRED SEPA+ DE JOAO COSTA FRAÇÃO A",
+            externalRef: "rec-1",
+            source: CANDIDATE_SOURCES.reconciliation,
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      created: number;
+      results: Array<{ fracaoId: string | null; allocationStatus: string }>;
+    };
+    expect(body.created).toBe(1);
+    expect(body.results[0]!.fracaoId).toBe(fracao.id);
+    expect(body.results[0]!.allocationStatus).toBe(ALLOCATION_STATUS.identificado);
+
+    const allocs = await client.execute(`SELECT COUNT(*) AS n FROM allocations`);
+    expect(Number(allocs.rows[0]!.n)).toBe(0);
+  });
+});
+
+describe("F2 jobs avisos dia 1 e recibos na Allocation", () => {
+  test("avisos só no dia 1; retry é idempotente", async () => {
+    await seedFracaoWithObligations();
+    deps.now = () => new Date("2026-09-02T10:00:00.000Z");
+    const skipped = await generateMonthlyPaymentNotices(deps, { tenantId: TENANT });
+    expect(skipped.skipped).toBe(true);
+    expect(skipped.reason).toBe("not_day_1");
+
+    deps.now = () => new Date("2026-09-01T10:00:00.000Z");
+    const first = await generateMonthlyPaymentNotices(deps, { tenantId: TENANT });
+    expect(first.skipped).toBe(false);
+    expect(first.issued.length).toBe(1);
+
+    const second = await generateMonthlyPaymentNotices(deps, { tenantId: TENANT });
+    expect(second.issued.length).toBe(0);
+    expect(second.reused.length).toBe(1);
+    expect(second.reused[0]).toBe(first.issued[0]);
+  });
+
+  test("Allocation enfileira recibo; sweep e processOutbox emitem com generated_from", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    const payment = await registerPayment(deps, {
+      tenantId: TENANT,
+      fracaoId: fracao.id,
+      amountCents: 20_000,
+      paymentMethod: PAYMENT_METHODS.bankTransfer,
+    });
+    const allocated = await allocatePayment(deps, { tenantId: TENANT, paymentId: payment.id });
+    expect(allocated.allocations.length).toBeGreaterThan(0);
+
+    const pending = await client.execute(
+      `SELECT job_type, status FROM outbox_jobs WHERE tenant_id = ? AND job_type = 'f2.issue_receipt'`,
+      [TENANT],
+    );
+    expect(pending.rows.length).toBe(1);
+    expect(pending.rows[0]!.status).toBe("pending");
+
+    const drain = await processOutbox(deps);
+    expect(drain.completed).toBeGreaterThanOrEqual(1);
+
+    const docs = await client.execute(
+      `SELECT doc_type, generated_from_json, source_payment_id FROM financial_documents WHERE tenant_id = ? AND doc_type = 'Receipt'`,
+      [TENANT],
+    );
+    expect(docs.rows.length).toBe(1);
+    expect(String(docs.rows[0]!.source_payment_id)).toBe(payment.id);
+    const generated = JSON.parse(String(docs.rows[0]!.generated_from_json)) as {
+      paymentId: string;
+      allocationIds: string[];
+    };
+    expect(generated.paymentId).toBe(payment.id);
+    expect(generated.allocationIds.length).toBe(allocated.allocations.length);
+
+    const sweep = await sweepReceiptsForAllocatedPayments(deps, { tenantId: TENANT });
+    expect(sweep.reused.length).toBe(1);
+    expect(sweep.issued.length).toBe(0);
+  });
+
+  test("calendar-sweep HTTP no dia 1 emite aviso e aviso de reauth", async () => {
+    await seedFracaoWithObligations();
+    const admin = await seedActor({
+      userId: "user-admin-jobs",
+      roleCode: "Admin",
+      name: "Admin Jobs",
+      email: "admin-jobs@test",
+    });
+    currentUser = { id: admin.userId!, email: "admin-jobs@test" };
+    deps.now = () => new Date("2026-09-01T08:00:00.000Z");
+
+    await upsertBankConnection(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+      consentStatus: BANK_CONSENT_STATUS.authorized,
+      consentValidUntil: "2026-09-05T00:00:00.000Z",
+    });
+
+    const res = await app.request("/f2/jobs/calendar-sweep", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      notices: { skipped: boolean; issued: string[] };
+      reauth: { noticed: Array<{ noticed: boolean }> };
+    };
+    expect(body.notices.skipped).toBe(false);
+    expect(body.notices.issued.length).toBe(1);
+    expect(body.reauth.noticed.some((n) => n.noticed)).toBe(true);
   });
 });

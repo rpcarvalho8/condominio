@@ -1,7 +1,7 @@
 # F2 — Estado de implementação (Finance Kernel slice)
 
-**Branch:** `cursor/f2-financeiro-ledger-1c40`  
-**Base documental:** `docs/lumen/06-FATIAS.md`, ADR-003, ADR-012, ADR-028, ADR-029
+**Branch:** `cursor/f2-criterio-candidatos-jobs-reauth`  
+**Base documental:** `docs/lumen/06-FATIAS.md`, ADR-003, ADR-012, ADR-014, ADR-028, ADR-029
 
 ## Posição face ao plano
 
@@ -11,14 +11,15 @@ O plano (`06-FATIAS.md`) distingue:
 2. **Enable Banking** — *só depois* do Finance Kernel passar testes adversariais (ordem de execução §8)  
 3. **Critério de conclusão F2** — sync bancário **ou** aviso proactivo de reautorização, Payments candidatos, Allocation + hash-chain, cash 3 estados, avisos dia 1, recibos na confirmação, `generated_from`
 
-**Este PR entrega o Finance Kernel (1).** Não fecha ainda o critério completo (3): faltam aviso/sync bancário e jobs de avisos/recibos. Isso não é “opcional como LLM na F1”; fica como trabalho F2 seguinte, após este kernel.
+**Este PR fecha o critério F2 (3) no kernel**, sem Enable Banking PSD2 (2). O aviso proactivo de reautorização é o ramo escolhido do “sync **ou** aviso”; sync completo fica para o slice PSD2.
 
 ## Fronteira dura (este slice)
 
 - **Não substitui** o modelo Fonte `Quota.pago` / `routes/quotas` / reconciliação Enable Banking. O kernel F2 coexiste; dual-write e cutover da Fonte são trabalho posterior.
-- **Não é o critério F2 completo** (sync ou aviso de reautorização, Payments candidatos, jobs avisos/recibos).
+- Payments candidatos **nunca** marcam `Quota.pago=true` no caminho feliz.
 - Hash-chain = deteção de adulteração (ADR-029), não imutabilidade absoluta.
-- `f2_bank_movements` é evidência tenant-scoped para cash `bank_deposit` / `deposited` — **não** o ciclo de vida bancário completo.
+- `f2_bank_movements` é evidência tenant-scoped (cash deposit **e** créditos candidatos) — **não** o ciclo PSD2 completo.
+- `BankConnection` liga-se à **conta do condomínio** (IBAN + ASPSP), não à pessoa do admin (ADR-014).
 
 ## O que está implementado
 
@@ -32,19 +33,33 @@ O plano (`06-FATIAS.md`) distingue:
 | `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | Mutex por tenant + `BEGIN IMMEDIATE`; retry unique `(tenant_id, sequence)`; `open_amount >=` |
 | `AccountingPeriod` open/close | ✅ | |
 | `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+montante |
-| Rotas `/api/f2/*` + migration `0006` | ✅ | `applyF2FinanceSchema` |
+| Rotas `/api/f2/*` + migration `0006`/`0007` | ✅ | `applyF2FinanceSchema` |
+| Aviso proactivo de reautorização `BankConnection` | ✅ | Lead 14 dias; outbox `notify.bank_reauth`; **não** é sync PSD2 |
+| Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; sem Allocation automática; sem `Quota.pago` |
+| Job avisos dia 1 (UTC) | ✅ | `GenerateMonthlyPaymentNotices` → `issuePaymentNotice` |
+| Recibos na confirmação de Allocation + sweep | ✅ | Outbox `f2.issue_receipt` + `/jobs/receipt-sweep` |
 
-## Ainda em falta para o critério F2 (próximo trabalho)
+## Critério F2 — o que fecha aqui vs o que fica
 
-| Item do critério / tabela F2 | Estado |
+| Item do critério / tabela F2 | Estado neste PR |
 |---|---|
-| Sync bancário **ou** aviso proactivo de reautorização | ❌ |
-| Payments candidatos via reconciliação / CSV / identity-matrix | ❌ |
-| Job avisos dia 1 / recibos na confirmação (calendário/sweep) | ❌ (API de emissão existe; jobs não) |
-| Account Statement sob pedido | ❌ |
-| Enable Banking PSD2 completo | ❌ (depois dos testes adversariais do kernel) |
+| Sync bancário **ou** aviso proactivo de reautorização | ✅ aviso proactivo (`BANK_REAUTH_LEAD_DAYS = 14`) |
+| Payments candidatos via reconciliação / CSV / identity-matrix | ✅ kernel; transplante de parsers **sem** mapas Fonte hardcoded |
+| Allocation + hash-chain | ✅ (PR anterior) |
+| Dinheiro com 3 estados | ✅ (PR anterior) |
+| Job avisos dia 1 / recibos na confirmação | ✅ calendário/sweep + outbox |
+| Documentos `generated_from` | ✅ (PR anterior + jobs) |
+| Account Statement sob pedido | ❌ (não é critério de fecho desta fatia) |
+| Enable Banking PSD2 completo (sync, consentimento real, ASPSP) | ❌ **depois** dos testes adversariais do kernel (ordem §8) |
 | UI admin | ❌ |
 | Portal saldo | F3 |
+| Dual-write / cutover `Quota.pago` | ❌ explicitamente fora |
+| Testes adversariais extra do Finance Kernel | ❌ explicitamente depois deste PR |
+
+## Transplante Fonte (o que se reutilizou)
+
+- Extração de pagador no descritivo SEPA/Santander e CSV multi-banco → `f2-csv-movements.ts` / `f2-identity.ts` (cópia genérica; **não** importa `identity-matrix.ts` nem `csv-bank-parser.ts`, que puxam `Quota` / PII / mapas do prédio).
+- Match tenant-scoped: `constitution_fracoes` + `owner_contact_drafts` confirmados. Resultado = `Payment` candidato, nunca cascata Fonte.
 
 ## Como testar
 
@@ -55,11 +70,17 @@ cd packages/web && bun run test:f1 && bun run test:f2
 ## API (resumo)
 
 - `POST /api/f2/payments`
+- `POST /api/f2/payments/candidates` — CSV (`csvText`) ou `movements[]`
 - `POST /api/f2/payments/:id/verify-cash`
 - `POST /api/f2/payments/:id/deposit-cash`
-- `POST /api/f2/payments/:id/allocate`
+- `POST /api/f2/payments/:id/allocate` — enfileira recibo
 - `POST /api/f2/payments/:id/receipt`
 - `POST /api/f2/ledger/validate`
 - `POST /api/f2/periods/open`
 - `POST /api/f2/periods/close`
 - `POST /api/f2/documents/payment-notice`
+- `POST /api/f2/bank-connections` / `GET /api/f2/bank-connections`
+- `POST /api/f2/jobs/reauth-notices`
+- `POST /api/f2/jobs/monthly-notices`
+- `POST /api/f2/jobs/receipt-sweep`
+- `POST /api/f2/jobs/calendar-sweep`

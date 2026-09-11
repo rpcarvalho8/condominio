@@ -10,6 +10,21 @@ import {
   validateLedgerChain,
   verifyCashPayment,
 } from "../application/finance/f2-finance";
+import {
+  ingestCandidateMovements,
+  ingestCandidatesFromCsv,
+} from "../application/finance/f2-candidates";
+import {
+  listBankConnections,
+  sweepBankReauthNotices,
+  upsertBankConnection,
+} from "../application/finance/f2-bank-connection";
+import {
+  generateMonthlyPaymentNotices,
+  runF2CalendarSweep,
+  sweepReceiptsForAllocatedPayments,
+} from "../application/finance/f2-jobs";
+import { processOutbox } from "../application/jobs/process-outbox";
 import { DomainError } from "../domain/errors";
 import type { KernelDeps } from "../infra/kernel-deps";
 import {
@@ -230,6 +245,140 @@ export function createF2Routes(deps: KernelDeps) {
           actor: actorFrom(c),
         });
         return c.json(doc, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/bank-connections", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as {
+          provider?: string;
+          aspsp?: string | null;
+          accountIban?: string | null;
+          consentStatus?: string;
+          consentValidUntil?: string | null;
+          authorizedByMembershipId?: string | null;
+        };
+        const row = await upsertBankConnection(deps, {
+          tenantId: c.get("tenantId")!,
+          provider: body.provider,
+          aspsp: body.aspsp,
+          accountIban: body.accountIban,
+          consentStatus: body.consentStatus,
+          consentValidUntil: body.consentValidUntil,
+          authorizedByMembershipId: body.authorizedByMembershipId,
+          actor: actorFrom(c),
+        });
+        return c.json(row, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .get("/bank-connections", requireManager, async (c) => {
+      try {
+        const rows = await listBankConnections(deps, c.get("tenantId")!);
+        return c.json({ connections: rows });
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/payments/candidates", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as {
+          csvText?: string;
+          movements?: Array<{
+            amountCents?: number;
+            description?: string | null;
+            debtorName?: string | null;
+            counterpartyIban?: string | null;
+            externalRef?: string | null;
+            bookedAt?: string | null;
+            source?: string;
+          }>;
+        };
+        const tenantId = c.get("tenantId")!;
+        const actor = actorFrom(c);
+        if (body.csvText) {
+          const result = await ingestCandidatesFromCsv(deps, {
+            tenantId,
+            csvText: body.csvText,
+            actor,
+          });
+          return c.json(result, 201);
+        }
+        const movements = (body.movements ?? [])
+          .filter((m) => Number.isInteger(m.amountCents) && (m.amountCents ?? 0) > 0)
+          .map((m) => ({
+            amountCents: m.amountCents!,
+            description: m.description,
+            debtorName: m.debtorName,
+            counterpartyIban: m.counterpartyIban,
+            externalRef: m.externalRef,
+            bookedAt: m.bookedAt,
+            source: m.source as "csv" | "reconciliation" | "identity_matrix" | "manual" | undefined,
+          }));
+        if (movements.length === 0) {
+          return c.json({ message: "csvText ou movements[] com amountCents é obrigatório" }, 400);
+        }
+        const result = await ingestCandidateMovements(deps, { tenantId, movements, actor });
+        return c.json(result, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/jobs/reauth-notices", requireManager, async (c) => {
+      try {
+        const result = await sweepBankReauthNotices(deps, {
+          tenantId: c.get("tenantId")!,
+          actor: actorFrom(c),
+        });
+        await processOutbox(deps);
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/jobs/monthly-notices", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as { force?: boolean };
+        const result = await generateMonthlyPaymentNotices(deps, {
+          tenantId: c.get("tenantId")!,
+          actor: actorFrom(c),
+          force: body.force,
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/jobs/receipt-sweep", requireManager, async (c) => {
+      try {
+        const result = await sweepReceiptsForAllocatedPayments(deps, {
+          tenantId: c.get("tenantId")!,
+          actor: actorFrom(c),
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/jobs/calendar-sweep", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as { forceNotices?: boolean };
+        const result = await runF2CalendarSweep(deps, {
+          tenantId: c.get("tenantId")!,
+          actor: actorFrom(c),
+          forceNotices: body.forceNotices,
+        });
+        await processOutbox(deps);
+        return c.json(result);
       } catch (err) {
         const mapped = httpError(err);
         return c.json({ message: mapped.message }, mapped.status);

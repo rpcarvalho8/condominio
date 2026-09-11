@@ -825,6 +825,9 @@ export const payments = sqliteTable(
     evidenceUploadId: text("evidence_upload_id"),
     bankMovementId: text("bank_movement_id"),
     depositedAt: integer("deposited_at", { mode: "timestamp" }),
+    candidateSource: text("candidate_source"),
+    candidateConfidence: real("candidate_confidence"),
+    externalRef: text("external_ref"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -942,9 +945,16 @@ export const condoBankConnections = sqliteTable(
     id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
     tenantId: text("tenant_id").notNull(),
     provider: text("provider").notNull().default("enable_banking"),
+    aspsp: text("aspsp"),
+    accountIban: text("account_iban"),
     consentStatus: text("consent_status").notNull().default("pending"),
+    consentValidUntil: integer("consent_valid_until", { mode: "timestamp" }),
+    reauthorizationRequired: integer("reauthorization_required").notNull().default(0),
+    authorizedByMembershipId: text("authorized_by_membership_id"),
     lastSyncAt: integer("last_sync_at", { mode: "timestamp" }),
     lastError: text("last_error"),
+    lastReauthNoticeAt: integer("last_reauth_notice_at", { mode: "timestamp" }),
+    revokedAt: integer("revoked_at", { mode: "timestamp" }),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -980,6 +990,7 @@ export const f2BankMovements = sqliteTable(
     bookedAt: integer("booked_at", { mode: "timestamp" }).notNull(),
     description: text("description"),
     externalRef: text("external_ref"),
+    counterpartyIban: text("counterparty_iban"),
     status: text("status").notNull().default("reconciled"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()

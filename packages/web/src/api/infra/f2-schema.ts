@@ -41,6 +41,9 @@ const DDL = [
     evidence_upload_id TEXT,
     bank_movement_id TEXT,
     deposited_at INTEGER,
+    candidate_source TEXT,
+    candidate_confidence REAL,
+    external_ref TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
@@ -125,9 +128,16 @@ const DDL = [
     id TEXT PRIMARY KEY NOT NULL,
     tenant_id TEXT NOT NULL,
     provider TEXT NOT NULL DEFAULT 'enable_banking',
+    aspsp TEXT,
+    account_iban TEXT,
     consent_status TEXT NOT NULL DEFAULT 'pending',
+    consent_valid_until INTEGER,
+    reauthorization_required INTEGER NOT NULL DEFAULT 0,
+    authorized_by_membership_id TEXT,
     last_sync_at INTEGER,
     last_error TEXT,
+    last_reauth_notice_at INTEGER,
+    revoked_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
@@ -147,6 +157,7 @@ const DDL = [
     booked_at INTEGER NOT NULL,
     description TEXT,
     external_ref TEXT,
+    counterparty_iban TEXT,
     status TEXT NOT NULL DEFAULT 'reconciled',
     created_at INTEGER NOT NULL
   )`,
@@ -159,6 +170,26 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS payments_tenant_bank_movement_uq
     ON payments (tenant_id, bank_movement_id)
     WHERE bank_movement_id IS NOT NULL`,
+  `ALTER TABLE payments ADD COLUMN candidate_source TEXT`,
+  `ALTER TABLE payments ADD COLUMN candidate_confidence REAL`,
+  `ALTER TABLE payments ADD COLUMN external_ref TEXT`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS payments_tenant_external_ref_uq
+    ON payments (tenant_id, external_ref)
+    WHERE external_ref IS NOT NULL`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN aspsp TEXT`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN account_iban TEXT`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN consent_valid_until INTEGER`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN reauthorization_required INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN authorized_by_membership_id TEXT`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN last_reauth_notice_at INTEGER`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN revoked_at INTEGER`,
+  `ALTER TABLE f2_bank_movements ADD COLUMN counterparty_iban TEXT`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS f2_bank_movements_tenant_ext_uq
+    ON f2_bank_movements (tenant_id, external_ref)
+    WHERE external_ref IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS financial_documents_notice_period_uq
+    ON financial_documents (tenant_id, fracao_id, period_label)
+    WHERE doc_type = 'PaymentNotice' AND fracao_id IS NOT NULL AND period_label IS NOT NULL`,
 ];
 
 async function execSafe(client: SqlExecutor, stmt: string): Promise<void> {
