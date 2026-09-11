@@ -28,7 +28,29 @@ type Actor = {
 export const MAX_CANDIDATE_CSV_CHARS = 512_000;
 export const MAX_CANDIDATE_MOVEMENTS = 500;
 
-const INGEST_UNIQUE_RETRIES = 3;
+const INGEST_UNIQUE_RETRIES = 8;
+
+/** In-process per-tenant queue. Complements UNIQUE(tenant_id, external_ref):
+ * local libSQL busy-waits synchronously and would deadlock two async writers. */
+const tenantMutexes = new Map<string, Promise<void>>();
+
+async function withTenantMutex<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = tenantMutexes.get(tenantId) ?? Promise.resolve();
+  let unlock: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  tenantMutexes.set(
+    tenantId,
+    prev.catch(() => undefined).then(() => held),
+  );
+  await prev.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    unlock();
+  }
+}
 
 export type CandidateMovementInput = {
   amountCents: number;
@@ -72,8 +94,12 @@ function parseBooked(value: Date | string | null | undefined, fallback: Date): D
 }
 
 function isUniqueOrBusyError(err: unknown): boolean {
-  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
+  const anyErr = err as { message?: string; code?: string };
+  const msg = String(anyErr?.message ?? err).toLowerCase();
+  const code = String(anyErr?.code ?? "").toLowerCase();
   return (
+    code.includes("busy") ||
+    code.includes("constraint") ||
     msg.includes("unique") ||
     msg.includes("constraint failed") ||
     msg.includes("already exists") ||
@@ -223,32 +249,35 @@ export async function ingestCandidateMovement(
   }
 
   const externalRef = movementExternalRef(input.tenantId, input.movement);
-  const existing = await findPaymentByExternalRef(deps, input.tenantId, externalRef);
-  if (existing) return resultFromExisting(existing, externalRef);
 
-  let last: unknown;
-  for (let attempt = 0; attempt < INGEST_UNIQUE_RETRIES; attempt++) {
-    try {
-      return await insertCandidateInTransaction(deps, {
-        tenantId: input.tenantId,
-        movement: input.movement,
-        actor: input.actor,
-        amountCents,
-        externalRef,
-      });
-    } catch (err) {
-      last = err;
-      if (!isUniqueOrBusyError(err)) throw err;
-      const raced = await findPaymentByExternalRef(deps, input.tenantId, externalRef);
-      if (raced) return resultFromExisting(raced, externalRef);
-      if (attempt < INGEST_UNIQUE_RETRIES - 1) {
-        await new Promise((r) => setTimeout(r, 15 * (attempt + 1)));
-        continue;
+  return withTenantMutex(input.tenantId, async () => {
+    const existing = await findPaymentByExternalRef(deps, input.tenantId, externalRef);
+    if (existing) return resultFromExisting(existing, externalRef);
+
+    let last: unknown;
+    for (let attempt = 0; attempt < INGEST_UNIQUE_RETRIES; attempt++) {
+      try {
+        return await insertCandidateInTransaction(deps, {
+          tenantId: input.tenantId,
+          movement: input.movement,
+          actor: input.actor,
+          amountCents,
+          externalRef,
+        });
+      } catch (err) {
+        last = err;
+        if (!isUniqueOrBusyError(err)) throw err;
+        const raced = await findPaymentByExternalRef(deps, input.tenantId, externalRef);
+        if (raced) return resultFromExisting(raced, externalRef);
+        if (attempt < INGEST_UNIQUE_RETRIES - 1) {
+          await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
-  }
-  throw last;
+    throw last;
+  });
 }
 
 export async function ingestCandidateMovements(

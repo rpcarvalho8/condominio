@@ -986,6 +986,15 @@ describe("F2 Payments candidatos (CSV / identity-matrix / reconciliação)", () 
     const third = await ingestCandidateMovement(deps, { tenantId: TENANT, movement });
     expect(third.created).toBe(false);
     expect(third.paymentId).toBe(a.paymentId);
+
+    const now = Math.floor(Date.now() / 1000);
+    await expect(
+      client.execute({
+        sql: `INSERT INTO payments (id, tenant_id, amount_cents, received_at, payment_method, allocation_status, external_ref, created_at, updated_at)
+              VALUES (?, ?, 100, ?, 'bank_transfer', 'nao_alocado_pendente', ?, ?, ?)`,
+        args: [crypto.randomUUID(), TENANT, now, "dup-race-1", now, now],
+      }),
+    ).rejects.toThrow(/UNIQUE/i);
   });
 
   test("POST /payments/candidates rejeita csvText e movements[] acima do limite", async () => {
