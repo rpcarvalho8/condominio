@@ -52,6 +52,7 @@ Resumo: congelar a documentação v6.1 → implementar F0 e F1 → F2 → piloto
 | — | [PRODUCTION-GATES](PRODUCTION-GATES.md) | Existe | Gates obrigatórios antes de dinheiro/ops/legal em produção e de lançamento comercial geral |
 | — | [AUDITORIA-V61](AUDITORIA-V61.md) | Existe | Auditoria de consistência v6.1 |
 | — | [AUDITORIA-COMPLEMENTAR-V61](AUDITORIA-COMPLEMENTAR-V61.md) | Existe | Análise complementar (convocatória, RecordingSegment); v6.1 permanece fechada |
+| — | [AUDITORIA-ALINHAMENTO-PRODUTO](AUDITORIA-ALINHAMENTO-PRODUTO.md) | Existe | Auditoria de alinhamento `produto` vs v6.1 |
 | — | [Diagramas de Arquitetura](LUMEN-diagramas-arquitetura.md) | Existe | Mermaid: domínio, onboarding, sequências, roadmap |
 | 09 | `09-ANALISE-CODEBASE-E-PROMPTS-CURSOR.md` | **FORA DESTE PACOTE** | A incorporar quando for implementar (análise do codebase + prompts) |
 
