@@ -1,44 +1,45 @@
-# F1 — Estado de implementação (vertical slice)
+# F1 — Estado de implementação
 
-**Branch:** `cursor/f1-ingestao-constituicao-1c40`  
+**Branch:** `cursor/f1-ingestao-ficheiros-1c40`  
 **Base documental:** `docs/lumen/06-FATIAS.md` (F1 — Ingestão + Constituição)
+
+## Critério do plano
+
+> admin sobe PDF/Excel/foto, confirma **linha a linha** (excerto de origem visível), frações existem com `Obligation`s calculadas.
 
 ## O que está implementado
 
-Vertical slice no kernel multi-tenant (`packages/web`), sobre F0:
-
 | Capacidade | Estado | Notas |
 |---|---|---|
-| Registo de documento ingerido (`ingest_documents`) | ✅ | Upload ≠ confirmação |
-| Extração consultiva → `extract_lines` | ✅ | Exige `sourceExcerpt`; sem LLM real neste slice (entrada estruturada) |
-| Confirmação linha a linha de frações | ✅ | Só depois nascem `constitution_fracoes` |
-| Σ permilagens = 1000‰ | ✅ | Validado no lote confirmado |
-| Contactos (draft + confirmação) | ✅ | Nunca dispara convites |
+| Upload real de ficheiro (bytes em disco) | ✅ | `POST /api/f1/documents/upload` + content-addressed blob |
+| `content_uploads` + `ingest_documents` | ✅ | Upload ≠ confirmação |
+| Extracção CSV/Excel → `extract_lines` | ✅ | Determinística; `sourceExcerpt` = linha de origem |
+| Extracção texto com padrões ‰ | ✅ | Heurística; sem OCR |
+| Confirmação linha a linha de frações | ✅ | Σ permilagens = 1000‰ |
+| Contactos (draft + confirmação) | ✅ | CSV contactos + confirmação; sem convites |
 | Comprovativo IBAN | ✅ | `retention_class = personal_document` |
-| Orçamento anual + FCR ≥10% | ✅ | Rejeita FCR insuficiente |
-| Aprovação → `obligations` por fração | ✅ | Rateio por permilagem; idempotente |
-| Audit + domain events | ✅ | Eventos de confirmação / aprovação |
+| Orçamento anual + FCR ≥10% → obligations | ✅ | Rateio por permilagem |
 | Rotas `/api/f1/*` | ✅ | Membership + manager |
-| Migration `0005_f1_constitution.sql` | ✅ | Aplicada via `applyF1ConstitutionSchema` |
 
-## O que fica de fora deste slice (explícito)
+## Ainda fora do critério pleno / adaptadores seguintes
 
-- Extrator LLM/OCR real de PDF/foto (substituível por adaptador que produz `StructuredExtraction`)
+- Extrator LLM/OCR real de PDF binário e foto (substituível pelo mesmo `StructuredExtraction`)
+- Object storage cloud (hoje: disco local `data/content`)
 - UI admin de revisão linha a linha
-- Ligação Enable Banking / PSD2
 - Convites (F3)
-- Ledger completo / Payments / Allocations (F2)
 
 ## Como testar
 
 ```bash
-cd packages/web && bun test src/api/f1.integration.test.ts
+cd packages/web && bun run test:f1
 ```
 
 ## API (resumo)
 
+- `POST /api/f1/documents/upload` (multipart: `kind` + `file`)
 - `POST /api/f1/documents`
 - `POST /api/f1/documents/:id/extract`
+- `POST /api/f1/documents/:id/extract-from-file`
 - `GET  /api/f1/documents/:id/lines`
 - `POST /api/f1/documents/:id/confirm-fracoes`
 - `POST /api/f1/documents/:id/confirm-contactos`
