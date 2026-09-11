@@ -135,6 +135,8 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 **GO:** após freeze v6.1, em paralelo conceptual com F0 só como vertical slice — não substituir o Domain Kernel.
 
+**Estado de código:** ver [F1-IMPLEMENTACAO.md](F1-IMPLEMENTACAO.md) — vertical slice no kernel (extração estruturada + confirmação + obligations); LLM/OCR real e UI ficam para iteração seguinte.
+
 ---
 
 ## F2 — Financeiro (Ledger)

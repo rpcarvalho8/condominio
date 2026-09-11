@@ -392,8 +392,9 @@ export const recordingSegments = sqliteTable(
 );
 
 /**
- * AuditEvent genérico ( Domínio Kernel / ADR-009 ).
- * Usado por reuniões/gravação; extensível a outros agregados.
+ * AuditEvent genérico (Domain Kernel / ADR-009).
+ * who/what/when/before/after/reason/source/request_id — invariante 10.
+ * Usado por reuniões/gravação e pelo kernel (Membership create/revoke).
  */
 export const auditEvents = sqliteTable(
   "audit_events",
@@ -404,7 +405,13 @@ export const auditEvents = sqliteTable(
     entityType: text("entity_type").notNull(),
     entityId: text("entity_id").notNull(),
     actorUserId: text("actor_user_id"),
+    actorPersonId: text("actor_person_id"),
     payloadJson: text("payload_json"),
+    beforeJson: text("before_json"),
+    afterJson: text("after_json"),
+    reason: text("reason"),
+    source: text("source"),
+    requestId: text("request_id"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -412,8 +419,393 @@ export const auditEvents = sqliteTable(
   (t) => ({
     tenantCreatedIdx: index("audit_events_tenant_created_idx").on(t.tenantId, t.createdAt),
     entityIdx: index("audit_events_entity_idx").on(t.entityType, t.entityId),
+    requestIdx: index("audit_events_request_id_idx").on(t.requestId),
   }),
 );
+
+/**
+ * Domain Kernel v0.1 — Identidade (ADR-006 / ADR-031).
+ * Role é extensível; conjunto inicial obrigatório inclui Fiscalizacao (não ConselhoFiscal).
+ */
+export const roles = sqliteTable("roles", {
+  code: text("code").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const persons = sqliteTable(
+  "persons",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    userId: text("user_id"),
+    name: text("name").notNull(),
+    nif: text("nif"),
+    email: text("email").notNull(),
+    phone: text("phone"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    userIdUq: uniqueIndex("persons_user_id_uq").on(t.userId),
+    emailUq: uniqueIndex("persons_email_uq").on(t.email),
+    nifUq: uniqueIndex("persons_nif_uq").on(t.nif),
+  }),
+);
+
+export const memberships = sqliteTable(
+  "memberships",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    personId: text("person_id").notNull().references(() => persons.id),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id"),
+    roleCode: text("role_code").notNull().references(() => roles.code),
+    scope: text("scope"),
+    status: text("status").notNull().default("active"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    revokedAt: integer("revoked_at", { mode: "timestamp" }),
+    revokedByPersonId: text("revoked_by_person_id"),
+  },
+  (t) => ({
+    personTenantStatusIdx: index("memberships_person_tenant_status_idx").on(
+      t.personId,
+      t.tenantId,
+      t.status,
+    ),
+    tenantStatusIdx: index("memberships_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
+
+/**
+ * DomainEvent bus (ADR-009) — append-only facts inside the tenant DB.
+ */
+export const domainEvents = sqliteTable(
+  "domain_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    type: text("type").notNull(),
+    aggregateType: text("aggregate_type").notNull(),
+    aggregateId: text("aggregate_id").notNull(),
+    payloadJson: text("payload_json"),
+    occurredAt: integer("occurred_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    correlationId: text("correlation_id"),
+  },
+  (t) => ({
+    tenantOccurredIdx: index("domain_events_tenant_occurred_idx").on(t.tenantId, t.occurredAt),
+    aggregateIdx: index("domain_events_aggregate_idx").on(t.aggregateType, t.aggregateId),
+  }),
+);
+
+/**
+ * Outbox / Job Queue (ADR-038) — idempotent async side-effects.
+ */
+export const outboxJobs = sqliteTable(
+  "outbox_jobs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    jobType: text("job_type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(8),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    availableAt: integer("available_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    processedAt: integer("processed_at", { mode: "timestamp" }),
+    correlationId: text("correlation_id"),
+  },
+  (t) => ({
+    idempotencyUq: uniqueIndex("outbox_jobs_idempotency_uq").on(t.tenantId, t.idempotencyKey),
+    pendingIdx: index("outbox_jobs_pending_idx").on(t.status, t.availableAt),
+  }),
+);
+
+/**
+ * Policy Engine skeleton — empty host for F2/F4/F5 policies.
+ */
+export const policies = sqliteTable(
+  "policies",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    code: text("code").notNull(),
+    version: integer("version").notNull().default(1),
+    bodyJson: text("body_json"),
+    effectiveFrom: integer("effective_from", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    supersededBy: text("superseded_by"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantKindCodeVersionUq: uniqueIndex("policies_tenant_kind_code_version_uq").on(
+      t.tenantId,
+      t.kind,
+      t.code,
+      t.version,
+    ),
+  }),
+);
+
+/**
+ * Content-addressed uploads (F0 property 5) — repeated hash does not corrupt state.
+ */
+export const contentUploads = sqliteTable(
+  "content_uploads",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    filename: text("filename").notNull(),
+    byteSize: integer("byte_size").notNull().default(0),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantHashUq: uniqueIndex("content_uploads_tenant_hash_uq").on(t.tenantId, t.contentHash),
+  }),
+);
+
+// --- F1: Ingestão + Constituição ---
+
+export const ingestDocuments = sqliteTable(
+  "ingest_documents",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    contentUploadId: text("content_upload_id"),
+    filename: text("filename").notNull(),
+    contentHash: text("content_hash"),
+    status: text("status").notNull().default("uploaded"),
+    retentionClass: text("retention_class").notNull().default("legal_instrument"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    processedAt: integer("processed_at", { mode: "timestamp" }),
+    error: text("error"),
+  },
+  (t) => ({
+    tenantStatusIdx: index("ingest_documents_tenant_status_idx").on(t.tenantId, t.status),
+    tenantKindIdx: index("ingest_documents_tenant_kind_idx").on(t.tenantId, t.kind),
+  }),
+);
+
+export const extractLines = sqliteTable(
+  "extract_lines",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => ingestDocuments.id, { onDelete: "cascade" }),
+    lineNo: integer("line_no").notNull(),
+    kind: text("kind").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    sourceExcerpt: text("source_excerpt").notNull(),
+    confidence: real("confidence"),
+    status: text("status").notNull().default("pending_review"),
+    editedPayloadJson: text("edited_payload_json"),
+    confirmedAt: integer("confirmed_at", { mode: "timestamp" }),
+    confirmedByPersonId: text("confirmed_by_person_id"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    docLineUq: uniqueIndex("extract_lines_doc_line_uq").on(t.documentId, t.lineNo),
+    tenantStatusIdx: index("extract_lines_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
+
+export const constitutionFracoes = sqliteTable(
+  "constitution_fracoes",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    codigo: text("codigo").notNull(),
+    tipo: text("tipo").notNull().default("fracao"),
+    permilagem: integer("permilagem").notNull(),
+    sourceDocumentId: text("source_document_id"),
+    sourceLineId: text("source_line_id"),
+    sourceExcerpt: text("source_excerpt"),
+    status: text("status").notNull().default("confirmed"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    confirmedAt: integer("confirmed_at", { mode: "timestamp" }).notNull(),
+    confirmedByPersonId: text("confirmed_by_person_id"),
+  },
+  (t) => ({
+    tenantCodigoUq: uniqueIndex("constitution_fracoes_tenant_codigo_uq").on(t.tenantId, t.codigo),
+    tenantIdx: index("constitution_fracoes_tenant_idx").on(t.tenantId),
+  }),
+);
+
+export const ownerContactDrafts = sqliteTable(
+  "owner_contact_drafts",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    documentId: text("document_id"),
+    fracaoCodigo: text("fracao_codigo").notNull(),
+    personName: text("person_name").notNull(),
+    email: text("email"),
+    phone: text("phone"),
+    nif: text("nif"),
+    sourceExcerpt: text("source_excerpt"),
+    status: text("status").notNull().default("pending_review"),
+    confirmedAt: integer("confirmed_at", { mode: "timestamp" }),
+    confirmedByPersonId: text("confirmed_by_person_id"),
+    personId: text("person_id"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantStatusIdx: index("owner_contact_drafts_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
+
+export const condoIbanProofs = sqliteTable(
+  "condo_iban_proofs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    documentId: text("document_id").notNull(),
+    iban: text("iban").notNull(),
+    retentionClass: text("retention_class").notNull().default("personal_document"),
+    status: text("status").notNull().default("registered"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    purgedAt: integer("purged_at", { mode: "timestamp" }),
+  },
+  (t) => ({
+    tenantIdx: index("condo_iban_proofs_tenant_idx").on(t.tenantId),
+  }),
+);
+
+export const annualBudgets = sqliteTable(
+  "annual_budgets",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    year: integer("year").notNull(),
+    status: text("status").notNull().default("draft"),
+    title: text("title").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    approvedAt: integer("approved_at", { mode: "timestamp" }),
+    approvedByPersonId: text("approved_by_person_id"),
+  },
+  (t) => ({
+    tenantYearUq: uniqueIndex("annual_budgets_tenant_year_uq").on(t.tenantId, t.year),
+  }),
+);
+
+export const annualBudgetLines = sqliteTable(
+  "annual_budget_lines",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    budgetId: text("budget_id")
+      .notNull()
+      .references(() => annualBudgets.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    label: text("label").notNull(),
+    amountCents: integer("amount_cents").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    budgetIdx: index("annual_budget_lines_budget_idx").on(t.budgetId),
+  }),
+);
+
+export const obligations = sqliteTable(
+  "obligations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id").notNull(),
+    budgetId: text("budget_id").notNull(),
+    budgetLineId: text("budget_line_id").notNull(),
+    kind: text("kind").notNull(),
+    periodYear: integer("period_year").notNull(),
+    amountCents: integer("amount_cents").notNull(),
+    openAmountCents: integer("open_amount_cents").notNull(),
+    status: text("status").notNull().default("open"),
+    legalBasis: text("legal_basis"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    budgetLineFracaoUq: uniqueIndex("obligations_budget_line_fracao_uq").on(
+      t.budgetLineId,
+      t.fracaoId,
+    ),
+    tenantFracaoIdx: index("obligations_tenant_fracao_idx").on(t.tenantId, t.fracaoId),
+    tenantStatusIdx: index("obligations_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
+
+/**
+ * Delivery attempts for notification jobs — observability without inbox guarantee (ADR-035).
+ */
+export const notificationDeliveries = sqliteTable(
+  "notification_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    channel: text("channel").notNull().default("email"),
+    destination: text("destination").notNull(),
+    template: text("template").notNull(),
+    status: text("status").notNull(),
+    providerMessageId: text("provider_message_id"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    error: text("error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    idempotencyUq: uniqueIndex("notification_deliveries_idempotency_uq").on(
+      t.tenantId,
+      t.idempotencyKey,
+    ),
+  }),
+);
+
 // --- ATAS DE ASSEMBLEIA ---
 export const atas = sqliteTable("atas", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),

@@ -11,6 +11,9 @@ import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 import { scrypt, randomBytes } from "crypto";
 import { promisify } from "util";
+import { applyDomainKernelSchema } from "../src/api/infra/kernel-schema";
+import { applyF1ConstitutionSchema } from "../src/api/infra/f1-schema";
+import { CONDOMINIO } from "../src/api/lib/condominio";
 
 const scryptAsync = promisify(scrypt);
 
@@ -331,13 +334,47 @@ async function createAdminUser() {
   console.log("   Password: admin123");
 }
 
+async function seedKernelAdmin() {
+  const tenantId = String(process.env.TENANT_ID ?? "").trim() || CONDOMINIO.nif;
+  const userRow = await client.execute(
+    "SELECT id FROM \"user\" WHERE email = 'admin@condominio.local' LIMIT 1",
+  );
+  const userId = userRow.rows[0] ? String((userRow.rows[0] as { id: string }).id) : null;
+  if (!userId) return;
+
+  const existing = await client.execute({
+    sql: "SELECT id FROM persons WHERE user_id = ?",
+    args: [userId],
+  });
+  if (existing.rows.length > 0) {
+    console.log("⏭️  Person kernel já existe, a saltar...");
+    return;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const personId = crypto.randomUUID();
+  await client.execute({
+    sql: `INSERT INTO persons (id, user_id, name, email, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [personId, userId, "Administrador", "admin@condominio.local", now, now],
+  });
+  await client.execute({
+    sql: `INSERT INTO memberships (id, person_id, tenant_id, role_code, status, created_at, created_by_person_id)
+          VALUES (?, ?, ?, 'Admin', 'active', ?, ?)`,
+    args: [crypto.randomUUID(), personId, tenantId, now, personId],
+  });
+  console.log(`✅ Membership Admin seed (tenant ${tenantId})`);
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────────
 async function main() {
   console.log(`\n🔧 Setup BD local: ${DB_PATH}\n`);
   await createTables();
+  await applyDomainKernelSchema(client);
+  await applyF1ConstitutionSchema(client);
   await seedFracoes();
   await seedFornecedores();
   await createAdminUser();
+  await seedKernelAdmin();
   console.log("\n🎉 BD pronta!\n");
   process.exit(0);
 }
