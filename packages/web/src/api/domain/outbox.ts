@@ -14,6 +14,14 @@ export const OUTBOX_JOB_TYPES = {
   persistReuniaoAudit: "audit.reuniao_persist",
   /** Content-addressed upload registration. */
   registerUpload: "upload.register",
+  /** F2 — avisos de débito (calendário dia 1). */
+  generateMonthlyPaymentNotices: "f2.generate_monthly_payment_notices",
+  /** F2 — recibo após confirmação de Allocation. */
+  issueReceipt: "f2.issue_receipt",
+  /** F2 — sweep de recibos em falta. */
+  sweepReceipts: "f2.sweep_receipts",
+  /** F2 — aviso proactivo de reautorização bancária (não é sync PSD2). */
+  bankReauthNotice: "notify.bank_reauth",
 } as const;
 
 export type OutboxJob = {

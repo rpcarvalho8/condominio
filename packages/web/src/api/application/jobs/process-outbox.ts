@@ -5,6 +5,12 @@ import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createContentUploadRepo } from "../../infra/repos/content-upload-repo";
 import { createNotificationDeliveryRepo } from "../../infra/repos/notification-delivery-repo";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
+import {
+  BANK_REAUTH_ADMIN_FALLBACK,
+  isResolvedAdminMailbox,
+  looksLikeEmail,
+  resolveFinanceManagerEmails,
+} from "../finance/f2-bank-connection";
 
 export type OutboxHandler = (job: OutboxJob, deps: KernelDeps) => Promise<void>;
 
@@ -81,10 +87,98 @@ async function handleRegisterUpload(job: OutboxJob, deps: KernelDeps): Promise<v
   });
 }
 
+async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const repo = createNotificationDeliveryRepo(deps.db);
+  const existing = await repo.findByIdempotency(job.tenantId, job.idempotencyKey);
+  if (existing) return;
+
+  const liveEmails = await resolveFinanceManagerEmails(deps, job.tenantId);
+  const payloadEmails = Array.isArray(job.payload.notifyEmails)
+    ? job.payload.notifyEmails.map((e) => String(e ?? "").trim()).filter(isResolvedAdminMailbox)
+    : [];
+  // Never promote BANK_REAUTH_ADMIN_FALLBACK via payloadAdmin / looksLikeEmail.
+  const payloadAdmin =
+    typeof job.payload.adminEmail === "string" && isResolvedAdminMailbox(job.payload.adminEmail)
+      ? [job.payload.adminEmail.trim()]
+      : [];
+  const notifyEmails = liveEmails.length > 0 ? liveEmails : [...payloadEmails, ...payloadAdmin];
+  let destination = notifyEmails[0] ?? BANK_REAUTH_ADMIN_FALLBACK;
+  if (!looksLikeEmail(destination) || !isResolvedAdminMailbox(destination)) {
+    destination = BANK_REAUTH_ADMIN_FALLBACK;
+  }
+
+  const iban = String(job.payload.accountIban ?? "").trim().replace(/\s/g, "");
+  if (iban && destination.replace(/\s/g, "").toUpperCase() === iban.toUpperCase()) {
+    destination = BANK_REAUTH_ADMIN_FALLBACK;
+  }
+
+  // Deliverable only when destination is a real manager email, never the fallback.
+  const hasMailbox = isResolvedAdminMailbox(destination);
+  await repo.insert({
+    tenantId: job.tenantId,
+    channel: "email",
+    destination,
+    template: "bank_reauth_required",
+    status: hasMailbox ? "attempted" : "skipped",
+    providerMessageId: `local-${job.id}`,
+    idempotencyKey: job.idempotencyKey,
+  });
+
+  await createAuditEventRepo(deps.db).append({
+    tenantId: job.tenantId,
+    type: hasMailbox ? "notification.email.attempted" : "notification.email.skipped",
+    entityType: "notification_delivery",
+    entityId: job.idempotencyKey,
+    payload: {
+      destination,
+      notifyEmails,
+      template: "bank_reauth_required",
+      jobId: job.id,
+      connectionId: job.payload.connectionId ?? null,
+      accountIban: job.payload.accountIban ?? null,
+    },
+    reason: hasMailbox ? "outbox_bank_reauth_notice" : "outbox_bank_reauth_notice_no_manager_email",
+    source: "outbox",
+    requestId: job.correlationId,
+  });
+}
+
+async function handleIssueReceipt(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const paymentId = String(job.payload.paymentId ?? "");
+  if (!paymentId) throw new Error("paymentId required");
+  const { issueReceiptForPayment } = await import("../finance/f2-finance");
+  await issueReceiptForPayment(deps, {
+    tenantId: job.tenantId,
+    paymentId,
+    actor: { requestId: job.correlationId },
+  });
+}
+
+async function handleMonthlyPaymentNotices(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const { generateMonthlyPaymentNotices } = await import("../finance/f2-jobs");
+  await generateMonthlyPaymentNotices(deps, {
+    tenantId: job.tenantId,
+    actor: { requestId: job.correlationId },
+    force: true,
+  });
+}
+
+async function handleSweepReceipts(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const { sweepReceiptsForAllocatedPayments } = await import("../finance/f2-jobs");
+  await sweepReceiptsForAllocatedPayments(deps, {
+    tenantId: job.tenantId,
+    actor: { requestId: job.correlationId },
+  });
+}
+
 const HANDLERS: Record<string, OutboxHandler> = {
   [OUTBOX_JOB_TYPES.notifyMembershipCreated]: handleNotifyMembershipCreated,
   [OUTBOX_JOB_TYPES.persistReuniaoAudit]: handlePersistReuniaoAudit,
   [OUTBOX_JOB_TYPES.registerUpload]: handleRegisterUpload,
+  [OUTBOX_JOB_TYPES.bankReauthNotice]: handleBankReauthNotice,
+  [OUTBOX_JOB_TYPES.issueReceipt]: handleIssueReceipt,
+  [OUTBOX_JOB_TYPES.generateMonthlyPaymentNotices]: handleMonthlyPaymentNotices,
+  [OUTBOX_JOB_TYPES.sweepReceipts]: handleSweepReceipts,
 };
 
 export function backoffMs(attempts: number): number {
