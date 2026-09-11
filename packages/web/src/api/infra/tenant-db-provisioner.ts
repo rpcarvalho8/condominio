@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createClient, type Client } from "@libsql/client";
 import { applyDomainKernelSchema } from "./kernel-schema";
+import { applyF1ConstitutionSchema } from "./f1-schema";
 
 export type ProvisionedDatabase = {
   dbRef: string;
@@ -39,6 +40,7 @@ export function createLocalFileTenantProvisioner(options?: {
       const client = createClient({ url: dbRef });
       if (applyKernel) {
         await applyDomainKernelSchema(client);
+        await applyF1ConstitutionSchema(client);
       }
       return { dbRef, client };
     },

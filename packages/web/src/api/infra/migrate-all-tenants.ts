@@ -2,7 +2,13 @@ import type { PlatformDb } from "../platform/database";
 import { createTenantDirectoryRepo } from "./repos/tenant-directory-repo";
 import { createClient } from "@libsql/client";
 import { applyDomainKernelSchema } from "./kernel-schema";
+import { applyF1ConstitutionSchema } from "./f1-schema";
 import { KERNEL_SCHEMA_VERSION, MIGRATION_STATUS } from "../domain/tenant-directory";
+
+async function applyKernelAndF1(client: { execute: (sql: string) => Promise<unknown> }) {
+  await applyDomainKernelSchema(client);
+  await applyF1ConstitutionSchema(client);
+}
 
 export type TenantMigrationResult = {
   tenantId: string;
@@ -21,7 +27,7 @@ export async function migrateAllTenants(
     targetVersion?: string;
   },
 ): Promise<{ results: TenantMigrationResult[]; okCount: number; failCount: number }> {
-  const apply = opts?.applySchema ?? applyDomainKernelSchema;
+  const apply = opts?.applySchema ?? applyKernelAndF1;
   const targetVersion = opts?.targetVersion ?? KERNEL_SCHEMA_VERSION;
   const repo = createTenantDirectoryRepo(platformDb);
   const tenants = await repo.list();

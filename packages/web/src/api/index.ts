@@ -26,6 +26,7 @@ import { ticketsRoutes } from "./routes/tickets";
 import { emailInboxRoutes, scheduleEmailInboxSync } from "./routes/email-inbox";
 import { uploadsRoutes } from "./routes/uploads";
 import { createKernelRoutes } from "./routes/kernel";
+import { createF1Routes } from "./routes/f1";
 import { createPlatformRoutes } from "./routes/platform";
 import { db } from "./database";
 import { getKernelTenantId } from "./lib/tenant";
@@ -192,6 +193,7 @@ const kernelDeps = {
 };
 
 const kernelRoutes = createKernelRoutes(kernelDeps);
+const f1Routes = createF1Routes(kernelDeps);
 
 const platformRoutes = createPlatformRoutes({
   kernel: kernelDeps,
@@ -241,6 +243,7 @@ const app = new Hono()
   .route("/email-inbox", emailInboxRoutes)
   .route("/uploads", uploadsRoutes)
   .route("/kernel", kernelRoutes)
+  .route("/f1", f1Routes)
   .route("/platform", platformRoutes);
 
 scheduleEmailInboxSync();
