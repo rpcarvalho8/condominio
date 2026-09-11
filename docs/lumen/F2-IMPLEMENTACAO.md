@@ -1,46 +1,48 @@
-# F2 — Estado de implementação (vertical slice)
+# F2 — Estado de implementação (Finance Kernel slice)
 
 **Branch:** `cursor/f2-financeiro-ledger-1c40`  
 **Base documental:** `docs/lumen/06-FATIAS.md`, ADR-003, ADR-012, ADR-028, ADR-029
 
-## Âmbito deste slice (o que o plano exige no kernel)
+## Posição face ao plano
 
-Espelha a abordagem F1: fatia vertical testável no kernel, **sem** transplantar toda a lista F2 de uma vez.
+O plano (`06-FATIAS.md`) distingue:
 
-| Capacidade (docs/lumen) | Estado | Notas |
+1. **Finance Kernel** — Obligation / Payment / Allocation / Ledger / SettlementPolicy / AccountingPeriod / cash / hash-chain  
+2. **Enable Banking** — *só depois* do Finance Kernel passar testes adversariais (ordem de execução §8)  
+3. **Critério de conclusão F2** — sync bancário **ou** aviso proactivo de reautorização, Payments candidatos, Allocation + hash-chain, cash 3 estados, avisos dia 1, recibos na confirmação, `generated_from`
+
+**Este PR entrega o Finance Kernel (1).** Não fecha ainda o critério completo (3): faltam aviso/sync bancário e jobs de avisos/recibos. Isso não é “opcional como LLM na F1”; fica como trabalho F2 seguinte, após este kernel.
+
+## O que está implementado
+
+| Capacidade | Estado | Notas |
 |---|---|---|
-| `Obligation` (origem F1) | ✅ | Reutiliza orçamento aprovado; nunca criar por algoritmo solto |
-| `Payment` + `allocation_status` (ADR-012) | ✅ | Válido sem Allocation; ortogonal a `cash_status` |
-| Dinheiro `registered → verified → deposited` (ADR-028) | ✅ | Evidência fotográfica obrigatória no registo |
-| `second_person`: registante ≠ verificador | ✅ | `bank_deposit` também suportado |
-| Cash `registered` **não** liquida Obligation | ✅ | Allocate bloqueado até verified/deposited |
-| `SettlementPolicy` versionada + `legal_basis` | ✅ | Seed `default` (dívida → FCR → quota → extraordinária) |
-| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | SHA-256 `sha256-v1`; génese por tenant; serialização canónica |
-| Cadeia quebrada → bloqueio + AuditEvent | ✅ | Sem rewrite silencioso |
-| `AccountingPeriod` open/close | ✅ | Fecho com AuditEvent |
-| `PaymentNotice` / `Receipt` + `generated_from` (ADR-016) | ✅ | Recibo nunca vazio |
-| Audit + domain events | ✅ | `payment.registered` / `PaymentAllocated` / rutura de cadeia |
-| Rotas `/api/f2/*` | ✅ | Membership + manager (padrão F1) |
-| Migration `0006_f2_finance.sql` | ✅ | Via `applyF2FinanceSchema` |
+| `Obligation` (origem F1) | ✅ | Reutiliza orçamento aprovado |
+| `Payment` + `allocation_status` (ADR-012) | ✅ | Válido sem Allocation; ortogonal a cash |
+| Cash `registered → verified → deposited` (ADR-028) | ✅ | Evidência obrigatória; `second_person` ≠ registante |
+| Cash `registered` não liquida Obligation | ✅ | |
+| `SettlementPolicy` + `legal_basis` | ✅ | Seed default |
+| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | `sha256-v1`; génese; bloqueio se broken |
+| `AccountingPeriod` open/close | ✅ | |
+| `PaymentNotice` / `Receipt` + `generated_from` | ✅ | API; recibo nunca vazio |
+| Rotas `/api/f2/*` + migration `0006` | ✅ | `applyF2FinanceSchema` |
 
-## Explicitamente fora deste slice
+## Ainda em falta para o critério F2 (próximo trabalho)
 
-(Itens da tabela F2 em `06-FATIAS.md` que **não** fazem parte desta fatia — ficam para iterações seguintes, como LLM/OCR ficou fora de F1.)
-
-- Enable Banking / PSD2 + lifecycle `condo_bank_connections` (tabela existe; sync real não)
-- `reconciliation-engine` / CSV multi-banco / `identity-matrix` / LLM fallback match
-- Jobs calendário `GenerateMonthlyPaymentNotices` / receipts sweep
-- UI admin de caixa / ledger / fecho de mês
-- Reparação operacional de cadeia (só deteção + bloqueio nesta fatia)
-- Portal condómino saldo (F3)
-- `Quota.pago: boolean` — **não** regressar a este modelo
+| Item do critério / tabela F2 | Estado |
+|---|---|
+| Sync bancário **ou** aviso proactivo de reautorização | ❌ |
+| Payments candidatos via reconciliação / CSV / identity-matrix | ❌ |
+| Job avisos dia 1 / recibos na confirmação (calendário/sweep) | ❌ (API de emissão existe; jobs não) |
+| Account Statement sob pedido | ❌ |
+| Enable Banking PSD2 completo | ❌ (depois dos testes adversariais do kernel) |
+| UI admin | ❌ |
+| Portal saldo | F3 |
 
 ## Como testar
 
 ```bash
-cd packages/web && bun run test:f2
-# ou
-cd packages/web && bun test src/api/f2.integration.test.ts
+cd packages/web && bun run test:f1 && bun run test:f2
 ```
 
 ## API (resumo)
