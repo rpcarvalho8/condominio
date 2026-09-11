@@ -10,6 +10,15 @@ import {
   registerIbanProof,
   registerIngestDocument,
 } from "../application/constitution/f1-constitution";
+import {
+  extractDocumentFromStoredContent,
+  uploadIngestDocumentFile,
+} from "../application/constitution/upload-and-extract";
+import {
+  assertF1UploadContentLength,
+  assertF1UploadFile,
+  F1_MAX_UPLOAD_BYTES,
+} from "../application/constitution/f1-upload-guard";
 import { DomainError } from "../domain/errors";
 import type { KernelDeps } from "../infra/kernel-deps";
 import {
@@ -46,6 +55,14 @@ function actorFrom(c: {
   };
 }
 
+function collectFile(body: Record<string, unknown>): File | null {
+  const raw = body.file ?? body.files;
+  if (!raw) return null;
+  const item = Array.isArray(raw) ? raw[0] : raw;
+  if (item && typeof item !== "string") return item as File;
+  return null;
+}
+
 /** F1 — Ingestão + Constituição. Upload ≠ confirmação. */
 export function createF1Routes(deps: KernelDeps) {
   const requireMembership = createRequireActiveMembership(deps);
@@ -54,6 +71,41 @@ export function createF1Routes(deps: KernelDeps) {
   return new Hono<{ Variables: KernelVariables }>()
     .use(requireMembership)
     .use(requireManager)
+    .post("/documents/upload", async (c) => {
+      try {
+        assertF1UploadContentLength(c.req.header("content-length"));
+        const body = await c.req.parseBody({ all: true });
+        const kind = String(body.kind ?? "").trim();
+        const file = collectFile(body as Record<string, unknown>);
+        if (!kind || !file) {
+          return c.json({ message: "kind e file são obrigatórios (multipart)" }, 400);
+        }
+        const filename = file.name || String(body.filename ?? "upload.bin");
+        const mimeType = typeof file.type === "string" ? file.type : null;
+        const declaredSize = typeof file.size === "number" ? file.size : 0;
+        assertF1UploadFile({ filename, mimeType, size: declaredSize });
+        const bytes = Buffer.from(await file.arrayBuffer());
+        if (bytes.length > F1_MAX_UPLOAD_BYTES) {
+          return c.json(
+            {
+              message: `Ficheiro demasiado grande. Máximo: ${Math.round(F1_MAX_UPLOAD_BYTES / (1024 * 1024))}MB.`,
+            },
+            400,
+          );
+        }
+        const result = await uploadIngestDocumentFile(deps, {
+          tenantId: c.get("tenantId")!,
+          kind,
+          filename,
+          bytes,
+          actor: actorFrom(c),
+        });
+        return c.json(result, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
     .post("/documents", async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
@@ -93,6 +145,19 @@ export function createF1Routes(deps: KernelDeps) {
           tenantId: c.get("tenantId")!,
           documentId: c.req.param("id"),
           extraction: { lines: body.lines ?? [] },
+          actor: actorFrom(c),
+        });
+        return c.json(result, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/documents/:id/extract-from-file", async (c) => {
+      try {
+        const result = await extractDocumentFromStoredContent(deps, {
+          tenantId: c.get("tenantId")!,
+          documentId: c.req.param("id"),
           actor: actorFrom(c),
         });
         return c.json(result, 201);

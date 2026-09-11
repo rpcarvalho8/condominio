@@ -23,6 +23,7 @@ import {
   type StructuredExtraction,
 } from "../../domain/constitution";
 import { DomainError } from "../../domain/errors";
+import { assertSha256ContentHash } from "../../infra/content-blob-store";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
@@ -105,6 +106,9 @@ export async function registerIngestDocument(
     throw new DomainError("invalid_kind", `kind inválido: ${kind}`, 400);
   }
 
+  const rawHash = input.contentHash == null ? "" : String(input.contentHash).trim();
+  const contentHash = rawHash ? assertSha256ContentHash(rawHash) : null;
+
   const retentionClass =
     kind === INGEST_DOCUMENT_KINDS.ibanProof
       ? RETENTION_CLASS.personalDocument
@@ -120,7 +124,7 @@ export async function registerIngestDocument(
       kind,
       contentUploadId: input.contentUploadId ?? null,
       filename: input.filename.trim() || "documento",
-      contentHash: input.contentHash ?? null,
+      contentHash,
       status: INGEST_DOCUMENT_STATUS.uploaded,
       retentionClass,
       createdAt: now,

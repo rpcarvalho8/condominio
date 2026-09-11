@@ -22,7 +22,7 @@
     "test:kernel": "bun test src/api/domain/roles.test.ts src/api/application/auth/legacy-user-role-adapter.test.ts src/api/kernel.integration.test.ts",
     "test:platform": "bun test src/api/platform.integration.test.ts",
     "test:f0": "bun test src/api/domain/roles.test.ts src/api/application/auth/legacy-user-role-adapter.test.ts src/api/kernel.integration.test.ts src/api/platform.integration.test.ts src/api/f0.integration.test.ts",
-    "test:f1": "bun test src/api/f1.integration.test.ts",
+    "test:f1": "bun test src/api/f1.integration.test.ts src/api/infra/content-blob-store.test.ts src/api/application/constitution/f1-upload-guard.test.ts",
     "db:studio": "bun --env-file=../../.env drizzle-kit studio",
     "import:excel-2026": "bun run scripts/import-excel-2026.ts",
     "db:setup-local": "bun run scripts/setup-local-db.ts",
