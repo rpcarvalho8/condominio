@@ -13,6 +13,7 @@ import { scrypt, randomBytes } from "crypto";
 import { promisify } from "util";
 import { applyDomainKernelSchema } from "../src/api/infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "../src/api/infra/f1-schema";
+import { applyF2FinanceSchema } from "../src/api/infra/f2-schema";
 import { CONDOMINIO } from "../src/api/lib/condominio";
 
 const scryptAsync = promisify(scrypt);
@@ -371,6 +372,7 @@ async function main() {
   await createTables();
   await applyDomainKernelSchema(client);
   await applyF1ConstitutionSchema(client);
+  await applyF2FinanceSchema(client);
   await seedFracoes();
   await seedFornecedores();
   await createAdminUser();

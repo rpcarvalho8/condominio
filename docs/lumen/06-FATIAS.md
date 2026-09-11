@@ -178,6 +178,8 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 **GO:** só depois do Domain Kernel (F0) congelado e do vertical slice F1 a passar.
 
+**Estado de código:** ver [F2-IMPLEMENTACAO.md](F2-IMPLEMENTACAO.md) — vertical slice Payment/Allocation/Ledger hash-chain + cash 3 estados; Enable Banking e jobs mensais ficam para iteração seguinte.
+
 ---
 
 ## F3 — Onboarding por Convite + PWA (Essencial do piloto)
