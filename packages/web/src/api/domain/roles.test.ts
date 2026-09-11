@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { canManageMemberships, isKernelRoleCode, KERNEL_ROLE_CODES } from "./roles";
+import {
+  canManageFinance,
+  canManageMemberships,
+  canVerifyCash,
+  isKernelRoleCode,
+  KERNEL_ROLE_CODES,
+} from "./roles";
 
 describe("kernel roles", () => {
   test("seed inicial inclui Fiscalizacao e não inventa ConselhoFiscal", () => {
@@ -21,5 +27,13 @@ describe("kernel roles", () => {
     expect(canManageMemberships("PlatformAdmin")).toBe(true);
     expect(canManageMemberships("Fiscalizacao")).toBe(false);
     expect(canManageMemberships("Owner")).toBe(false);
+  });
+
+  test("Fiscalizacao confirma cash; não cria pagamentos", () => {
+    expect(canVerifyCash("Fiscalizacao")).toBe(true);
+    expect(canVerifyCash("Admin")).toBe(true);
+    expect(canVerifyCash("Owner")).toBe(false);
+    expect(canManageFinance("Fiscalizacao")).toBe(false);
+    expect(canManageFinance("Admin")).toBe(true);
   });
 });

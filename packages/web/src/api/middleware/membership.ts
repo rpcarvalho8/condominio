@@ -1,7 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import type { Person } from "../domain/person";
 import type { Membership } from "../domain/membership";
-import { canManageMemberships } from "../domain/roles";
+import { canManageFinance, canManageMemberships, canVerifyCash } from "../domain/roles";
 import type { KernelDeps } from "../infra/kernel-deps";
 import { createMembershipRepo } from "../infra/repos/membership-repo";
 import { createPersonRepo } from "../infra/repos/person-repo";
@@ -72,6 +72,30 @@ export function createRequireMembershipManager() {
   return createMiddleware<{ Variables: KernelVariables }>(async (c, next) => {
     const memberships = c.get("memberships") ?? [];
     const allowed = memberships.some((m) => canManageMemberships(String(m.roleCode)));
+    if (!allowed) {
+      return c.json({ message: "Acesso negado" }, 403);
+    }
+    return next();
+  });
+}
+
+/** Registar / depositar / alocar / documentos F2 — não Fiscalizacao. */
+export function createRequireFinanceManager() {
+  return createMiddleware<{ Variables: KernelVariables }>(async (c, next) => {
+    const memberships = c.get("memberships") ?? [];
+    const allowed = memberships.some((m) => canManageFinance(String(m.roleCode)));
+    if (!allowed) {
+      return c.json({ message: "Acesso negado" }, 403);
+    }
+    return next();
+  });
+}
+
+/** verify-cash: Fiscalizacao ou gestor (ADR-028 / ADR-031). */
+export function createRequireCashVerifier() {
+  return createMiddleware<{ Variables: KernelVariables }>(async (c, next) => {
+    const memberships = c.get("memberships") ?? [];
+    const allowed = memberships.some((m) => canVerifyCash(String(m.roleCode)));
     if (!allowed) {
       return c.json({ message: "Acesso negado" }, 403);
     }

@@ -779,6 +779,217 @@ export const obligations = sqliteTable(
   }),
 );
 
+// --- F2: Financeiro / Ledger ---
+
+export const settlementPolicies = sqliteTable(
+  "settlement_policies",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    code: text("code").notNull(),
+    version: integer("version").notNull().default(1),
+    status: text("status").notNull().default("active"),
+    rulesJson: text("rules_json").notNull(),
+    legalBasisJson: text("legal_basis_json"),
+    effectiveFrom: integer("effective_from", { mode: "timestamp" }).notNull(),
+    supersededBy: text("superseded_by"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantCodeVersionUq: uniqueIndex("settlement_policies_tenant_code_version_uq").on(
+      t.tenantId,
+      t.code,
+      t.version,
+    ),
+  }),
+);
+
+export const payments = sqliteTable(
+  "payments",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id"),
+    amountCents: integer("amount_cents").notNull(),
+    currency: text("currency").notNull().default("EUR"),
+    receivedAt: integer("received_at", { mode: "timestamp" }).notNull(),
+    payerReference: text("payer_reference"),
+    paymentMethod: text("payment_method").notNull(),
+    allocationStatus: text("allocation_status").notNull().default("nao_alocado_pendente"),
+    cashStatus: text("cash_status"),
+    verificationMethod: text("verification_method"),
+    registeredByPersonId: text("registered_by_person_id"),
+    verifiedByPersonId: text("verified_by_person_id"),
+    evidenceUploadId: text("evidence_upload_id"),
+    bankMovementId: text("bank_movement_id"),
+    depositedAt: integer("deposited_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantStatusIdx: index("payments_tenant_status_idx").on(t.tenantId, t.allocationStatus),
+    tenantFracaoIdx: index("payments_tenant_fracao_idx").on(t.tenantId, t.fracaoId),
+    tenantCashIdx: index("payments_tenant_cash_idx").on(t.tenantId, t.cashStatus),
+  }),
+);
+
+export const allocations = sqliteTable(
+  "allocations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    paymentId: text("payment_id")
+      .notNull()
+      .references(() => payments.id),
+    obligationId: text("obligation_id").notNull(),
+    amountCents: integer("amount_cents").notNull(),
+    policyId: text("policy_id"),
+    confidence: real("confidence"),
+    approvedByPersonId: text("approved_by_person_id"),
+    ledgerEntryId: text("ledger_entry_id"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    paymentIdx: index("allocations_payment_idx").on(t.paymentId),
+    obligationIdx: index("allocations_obligation_idx").on(t.obligationId),
+    tenantIdx: index("allocations_tenant_idx").on(t.tenantId),
+  }),
+);
+
+export const ledgerEntries = sqliteTable(
+  "ledger_entries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    entryType: text("entry_type").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+    payloadJson: text("payload_json").notNull(),
+    previousHash: text("previous_hash").notNull(),
+    entryHash: text("entry_hash").notNull(),
+    algorithmVersion: text("algorithm_version").notNull().default("sha256-v1"),
+    allocationId: text("allocation_id"),
+    paymentId: text("payment_id"),
+    obligationId: text("obligation_id"),
+    amountCents: integer("amount_cents"),
+    direction: text("direction"),
+  },
+  (t) => ({
+    tenantSequenceUq: uniqueIndex("ledger_entries_tenant_sequence_uq").on(t.tenantId, t.sequence),
+    tenantCreatedIdx: index("ledger_entries_tenant_created_idx").on(t.tenantId, t.createdAt),
+    hashUq: uniqueIndex("ledger_entries_hash_uq").on(t.tenantId, t.entryHash),
+  }),
+);
+
+export const accountingPeriods = sqliteTable(
+  "accounting_periods",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    year: integer("year").notNull(),
+    month: integer("month").notNull(),
+    status: text("status").notNull().default("open"),
+    closedAt: integer("closed_at", { mode: "timestamp" }),
+    closedByPersonId: text("closed_by_person_id"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantYmUq: uniqueIndex("accounting_periods_tenant_ym_uq").on(t.tenantId, t.year, t.month),
+  }),
+);
+
+export const financialDocuments = sqliteTable(
+  "financial_documents",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id"),
+    docType: text("doc_type").notNull(),
+    periodLabel: text("period_label"),
+    issuedAt: integer("issued_at", { mode: "timestamp" }).notNull(),
+    dueAt: integer("due_at", { mode: "timestamp" }),
+    amountCents: integer("amount_cents").notNull(),
+    status: text("status").notNull().default("issued"),
+    documentNumber: text("document_number"),
+    generatedFromJson: text("generated_from_json").notNull(),
+    sourcePaymentId: text("source_payment_id"),
+    pdfUrl: text("pdf_url"),
+    sentAt: integer("sent_at", { mode: "timestamp" }),
+    deliveryStatus: text("delivery_status"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantTypeIdx: index("financial_documents_tenant_type_idx").on(t.tenantId, t.docType),
+    fracaoIdx: index("financial_documents_fracao_idx").on(t.fracaoId),
+  }),
+);
+
+export const condoBankConnections = sqliteTable(
+  "condo_bank_connections",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    provider: text("provider").notNull().default("enable_banking"),
+    consentStatus: text("consent_status").notNull().default("pending"),
+    lastSyncAt: integer("last_sync_at", { mode: "timestamp" }),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantIdx: index("condo_bank_connections_tenant_idx").on(t.tenantId),
+  }),
+);
+
+export const tenantLedgerIntegrity = sqliteTable("tenant_ledger_integrity", {
+  tenantId: text("tenant_id").primaryKey(),
+  chainIntegrity: text("chain_integrity").notNull().default("ok"),
+  lastValidatedAt: integer("last_validated_at", { mode: "timestamp" }),
+  lastBreakSequence: integer("last_break_sequence"),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+/**
+ * Kernel F2 — movimento bancário tenant-scoped para cash deposit / bank_deposit.
+ * Não substitui Fonte `bank_transactions` nem o ciclo Enable Banking.
+ */
+export const f2BankMovements = sqliteTable(
+  "f2_bank_movements",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    amountCents: integer("amount_cents").notNull(),
+    bookedAt: integer("booked_at", { mode: "timestamp" }).notNull(),
+    description: text("description"),
+    externalRef: text("external_ref"),
+    status: text("status").notNull().default("reconciled"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantIdx: index("f2_bank_movements_tenant_idx").on(t.tenantId),
+  }),
+);
+
 /**
  * Delivery attempts for notification jobs — observability without inbox guarantee (ADR-035).
  */
