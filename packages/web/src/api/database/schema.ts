@@ -589,6 +589,196 @@ export const contentUploads = sqliteTable(
   }),
 );
 
+// --- F1: Ingestão + Constituição ---
+
+export const ingestDocuments = sqliteTable(
+  "ingest_documents",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    contentUploadId: text("content_upload_id"),
+    filename: text("filename").notNull(),
+    contentHash: text("content_hash"),
+    status: text("status").notNull().default("uploaded"),
+    retentionClass: text("retention_class").notNull().default("legal_instrument"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    processedAt: integer("processed_at", { mode: "timestamp" }),
+    error: text("error"),
+  },
+  (t) => ({
+    tenantStatusIdx: index("ingest_documents_tenant_status_idx").on(t.tenantId, t.status),
+    tenantKindIdx: index("ingest_documents_tenant_kind_idx").on(t.tenantId, t.kind),
+  }),
+);
+
+export const extractLines = sqliteTable(
+  "extract_lines",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => ingestDocuments.id, { onDelete: "cascade" }),
+    lineNo: integer("line_no").notNull(),
+    kind: text("kind").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    sourceExcerpt: text("source_excerpt").notNull(),
+    confidence: real("confidence"),
+    status: text("status").notNull().default("pending_review"),
+    editedPayloadJson: text("edited_payload_json"),
+    confirmedAt: integer("confirmed_at", { mode: "timestamp" }),
+    confirmedByPersonId: text("confirmed_by_person_id"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    docLineUq: uniqueIndex("extract_lines_doc_line_uq").on(t.documentId, t.lineNo),
+    tenantStatusIdx: index("extract_lines_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
+
+export const constitutionFracoes = sqliteTable(
+  "constitution_fracoes",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    codigo: text("codigo").notNull(),
+    tipo: text("tipo").notNull().default("fracao"),
+    permilagem: integer("permilagem").notNull(),
+    sourceDocumentId: text("source_document_id"),
+    sourceLineId: text("source_line_id"),
+    sourceExcerpt: text("source_excerpt"),
+    status: text("status").notNull().default("confirmed"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    confirmedAt: integer("confirmed_at", { mode: "timestamp" }).notNull(),
+    confirmedByPersonId: text("confirmed_by_person_id"),
+  },
+  (t) => ({
+    tenantCodigoUq: uniqueIndex("constitution_fracoes_tenant_codigo_uq").on(t.tenantId, t.codigo),
+    tenantIdx: index("constitution_fracoes_tenant_idx").on(t.tenantId),
+  }),
+);
+
+export const ownerContactDrafts = sqliteTable(
+  "owner_contact_drafts",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    documentId: text("document_id"),
+    fracaoCodigo: text("fracao_codigo").notNull(),
+    personName: text("person_name").notNull(),
+    email: text("email"),
+    phone: text("phone"),
+    nif: text("nif"),
+    sourceExcerpt: text("source_excerpt"),
+    status: text("status").notNull().default("pending_review"),
+    confirmedAt: integer("confirmed_at", { mode: "timestamp" }),
+    confirmedByPersonId: text("confirmed_by_person_id"),
+    personId: text("person_id"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantStatusIdx: index("owner_contact_drafts_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
+
+export const condoIbanProofs = sqliteTable(
+  "condo_iban_proofs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    documentId: text("document_id").notNull(),
+    iban: text("iban").notNull(),
+    retentionClass: text("retention_class").notNull().default("personal_document"),
+    status: text("status").notNull().default("registered"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    purgedAt: integer("purged_at", { mode: "timestamp" }),
+  },
+  (t) => ({
+    tenantIdx: index("condo_iban_proofs_tenant_idx").on(t.tenantId),
+  }),
+);
+
+export const annualBudgets = sqliteTable(
+  "annual_budgets",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    year: integer("year").notNull(),
+    status: text("status").notNull().default("draft"),
+    title: text("title").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    approvedAt: integer("approved_at", { mode: "timestamp" }),
+    approvedByPersonId: text("approved_by_person_id"),
+  },
+  (t) => ({
+    tenantYearUq: uniqueIndex("annual_budgets_tenant_year_uq").on(t.tenantId, t.year),
+  }),
+);
+
+export const annualBudgetLines = sqliteTable(
+  "annual_budget_lines",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    budgetId: text("budget_id")
+      .notNull()
+      .references(() => annualBudgets.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    label: text("label").notNull(),
+    amountCents: integer("amount_cents").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    budgetIdx: index("annual_budget_lines_budget_idx").on(t.budgetId),
+  }),
+);
+
+export const obligations = sqliteTable(
+  "obligations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id").notNull(),
+    budgetId: text("budget_id").notNull(),
+    budgetLineId: text("budget_line_id").notNull(),
+    kind: text("kind").notNull(),
+    periodYear: integer("period_year").notNull(),
+    amountCents: integer("amount_cents").notNull(),
+    openAmountCents: integer("open_amount_cents").notNull(),
+    status: text("status").notNull().default("open"),
+    legalBasis: text("legal_basis"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    budgetLineFracaoUq: uniqueIndex("obligations_budget_line_fracao_uq").on(
+      t.budgetLineId,
+      t.fracaoId,
+    ),
+    tenantFracaoIdx: index("obligations_tenant_fracao_idx").on(t.tenantId, t.fracaoId),
+    tenantStatusIdx: index("obligations_tenant_status_idx").on(t.tenantId, t.status),
+  }),
+);
+
 /**
  * Delivery attempts for notification jobs — observability without inbox guarantee (ADR-035).
  */

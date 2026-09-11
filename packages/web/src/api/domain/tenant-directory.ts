@@ -42,7 +42,8 @@ export type TenantDirectoryEntry = {
   encryptionKeyRef: string | null;
 };
 
-export const KERNEL_SCHEMA_VERSION = "f0-complete-v1";
+/** Schema alvo após F0 + F1 (constituição). */
+export const KERNEL_SCHEMA_VERSION = "f1-constitution-v1";
 
 export function isActiveTenant(entry: Pick<TenantDirectoryEntry, "status">): boolean {
   return entry.status === TENANT_STATUS.active;

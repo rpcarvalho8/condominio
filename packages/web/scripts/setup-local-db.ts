@@ -12,6 +12,7 @@ import { sql } from "drizzle-orm";
 import { scrypt, randomBytes } from "crypto";
 import { promisify } from "util";
 import { applyDomainKernelSchema } from "../src/api/infra/kernel-schema";
+import { applyF1ConstitutionSchema } from "../src/api/infra/f1-schema";
 import { CONDOMINIO } from "../src/api/lib/condominio";
 
 const scryptAsync = promisify(scrypt);
@@ -369,6 +370,7 @@ async function main() {
   console.log(`\n🔧 Setup BD local: ${DB_PATH}\n`);
   await createTables();
   await applyDomainKernelSchema(client);
+  await applyF1ConstitutionSchema(client);
   await seedFracoes();
   await seedFornecedores();
   await createAdminUser();
