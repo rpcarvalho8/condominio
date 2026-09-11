@@ -60,7 +60,7 @@ O plano (`06-FATIAS.md`) distingue:
 
 - Extração de pagador no descritivo SEPA/Santander e CSV multi-banco → `f2-csv-movements.ts` / `f2-identity.ts` (cópia genérica; **não** importa `identity-matrix.ts` nem `csv-bank-parser.ts`, que puxam `Quota` / PII / mapas do prédio).
 - Match tenant-scoped: `constitution_fracoes` + `owner_contact_drafts` confirmados. Nome por igualdade normalizada ou tokens completos (nunca substring: ANA ≠ JOANA). Resultado = `Payment` candidato, nunca cascata Fonte.
-- Canal `email` do aviso de reauth: `Person.email` do Admin/gestor activo. Sem email → placeholder `admin@invalid`. O IBAN da conta fica no payload só como contexto, nunca como `notification_delivery.destination`.
+- Canal `email` do aviso de reauth: `Person.email` do Admin/gestor activo. Sem email → placeholder `admin@invalid` e `notification_delivery.status = skipped` (o placeholder não conta como mailbox). O IBAN da conta fica no payload só como contexto, nunca como `notification_delivery.destination`.
 
 ## Como testar
 

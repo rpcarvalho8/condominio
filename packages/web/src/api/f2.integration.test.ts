@@ -37,6 +37,7 @@ import {
 } from "./application/finance/f2-candidates";
 import {
   BANK_REAUTH_ADMIN_FALLBACK,
+  isResolvedAdminMailbox,
   sweepBankReauthNotices,
   upsertBankConnection,
 } from "./application/finance/f2-bank-connection";
@@ -902,6 +903,8 @@ describe("F2 BankConnection aviso proactivo de reautorização", () => {
     expect(String(deliveries.rows[0]!.destination)).not.toBe(iban);
     expect(String(deliveries.rows[0]!.destination).startsWith("PT")).toBe(false);
     expect(String(deliveries.rows[0]!.status)).toBe("skipped");
+    expect(isResolvedAdminMailbox(BANK_REAUTH_ADMIN_FALLBACK)).toBe(false);
+    expect(isResolvedAdminMailbox(String(deliveries.rows[0]!.destination))).toBe(false);
   });
 
   test("authorizedByMembershipId tem de existir neste tenant", async () => {

@@ -96,20 +96,24 @@ async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise
   const payloadEmails = Array.isArray(job.payload.notifyEmails)
     ? job.payload.notifyEmails.map((e) => String(e ?? "").trim()).filter(isResolvedAdminMailbox)
     : [];
+  // Never promote BANK_REAUTH_ADMIN_FALLBACK via payloadAdmin / looksLikeEmail.
   const payloadAdmin =
     typeof job.payload.adminEmail === "string" && isResolvedAdminMailbox(job.payload.adminEmail)
       ? [job.payload.adminEmail.trim()]
       : [];
   const notifyEmails = liveEmails.length > 0 ? liveEmails : [...payloadEmails, ...payloadAdmin];
   let destination = notifyEmails[0] ?? BANK_REAUTH_ADMIN_FALLBACK;
-  if (!looksLikeEmail(destination)) destination = BANK_REAUTH_ADMIN_FALLBACK;
+  if (!looksLikeEmail(destination) || !isResolvedAdminMailbox(destination)) {
+    destination = BANK_REAUTH_ADMIN_FALLBACK;
+  }
 
   const iban = String(job.payload.accountIban ?? "").trim().replace(/\s/g, "");
   if (iban && destination.replace(/\s/g, "").toUpperCase() === iban.toUpperCase()) {
     destination = BANK_REAUTH_ADMIN_FALLBACK;
   }
 
-  const hasMailbox = notifyEmails.some(isResolvedAdminMailbox);
+  // Deliverable only when destination is a real manager email, never the fallback.
+  const hasMailbox = isResolvedAdminMailbox(destination);
   await repo.insert({
     tenantId: job.tenantId,
     channel: "email",
