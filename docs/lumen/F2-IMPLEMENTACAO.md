@@ -13,18 +13,25 @@ O plano (`06-FATIAS.md`) distingue:
 
 **Este PR entrega o Finance Kernel (1).** Não fecha ainda o critério completo (3): faltam aviso/sync bancário e jobs de avisos/recibos. Isso não é “opcional como LLM na F1”; fica como trabalho F2 seguinte, após este kernel.
 
+## Fronteira dura (este slice)
+
+- **Não substitui** o modelo Fonte `Quota.pago` / `routes/quotas` / reconciliação Enable Banking. O kernel F2 coexiste; dual-write e cutover da Fonte são trabalho posterior.
+- **Não é o critério F2 completo** (sync ou aviso de reautorização, Payments candidatos, jobs avisos/recibos).
+- Hash-chain = deteção de adulteração (ADR-029), não imutabilidade absoluta.
+- `f2_bank_movements` é evidência tenant-scoped para cash `bank_deposit` / `deposited` — **não** o ciclo de vida bancário completo.
+
 ## O que está implementado
 
 | Capacidade | Estado | Notas |
 |---|---|---|
 | `Obligation` (origem F1) | ✅ | Reutiliza orçamento aprovado |
 | `Payment` + `allocation_status` (ADR-012) | ✅ | Válido sem Allocation; ortogonal a cash |
-| Cash `registered → verified → deposited` (ADR-028) | ✅ | Evidência obrigatória; `second_person` ≠ registante |
+| Cash `registered → verified → deposited` (ADR-028) | ✅ | Fiscalizacao `second_person`; `bank_deposit`/`deposited` exigem movimento tenant-scoped |
 | Cash `registered` não liquida Obligation | ✅ | |
 | `SettlementPolicy` + `legal_basis` | ✅ | Seed default |
-| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | `sha256-v1`; génese; bloqueio se broken |
+| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | `BEGIN IMMEDIATE`; retry unique `(tenant_id, sequence)`; `open_amount >=` |
 | `AccountingPeriod` open/close | ✅ | |
-| `PaymentNotice` / `Receipt` + `generated_from` | ✅ | API; recibo nunca vazio |
+| `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+montante |
 | Rotas `/api/f2/*` + migration `0006` | ✅ | `applyF2FinanceSchema` |
 
 ## Ainda em falta para o critério F2 (próximo trabalho)
