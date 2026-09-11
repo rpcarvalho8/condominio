@@ -29,8 +29,11 @@ import {
   verifyCashPayment,
 } from "./application/finance/f2-finance";
 import {
+  ingestCandidateMovement,
   ingestCandidateMovements,
   ingestCandidatesFromCsv,
+  MAX_CANDIDATE_CSV_CHARS,
+  MAX_CANDIDATE_MOVEMENTS,
 } from "./application/finance/f2-candidates";
 import {
   sweepBankReauthNotices,
@@ -41,6 +44,10 @@ import {
   runF2CalendarSweep,
   sweepReceiptsForAllocatedPayments,
 } from "./application/finance/f2-jobs";
+import {
+  extractFracaoCodeFromDescription,
+  MIN_BARE_FRACAO_CODE_LENGTH,
+} from "./application/finance/f2-identity";
 import { processOutbox } from "./application/jobs/process-outbox";
 import { ownerContactDrafts } from "./database/schema";
 import { BUDGET_LINE_KINDS, INGEST_DOCUMENT_KINDS } from "./domain/constitution";
@@ -941,6 +948,90 @@ describe("F2 Payments candidatos (CSV / identity-matrix / reconciliação)", () 
     const allocs = await client.execute(`SELECT COUNT(*) AS n FROM allocations`);
     expect(Number(allocs.rows[0]!.n)).toBe(0);
   });
+
+  test("índice único (tenant_id, external_ref) e ingest concorrente são idempotentes", async () => {
+    await seedFracaoWithObligations();
+    const idx = await client.execute(
+      `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'payments_tenant_external_ref_uq'`,
+    );
+    expect(idx.rows.length).toBe(1);
+    expect(String(idx.rows[0]!.sql)).toContain("external_ref");
+
+    const movement = {
+      amountCents: 12_00,
+      description: "TRF CRED SEPA+ DE DESCONHECIDO RACE",
+      externalRef: "dup-race-1",
+      source: CANDIDATE_SOURCES.reconciliation,
+    };
+    const [a, b] = await Promise.all([
+      ingestCandidateMovement(deps, { tenantId: TENANT, movement }),
+      ingestCandidateMovement(deps, { tenantId: TENANT, movement }),
+    ]);
+    expect(a.paymentId).toBe(b.paymentId);
+    expect(a.created || b.created).toBe(true);
+    expect(a.created && b.created).toBe(false);
+
+    const paymentsCount = await client.execute(
+      `SELECT COUNT(*) AS n FROM payments WHERE tenant_id = ? AND external_ref = ?`,
+      [TENANT, "dup-race-1"],
+    );
+    expect(Number(paymentsCount.rows[0]!.n)).toBe(1);
+
+    const movementsCount = await client.execute(
+      `SELECT COUNT(*) AS n FROM f2_bank_movements WHERE tenant_id = ? AND external_ref = ?`,
+      [TENANT, "dup-race-1"],
+    );
+    expect(Number(movementsCount.rows[0]!.n)).toBe(1);
+
+    const third = await ingestCandidateMovement(deps, { tenantId: TENANT, movement });
+    expect(third.created).toBe(false);
+    expect(third.paymentId).toBe(a.paymentId);
+  });
+
+  test("POST /payments/candidates rejeita csvText e movements[] acima do limite", async () => {
+    const admin = await seedActor({
+      userId: "user-admin-cap",
+      roleCode: "Admin",
+      name: "Admin Cap",
+      email: "admin-cap@test",
+    });
+    currentUser = { id: admin.userId!, email: "admin-cap@test" };
+
+    const tooMany = await app.request("/f2/payments/candidates", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        movements: Array.from({ length: MAX_CANDIDATE_MOVEMENTS + 1 }, (_, i) => ({
+          amountCents: 100,
+          externalRef: `cap-${i}`,
+        })),
+      }),
+    });
+    expect(tooMany.status).toBe(400);
+    const tooManyBody = (await tooMany.json()) as { message: string };
+    expect(tooManyBody.message).toContain("movements[]");
+
+    const tooBigCsv = await app.request("/f2/payments/candidates", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ csvText: "x".repeat(MAX_CANDIDATE_CSV_CHARS + 1) }),
+    });
+    expect(tooBigCsv.status).toBe(400);
+    const csvBody = (await tooBigCsv.json()) as { message: string };
+    expect(csvBody.message).toContain("csvText");
+  });
+});
+
+describe("F2 identity — limiar de código de fração", () => {
+  test(`código curto (< ${MIN_BARE_FRACAO_CODE_LENGTH}) só casa com prefixo FRACAO; códigos longos casam por palavra`, () => {
+    expect(MIN_BARE_FRACAO_CODE_LENGTH).toBe(3);
+    expect(extractFracaoCodeFromDescription("TRF CRED SEPA+ DE MARIA SILVA", ["A", "DE"])).toBeNull();
+    expect(extractFracaoCodeFromDescription("pagamento DE quota", ["DE"])).toBeNull();
+    expect(extractFracaoCodeFromDescription("FRACAO A", ["A"])).toBe("A");
+    expect(extractFracaoCodeFromDescription("pagamento fracção DE extra", ["DE"])).toBe("DE");
+    expect(extractFracaoCodeFromDescription("referencia 12B no descritivo", ["12B"])).toBe("12B");
+    expect(extractFracaoCodeFromDescription("FRACAO 12B", ["12B"])).toBe("12B");
+  });
 });
 
 describe("F2 jobs avisos dia 1 e recibos na Allocation", () => {
@@ -960,6 +1051,40 @@ describe("F2 jobs avisos dia 1 e recibos na Allocation", () => {
     expect(second.issued.length).toBe(0);
     expect(second.reused.length).toBe(1);
     expect(second.reused[0]).toBe(first.issued[0]);
+  });
+
+  test("aviso de débito usa openAmountCents restante, não amountCents original", async () => {
+    const { fracao, obligations: obs } = await seedFracaoWithObligations();
+    const originalCents = obs.reduce((s, o) => s + o.amountCents, 0);
+    expect(originalCents).toBeGreaterThan(20_000);
+
+    const payment = await registerPayment(deps, {
+      tenantId: TENANT,
+      fracaoId: fracao.id,
+      amountCents: 20_000,
+      paymentMethod: PAYMENT_METHODS.bankTransfer,
+    });
+    await allocatePayment(deps, { tenantId: TENANT, paymentId: payment.id });
+
+    const open = await client.execute(
+      `SELECT SUM(open_amount_cents) AS n FROM obligations WHERE tenant_id = ? AND status = 'open' AND open_amount_cents > 0`,
+      [TENANT],
+    );
+    const remaining = Number(open.rows[0]!.n);
+    expect(remaining).toBeGreaterThan(0);
+    expect(remaining).toBe(originalCents - 20_000);
+
+    deps.now = () => new Date("2026-09-01T10:00:00.000Z");
+    const notices = await generateMonthlyPaymentNotices(deps, { tenantId: TENANT });
+    expect(notices.skipped).toBe(false);
+    expect(notices.issued.length).toBe(1);
+
+    const docs = await client.execute(
+      `SELECT amount_cents FROM financial_documents WHERE id = ?`,
+      [notices.issued[0]!],
+    );
+    expect(Number(docs.rows[0]!.amount_cents)).toBe(remaining);
+    expect(Number(docs.rows[0]!.amount_cents)).not.toBe(originalCents);
   });
 
   test("Allocation enfileira recibo; sweep e processOutbox emitem com generated_from", async () => {

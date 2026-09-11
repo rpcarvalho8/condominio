@@ -1250,11 +1250,13 @@ export async function issuePaymentNotice(
       400,
     );
   }
-  const expectedCents = obs.reduce((s, o) => s + o.amountCents, 0);
+  const expectedCents = obs
+    .filter((o) => o.openAmountCents > 0)
+    .reduce((s, o) => s + o.openAmountCents, 0);
   if (expectedCents !== input.amountCents) {
     throw new DomainError(
       "notice_amount_mismatch",
-      `amountCents ${input.amountCents} ≠ soma das obligations ${expectedCents}`,
+      `amountCents ${input.amountCents} ≠ soma em aberto das obligations ${expectedCents}`,
       400,
     );
   }

@@ -32,11 +32,11 @@ O plano (`06-FATIAS.md`) distingue:
 | `SettlementPolicy` + `legal_basis` | ✅ | Seed default |
 | `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | Mutex por tenant + `BEGIN IMMEDIATE`; retry unique `(tenant_id, sequence)`; `open_amount >=` |
 | `AccountingPeriod` open/close | ✅ | |
-| `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+montante |
-| Rotas `/api/f2/*` + migration `0006`/`0007` | ✅ | `applyF2FinanceSchema` |
+| `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+**soma `openAmountCents`** |
+| Rotas `/api/f2/*` + migration `0006`/`0007` | ✅ | `applyF2FinanceSchema`; UNIQUE `(tenant_id, external_ref)` em `payments` e `f2_bank_movements` |
 | Aviso proactivo de reautorização `BankConnection` | ✅ | Lead 14 dias; outbox `notify.bank_reauth`; **não** é sync PSD2 |
-| Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; sem Allocation automática; sem `Quota.pago` |
-| Job avisos dia 1 (UTC) | ✅ | `GenerateMonthlyPaymentNotices` → `issuePaymentNotice` |
+| Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; ingest transaccional + idempotente em conflito UNIQUE; sem Allocation automática; sem `Quota.pago`; `POST /payments/candidates` rejeita `csvText` > 512k chars e `movements[]` > 500 |
+| Job avisos dia 1 (UTC) | ✅ | `GenerateMonthlyPaymentNotices` → `issuePaymentNotice` com montante = aberto restante |
 | Recibos na confirmação de Allocation + sweep | ✅ | Outbox `f2.issue_receipt` + `/jobs/receipt-sweep` |
 
 ## Critério F2 — o que fecha aqui vs o que fica

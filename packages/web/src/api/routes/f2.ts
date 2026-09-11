@@ -13,6 +13,8 @@ import {
 import {
   ingestCandidateMovements,
   ingestCandidatesFromCsv,
+  MAX_CANDIDATE_CSV_CHARS,
+  MAX_CANDIDATE_MOVEMENTS,
 } from "../application/finance/f2-candidates";
 import {
   listBankConnections,
@@ -301,6 +303,18 @@ export function createF2Routes(deps: KernelDeps) {
         };
         const tenantId = c.get("tenantId")!;
         const actor = actorFrom(c);
+        if (typeof body.csvText === "string" && body.csvText.length > MAX_CANDIDATE_CSV_CHARS) {
+          return c.json(
+            { message: `csvText excede ${MAX_CANDIDATE_CSV_CHARS} caracteres` },
+            400,
+          );
+        }
+        if (Array.isArray(body.movements) && body.movements.length > MAX_CANDIDATE_MOVEMENTS) {
+          return c.json(
+            { message: `movements[] excede ${MAX_CANDIDATE_MOVEMENTS} itens` },
+            400,
+          );
+        }
         if (body.csvText) {
           const result = await ingestCandidatesFromCsv(deps, {
             tenantId,

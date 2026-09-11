@@ -104,7 +104,7 @@ export async function generateMonthlyPaymentNotices(
       continue;
     }
 
-    const amountCents = open.reduce((s, o) => s + o.amountCents, 0);
+    const amountCents = open.reduce((s, o) => s + o.openAmountCents, 0);
     try {
       const doc = await issuePaymentNotice(deps, {
         tenantId: input.tenantId,

@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { sqliteTable, text, integer, real, index, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { user } from "./auth-schema";
 
@@ -839,6 +840,9 @@ export const payments = sqliteTable(
     tenantStatusIdx: index("payments_tenant_status_idx").on(t.tenantId, t.allocationStatus),
     tenantFracaoIdx: index("payments_tenant_fracao_idx").on(t.tenantId, t.fracaoId),
     tenantCashIdx: index("payments_tenant_cash_idx").on(t.tenantId, t.cashStatus),
+    tenantExternalRefUq: uniqueIndex("payments_tenant_external_ref_uq")
+      .on(t.tenantId, t.externalRef)
+      .where(sql`${t.externalRef} is not null`),
   }),
 );
 
@@ -998,6 +1002,9 @@ export const f2BankMovements = sqliteTable(
   },
   (t) => ({
     tenantIdx: index("f2_bank_movements_tenant_idx").on(t.tenantId),
+    tenantExternalRefUq: uniqueIndex("f2_bank_movements_tenant_ext_uq")
+      .on(t.tenantId, t.externalRef)
+      .where(sql`${t.externalRef} is not null`),
   }),
 );
 

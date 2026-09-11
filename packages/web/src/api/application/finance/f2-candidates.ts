@@ -13,7 +13,7 @@ import {
   type CandidateSource,
 } from "../../domain/finance";
 import { DomainError } from "../../domain/errors";
-import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
+import { kernelNow, type KernelDb, type KernelDeps } from "../../infra/kernel-deps";
 import { parseBankCsvCredits } from "./f2-csv-movements";
 import { matchCandidateIdentity } from "./f2-identity";
 import { registerPayment } from "./f2-finance";
@@ -23,6 +23,12 @@ type Actor = {
   userId?: string | null;
   requestId?: string | null;
 };
+
+/** Caps for POST /payments/candidates — reject 400 before parse/insert. */
+export const MAX_CANDIDATE_CSV_CHARS = 512_000;
+export const MAX_CANDIDATE_MOVEMENTS = 500;
+
+const INGEST_UNIQUE_RETRIES = 3;
 
 export type CandidateMovementInput = {
   amountCents: number;
@@ -65,6 +71,38 @@ function parseBooked(value: Date | string | null | undefined, fallback: Date): D
   return Number.isNaN(d.getTime()) ? fallback : d;
 }
 
+function isUniqueOrBusyError(err: unknown): boolean {
+  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
+  return (
+    msg.includes("unique") ||
+    msg.includes("constraint failed") ||
+    msg.includes("already exists") ||
+    msg.includes("busy") ||
+    msg.includes("database is locked") ||
+    msg.includes("cannot start a transaction")
+  );
+}
+
+function assertCsvTextSize(csvText: string) {
+  if (csvText.length > MAX_CANDIDATE_CSV_CHARS) {
+    throw new DomainError(
+      "payload_too_large",
+      `csvText excede ${MAX_CANDIDATE_CSV_CHARS} caracteres`,
+      400,
+    );
+  }
+}
+
+function assertMovementsLength(count: number) {
+  if (count > MAX_CANDIDATE_MOVEMENTS) {
+    throw new DomainError(
+      "payload_too_large",
+      `movements[] excede ${MAX_CANDIDATE_MOVEMENTS} itens`,
+      400,
+    );
+  }
+}
+
 async function findPaymentByExternalRef(
   deps: KernelDeps,
   tenantId: string,
@@ -78,8 +116,97 @@ async function findPaymentByExternalRef(
   return row ?? null;
 }
 
+function resultFromExisting(
+  existing: typeof payments.$inferSelect,
+  externalRef: string,
+): CandidateIngestResult {
+  return {
+    paymentId: existing.id,
+    bankMovementId: existing.bankMovementId ?? "",
+    fracaoId: existing.fracaoId,
+    allocationStatus: existing.allocationStatus,
+    confidence: existing.candidateConfidence ?? 0,
+    criteria: ["idempotent"],
+    created: false,
+    externalRef,
+  };
+}
+
+async function insertCandidateInTransaction(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    movement: CandidateMovementInput;
+    actor?: Actor;
+    amountCents: number;
+    externalRef: string;
+  },
+): Promise<CandidateIngestResult> {
+  return deps.db.transaction(async (tx) => {
+    const txDeps: KernelDeps = { ...deps, db: tx as unknown as KernelDb };
+    const existing = await findPaymentByExternalRef(txDeps, input.tenantId, input.externalRef);
+    if (existing) return resultFromExisting(existing, input.externalRef);
+
+    const match = await matchCandidateIdentity(txDeps, {
+      tenantId: input.tenantId,
+      description: input.movement.description,
+      debtorName: input.movement.debtorName,
+      amountCents: input.amountCents,
+    });
+    const identified = Boolean(match.fracaoId);
+    const allocationStatus = identified
+      ? ALLOCATION_STATUS.identificado
+      : ALLOCATION_STATUS.naoAlocadoPendente;
+    const now = kernelNow(txDeps);
+    const bookedAt = parseBooked(input.movement.bookedAt, now);
+    const source = input.movement.source ?? CANDIDATE_SOURCES.reconciliation;
+
+    const [movement] = await txDeps.db
+      .insert(f2BankMovements)
+      .values({
+        id: crypto.randomUUID(),
+        tenantId: input.tenantId,
+        amountCents: input.amountCents,
+        bookedAt,
+        description: input.movement.description ?? null,
+        externalRef: input.externalRef,
+        counterpartyIban: input.movement.counterpartyIban ?? null,
+        status: BANK_MOVEMENT_STATUS.booked,
+        createdAt: now,
+      })
+      .returning();
+
+    const payment = await registerPayment(txDeps, {
+      tenantId: input.tenantId,
+      fracaoId: match.fracaoId,
+      amountCents: input.amountCents,
+      paymentMethod: PAYMENT_METHODS.bankTransfer,
+      payerReference: match.payerName ?? input.movement.description ?? null,
+      bankMovementId: movement!.id,
+      candidateSource: source,
+      candidateConfidence: match.confidence,
+      externalRef: input.externalRef,
+      allocationStatus,
+      receivedAt: bookedAt,
+      actor: input.actor,
+    });
+
+    return {
+      paymentId: payment.id,
+      bankMovementId: movement!.id,
+      fracaoId: payment.fracaoId,
+      allocationStatus: payment.allocationStatus,
+      confidence: match.confidence,
+      criteria: match.criteria,
+      created: true,
+      externalRef: input.externalRef,
+    };
+  });
+}
+
 /**
  * Cria Payment candidato + f2_bank_movement. Idempotente por external_ref.
+ * Check+insert corre numa transação; conflito UNIQUE devolve o Payment existente.
  * Não chama Allocation e não escreve na tabela Fonte `quotas`.
  */
 export async function ingestCandidateMovement(
@@ -97,73 +224,31 @@ export async function ingestCandidateMovement(
 
   const externalRef = movementExternalRef(input.tenantId, input.movement);
   const existing = await findPaymentByExternalRef(deps, input.tenantId, externalRef);
-  if (existing) {
-    return {
-      paymentId: existing.id,
-      bankMovementId: existing.bankMovementId ?? "",
-      fracaoId: existing.fracaoId,
-      allocationStatus: existing.allocationStatus,
-      confidence: existing.candidateConfidence ?? 0,
-      criteria: ["idempotent"],
-      created: false,
-      externalRef,
-    };
+  if (existing) return resultFromExisting(existing, externalRef);
+
+  let last: unknown;
+  for (let attempt = 0; attempt < INGEST_UNIQUE_RETRIES; attempt++) {
+    try {
+      return await insertCandidateInTransaction(deps, {
+        tenantId: input.tenantId,
+        movement: input.movement,
+        actor: input.actor,
+        amountCents,
+        externalRef,
+      });
+    } catch (err) {
+      last = err;
+      if (!isUniqueOrBusyError(err)) throw err;
+      const raced = await findPaymentByExternalRef(deps, input.tenantId, externalRef);
+      if (raced) return resultFromExisting(raced, externalRef);
+      if (attempt < INGEST_UNIQUE_RETRIES - 1) {
+        await new Promise((r) => setTimeout(r, 15 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
   }
-
-  const match = await matchCandidateIdentity(deps, {
-    tenantId: input.tenantId,
-    description: input.movement.description,
-    debtorName: input.movement.debtorName,
-    amountCents,
-  });
-  const identified = Boolean(match.fracaoId);
-  const allocationStatus = identified
-    ? ALLOCATION_STATUS.identificado
-    : ALLOCATION_STATUS.naoAlocadoPendente;
-  const now = kernelNow(deps);
-  const bookedAt = parseBooked(input.movement.bookedAt, now);
-  const source = input.movement.source ?? CANDIDATE_SOURCES.reconciliation;
-
-  const [movement] = await deps.db
-    .insert(f2BankMovements)
-    .values({
-      id: crypto.randomUUID(),
-      tenantId: input.tenantId,
-      amountCents,
-      bookedAt,
-      description: input.movement.description ?? null,
-      externalRef,
-      counterpartyIban: input.movement.counterpartyIban ?? null,
-      status: BANK_MOVEMENT_STATUS.booked,
-      createdAt: now,
-    })
-    .returning();
-
-  const payment = await registerPayment(deps, {
-    tenantId: input.tenantId,
-    fracaoId: match.fracaoId,
-    amountCents,
-    paymentMethod: PAYMENT_METHODS.bankTransfer,
-    payerReference: match.payerName ?? input.movement.description ?? null,
-    bankMovementId: movement!.id,
-    candidateSource: source,
-    candidateConfidence: match.confidence,
-    externalRef,
-    allocationStatus,
-    receivedAt: bookedAt,
-    actor: input.actor,
-  });
-
-  return {
-    paymentId: payment.id,
-    bankMovementId: movement!.id,
-    fracaoId: payment.fracaoId,
-    allocationStatus: payment.allocationStatus,
-    confidence: match.confidence,
-    criteria: match.criteria,
-    created: true,
-    externalRef,
-  };
+  throw last;
 }
 
 export async function ingestCandidateMovements(
@@ -174,6 +259,7 @@ export async function ingestCandidateMovements(
     actor?: Actor;
   },
 ) {
+  assertMovementsLength(input.movements.length);
   const results: CandidateIngestResult[] = [];
   for (const movement of input.movements) {
     results.push(
@@ -199,10 +285,12 @@ export async function ingestCandidatesFromCsv(
     actor?: Actor;
   },
 ) {
+  assertCsvTextSize(input.csvText);
   const credits = parseBankCsvCredits(input.csvText);
   if (credits.length === 0) {
     throw new DomainError("empty_csv", "CSV sem créditos reconhecidos", 400);
   }
+  assertMovementsLength(credits.length);
   return ingestCandidateMovements(deps, {
     tenantId: input.tenantId,
     actor: input.actor,

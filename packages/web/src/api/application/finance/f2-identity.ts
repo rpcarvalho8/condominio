@@ -48,6 +48,17 @@ export function extractPayerFromDescription(descricao?: string | null): string |
   return null;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Bare-word match of fração codes shorter than this is too noisy
+ * (e.g. "DE", "SE", "DA" inside SEPA descriptions). Shorter codes only
+ * match with an explicit FRACAO/FRACÇÃO prefix.
+ */
+export const MIN_BARE_FRACAO_CODE_LENGTH = 3;
+
 export function extractFracaoCodeFromDescription(
   descricao: string,
   knownCodes: string[],
@@ -57,9 +68,12 @@ export function extractFracaoCodeFromDescription(
   for (const code of ordered) {
     const c = normalizeIdentityText(code);
     if (!c) continue;
-    const re = new RegExp(`(?:FRAC(?:A|AO)|FRACC?A?O|FRACAO)\\s+${c}\\b`);
+    const token = escapeRegExp(c);
+    const re = new RegExp(`(?:FRAC(?:A|AO)|FRACC?A?O|FRACAO)\\s+${token}\\b`);
     if (re.test(norm)) return code;
-    if (new RegExp(`\\b${c}\\b`).test(norm) && c.length >= 2) return code;
+    if (c.length >= MIN_BARE_FRACAO_CODE_LENGTH && new RegExp(`\\b${token}\\b`).test(norm)) {
+      return code;
+    }
   }
   return null;
 }
