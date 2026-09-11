@@ -7,6 +7,7 @@ import { createNotificationDeliveryRepo } from "../../infra/repos/notification-d
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
 import {
   BANK_REAUTH_ADMIN_FALLBACK,
+  isResolvedAdminMailbox,
   looksLikeEmail,
   resolveFinanceManagerEmails,
 } from "../finance/f2-bank-connection";
@@ -93,10 +94,10 @@ async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise
 
   const liveEmails = await resolveFinanceManagerEmails(deps, job.tenantId);
   const payloadEmails = Array.isArray(job.payload.notifyEmails)
-    ? job.payload.notifyEmails.map((e) => String(e ?? "").trim()).filter(looksLikeEmail)
+    ? job.payload.notifyEmails.map((e) => String(e ?? "").trim()).filter(isResolvedAdminMailbox)
     : [];
   const payloadAdmin =
-    typeof job.payload.adminEmail === "string" && looksLikeEmail(job.payload.adminEmail)
+    typeof job.payload.adminEmail === "string" && isResolvedAdminMailbox(job.payload.adminEmail)
       ? [job.payload.adminEmail.trim()]
       : [];
   const notifyEmails = liveEmails.length > 0 ? liveEmails : [...payloadEmails, ...payloadAdmin];
@@ -108,7 +109,7 @@ async function handleBankReauthNotice(job: OutboxJob, deps: KernelDeps): Promise
     destination = BANK_REAUTH_ADMIN_FALLBACK;
   }
 
-  const hasMailbox = notifyEmails.length > 0 && looksLikeEmail(destination);
+  const hasMailbox = notifyEmails.some(isResolvedAdminMailbox);
   await repo.insert({
     tenantId: job.tenantId,
     channel: "email",

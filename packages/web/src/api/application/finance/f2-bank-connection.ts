@@ -70,6 +70,12 @@ export function looksLikeEmail(value: string): boolean {
   return true;
 }
 
+/** Email de gestor real — exclui o placeholder `admin@invalid`. */
+export function isResolvedAdminMailbox(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  return looksLikeEmail(v) && v !== BANK_REAUTH_ADMIN_FALLBACK;
+}
+
 /** Active Admin / PlatformAdmin emails for the tenant — never IBAN. */
 export async function resolveFinanceManagerEmails(
   deps: KernelDeps,
@@ -88,7 +94,7 @@ export async function resolveFinanceManagerEmails(
   const emails = rows
     .filter((r) => canManageFinance(String(r.roleCode)))
     .map((r) => String(r.email ?? "").trim())
-    .filter(looksLikeEmail);
+    .filter(isResolvedAdminMailbox);
   return [...new Set(emails)];
 }
 
