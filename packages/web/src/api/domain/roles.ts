@@ -37,3 +37,16 @@ export function isKernelRoleCode(value: string): value is KernelRoleCode {
 export function canManageMemberships(roleCode: string): boolean {
   return roleCode === "Admin" || roleCode === "PlatformAdmin";
 }
+
+/** Gestor financeiro (registar / depositar / alocar / documentos). */
+export function canManageFinance(roleCode: string): boolean {
+  return canManageMemberships(roleCode);
+}
+
+/**
+ * Verificar cash via second_person (ADR-028 / ADR-031):
+ * Fiscalizacao confirma; um gestor distinto do registante também pode.
+ */
+export function canVerifyCash(roleCode: string): boolean {
+  return canManageFinance(roleCode) || roleCode === "Fiscalizacao";
+}

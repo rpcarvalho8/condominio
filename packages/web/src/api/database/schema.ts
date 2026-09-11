@@ -922,6 +922,7 @@ export const financialDocuments = sqliteTable(
     status: text("status").notNull().default("issued"),
     documentNumber: text("document_number"),
     generatedFromJson: text("generated_from_json").notNull(),
+    sourcePaymentId: text("source_payment_id"),
     pdfUrl: text("pdf_url"),
     sentAt: integer("sent_at", { mode: "timestamp" }),
     deliveryStatus: text("delivery_status"),
@@ -965,6 +966,29 @@ export const tenantLedgerIntegrity = sqliteTable("tenant_ledger_integrity", {
     .notNull()
     .$defaultFn(() => new Date()),
 });
+
+/**
+ * Kernel F2 — movimento bancário tenant-scoped para cash deposit / bank_deposit.
+ * Não substitui Fonte `bank_transactions` nem o ciclo Enable Banking.
+ */
+export const f2BankMovements = sqliteTable(
+  "f2_bank_movements",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    amountCents: integer("amount_cents").notNull(),
+    bookedAt: integer("booked_at", { mode: "timestamp" }).notNull(),
+    description: text("description"),
+    externalRef: text("external_ref"),
+    status: text("status").notNull().default("reconciled"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantIdx: index("f2_bank_movements_tenant_idx").on(t.tenantId),
+  }),
+);
 
 /**
  * Delivery attempts for notification jobs — observability without inbox guarantee (ADR-035).

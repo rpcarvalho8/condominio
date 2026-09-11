@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray } from "drizzle-orm";
 import {
   accountingPeriods,
   allocations,
   constitutionFracoes,
+  f2BankMovements,
   financialDocuments,
   ledgerEntries,
+  memberships,
   obligations,
   payments,
   settlementPolicies,
@@ -13,6 +15,7 @@ import {
 } from "../../database/schema";
 import {
   ALLOCATION_STATUS,
+  BANK_MOVEMENT_STATUS,
   CASH_STATUS,
   CHAIN_INTEGRITY,
   DEFAULT_SETTLEMENT_ORDER,
@@ -24,7 +27,9 @@ import {
   VERIFICATION_METHOD,
 } from "../../domain/finance";
 import { DomainError } from "../../domain/errors";
-import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
+import { MEMBERSHIP_STATUS } from "../../domain/membership";
+import { canVerifyCash } from "../../domain/roles";
+import { kernelNow, type KernelDb, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
 
@@ -33,6 +38,214 @@ type Actor = {
   userId?: string | null;
   requestId?: string | null;
 };
+
+const LEDGER_WRITE_RETRIES = 8;
+
+function isUniqueConstraintError(err: unknown): boolean {
+  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
+  return (
+    msg.includes("unique") ||
+    msg.includes("constraint failed") ||
+    msg.includes("already exists")
+  );
+}
+
+function isRetryableLedgerWrite(err: unknown): boolean {
+  if (err instanceof DomainError && err.code === "obligation_race") return true;
+  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
+  return (
+    isUniqueConstraintError(err) ||
+    msg.includes("busy") ||
+    msg.includes("database is locked") ||
+    msg.includes("cannot start a transaction")
+  );
+}
+
+/**
+ * ADR-029: exclusão mútua por tenant na atribuição de sequence + previous_hash.
+ * libSQL `client.transaction()` default mode is `write` → `BEGIN IMMEDIATE`.
+ */
+async function withTenantLedgerLock<T>(
+  deps: KernelDeps,
+  fn: (locked: KernelDeps) => Promise<T>,
+): Promise<T> {
+  return deps.db.transaction(async (tx) => {
+    return fn({ ...deps, db: tx as unknown as KernelDb });
+  });
+}
+
+async function withTenantLedgerLockRetry<T>(
+  deps: KernelDeps,
+  fn: (locked: KernelDeps) => Promise<T>,
+): Promise<T> {
+  let last: unknown;
+  for (let attempt = 0; attempt < LEDGER_WRITE_RETRIES; attempt++) {
+    try {
+      return await withTenantLedgerLock(deps, fn);
+    } catch (err) {
+      last = err;
+      if (attempt < LEDGER_WRITE_RETRIES - 1 && isRetryableLedgerWrite(err)) {
+        await new Promise((r) => setTimeout(r, 15 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw last;
+}
+
+export async function tenantHasFiscalizacao(
+  deps: KernelDeps,
+  tenantId: string,
+): Promise<boolean> {
+  const [row] = await deps.db
+    .select({ id: memberships.id })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.tenantId, tenantId),
+        eq(memberships.roleCode, "Fiscalizacao"),
+        eq(memberships.status, MEMBERSHIP_STATUS.active),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
+export async function recordKernelBankMovement(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    amountCents: number;
+    description?: string | null;
+    externalRef?: string | null;
+    status?: string;
+  },
+) {
+  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
+    throw new DomainError("invalid_amount", "amountCents inválido", 400);
+  }
+  const now = kernelNow(deps);
+  const status = input.status ?? BANK_MOVEMENT_STATUS.reconciled;
+  const [row] = await deps.db
+    .insert(f2BankMovements)
+    .values({
+      id: crypto.randomUUID(),
+      tenantId: input.tenantId,
+      amountCents: input.amountCents,
+      bookedAt: now,
+      description: input.description ?? "cash deposit",
+      externalRef: input.externalRef ?? null,
+      status,
+      createdAt: now,
+    })
+    .returning();
+  return row!;
+}
+
+async function requireTenantBankMovement(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    movementId: string;
+    minAmountCents: number;
+    currentPaymentId?: string | null;
+  },
+) {
+  const [movement] = await deps.db
+    .select()
+    .from(f2BankMovements)
+    .where(
+      and(
+        eq(f2BankMovements.id, input.movementId),
+        eq(f2BankMovements.tenantId, input.tenantId),
+      ),
+    )
+    .limit(1);
+  if (!movement) {
+    throw new DomainError(
+      "bank_movement_not_found",
+      "Movimento bancário inexistente neste tenant",
+      404,
+    );
+  }
+  const okStatus =
+    movement.status === BANK_MOVEMENT_STATUS.booked ||
+    movement.status === BANK_MOVEMENT_STATUS.reconciled;
+  if (!okStatus) {
+    throw new DomainError(
+      "bank_movement_not_reconciled",
+      "Movimento bancário ainda não reconciliado",
+      409,
+    );
+  }
+  if (movement.amountCents < input.minAmountCents) {
+    throw new DomainError(
+      "bank_movement_amount_mismatch",
+      "Montante do movimento inferior ao pagamento em dinheiro",
+      400,
+    );
+  }
+  const [used] = await deps.db
+    .select({ id: payments.id })
+    .from(payments)
+    .where(
+      and(
+        eq(payments.tenantId, input.tenantId),
+        eq(payments.bankMovementId, input.movementId),
+      ),
+    )
+    .limit(1);
+  if (used && used.id !== input.currentPaymentId) {
+    throw new DomainError(
+      "bank_movement_in_use",
+      "Movimento bancário já associado a outro pagamento",
+      409,
+    );
+  }
+  return movement;
+}
+
+async function assertSecondPersonVerifier(
+  deps: KernelDeps,
+  input: { tenantId: string; paymentRegisteredBy: string | null; actor?: Actor },
+) {
+  if (!(await tenantHasFiscalizacao(deps, input.tenantId))) {
+    throw new DomainError(
+      "fiscalizacao_required",
+      "Sem Fiscalizacao no tenant só é permitido bank_deposit — ADR-028",
+      403,
+    );
+  }
+  const verifier = input.actor?.personId ?? null;
+  if (!verifier) {
+    throw new DomainError("verifier_required", "Verificador (personId) obrigatório", 400);
+  }
+  if (input.paymentRegisteredBy && input.paymentRegisteredBy === verifier) {
+    throw new DomainError(
+      "self_verify_forbidden",
+      "Quem regista não pode verificar (second_person) — ADR-028",
+      403,
+    );
+  }
+  const roles = await deps.db
+    .select({ roleCode: memberships.roleCode })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.personId, verifier),
+        eq(memberships.tenantId, input.tenantId),
+        eq(memberships.status, MEMBERSHIP_STATUS.active),
+      ),
+    );
+  if (roles.length === 0 || !roles.some((m) => canVerifyCash(String(m.roleCode)))) {
+    throw new DomainError(
+      "verify_forbidden",
+      "second_person exige Fiscalizacao ou gestor distinto do registante",
+      403,
+    );
+  }
+}
 
 /** SQLite `mode: "timestamp"` guarda segundos — o hash usa o mesmo instante persistido. */
 function ledgerTimestamp(d: Date): Date {
@@ -136,49 +349,61 @@ export async function ensureGenesisLedgerEntry(
   };
   const entryHash = sha256Hex(canonicalJson(hashPayload));
 
-  const [row] = await deps.db
-    .insert(ledgerEntries)
-    .values({
-      id: entryId,
-      tenantId: input.tenantId,
-      sequence: 0,
-      entryType: LEDGER_ENTRY_TYPES.genesis,
-      createdAt: now,
-      payloadJson: canonicalJson(payload),
-      previousHash: LEDGER_GENESIS_PREVIOUS_HASH,
-      entryHash,
-      algorithmVersion: LEDGER_ALGORITHM_VERSION,
-      direction: null,
-    })
-    .returning();
+  try {
+    const [row] = await deps.db
+      .insert(ledgerEntries)
+      .values({
+        id: entryId,
+        tenantId: input.tenantId,
+        sequence: 0,
+        entryType: LEDGER_ENTRY_TYPES.genesis,
+        createdAt: now,
+        payloadJson: canonicalJson(payload),
+        previousHash: LEDGER_GENESIS_PREVIOUS_HASH,
+        entryHash,
+        algorithmVersion: LEDGER_ALGORITHM_VERSION,
+        direction: null,
+      })
+      .returning();
 
-  await deps.db
-    .insert(tenantLedgerIntegrity)
-    .values({
-      tenantId: input.tenantId,
-      chainIntegrity: CHAIN_INTEGRITY.ok,
-      lastValidatedAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: tenantLedgerIntegrity.tenantId,
-      set: {
+    await deps.db
+      .insert(tenantLedgerIntegrity)
+      .values({
+        tenantId: input.tenantId,
         chainIntegrity: CHAIN_INTEGRITY.ok,
         lastValidatedAt: now,
         updatedAt: now,
-      },
+      })
+      .onConflictDoUpdate({
+        target: tenantLedgerIntegrity.tenantId,
+        set: {
+          chainIntegrity: CHAIN_INTEGRITY.ok,
+          lastValidatedAt: now,
+          updatedAt: now,
+        },
+      });
+
+    await writeAudit(deps, {
+      tenantId: input.tenantId,
+      type: "ledger.genesis_created",
+      entityType: "ledger_entry",
+      entityId: entryId,
+      actor: input.actor,
+      after: { sequence: 0, entryHash },
     });
 
-  await writeAudit(deps, {
-    tenantId: input.tenantId,
-    type: "ledger.genesis_created",
-    entityType: "ledger_entry",
-    entityId: entryId,
-    actor: input.actor,
-    after: { sequence: 0, entryHash },
-  });
-
-  return row!;
+    return row!;
+  } catch (err) {
+    if (!isUniqueConstraintError(err)) throw err;
+    const [again] = await deps.db
+      .select()
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.tenantId, input.tenantId))
+      .orderBy(asc(ledgerEntries.sequence))
+      .limit(1);
+    if (again) return again;
+    throw err;
+  }
 }
 
 export async function ensureDefaultSettlementPolicy(
@@ -321,7 +546,8 @@ export async function registerPayment(
 
 /**
  * Cash: registered → verified.
- * second_person exige verificador ≠ registante.
+ * second_person: Fiscalizacao no tenant + verificador ≠ registante.
+ * bank_deposit: movimento bancário tenant-scoped (não é free pass).
  */
 export async function verifyCashPayment(
   deps: KernelDeps,
@@ -329,6 +555,7 @@ export async function verifyCashPayment(
     tenantId: string;
     paymentId: string;
     verificationMethod: string;
+    bankMovementId?: string | null;
     actor?: Actor;
   },
 ) {
@@ -354,18 +581,29 @@ export async function verifyCashPayment(
     throw new DomainError("invalid_verification", "verificationMethod inválido", 400);
   }
 
+  let linkedMovementId = payment.bankMovementId;
   if (input.verificationMethod === VERIFICATION_METHOD.secondPerson) {
-    const verifier = input.actor?.personId ?? null;
-    if (!verifier) {
-      throw new DomainError("verifier_required", "Verificador (personId) obrigatório", 400);
-    }
-    if (payment.registeredByPersonId && payment.registeredByPersonId === verifier) {
+    await assertSecondPersonVerifier(deps, {
+      tenantId: input.tenantId,
+      paymentRegisteredBy: payment.registeredByPersonId,
+      actor: input.actor,
+    });
+  } else if (input.verificationMethod === VERIFICATION_METHOD.bankDeposit) {
+    const movementId = input.bankMovementId ?? payment.bankMovementId;
+    if (!movementId) {
       throw new DomainError(
-        "self_verify_forbidden",
-        "Quem regista não pode verificar (second_person) — ADR-028",
-        403,
+        "bank_movement_required",
+        "bank_deposit exige movimento bancário reconciliado do tenant",
+        400,
       );
     }
+    await requireTenantBankMovement(deps, {
+      tenantId: input.tenantId,
+      movementId,
+      minAmountCents: payment.amountCents,
+      currentPaymentId: payment.id,
+    });
+    linkedMovementId = movementId;
   }
 
   const now = kernelNow(deps);
@@ -375,6 +613,7 @@ export async function verifyCashPayment(
       cashStatus: CASH_STATUS.verified,
       verificationMethod: input.verificationMethod,
       verifiedByPersonId: input.actor?.personId ?? null,
+      bankMovementId: linkedMovementId,
       updatedAt: now,
     })
     .where(eq(payments.id, payment.id))
@@ -389,6 +628,7 @@ export async function verifyCashPayment(
     after: {
       cashStatus: CASH_STATUS.verified,
       verificationMethod: input.verificationMethod,
+      bankMovementId: linkedMovementId,
     },
   });
 
@@ -418,12 +658,27 @@ export async function depositCashPayment(
     );
   }
 
+  const movementId = input.bankMovementId ?? payment.bankMovementId;
+  if (!movementId) {
+    throw new DomainError(
+      "bank_movement_required",
+      "Depósito exige movimento bancário tenant-scoped (bankMovementId)",
+      400,
+    );
+  }
+  await requireTenantBankMovement(deps, {
+    tenantId: input.tenantId,
+    movementId,
+    minAmountCents: payment.amountCents,
+    currentPaymentId: payment.id,
+  });
+
   const now = kernelNow(deps);
   const [updated] = await deps.db
     .update(payments)
     .set({
       cashStatus: CASH_STATUS.deposited,
-      bankMovementId: input.bankMovementId ?? payment.bankMovementId,
+      bankMovementId: movementId,
       depositedAt: now,
       updatedAt: now,
     })
@@ -467,10 +722,21 @@ function paymentAllocatable(payment: typeof payments.$inferSelect): boolean {
 
 /**
  * Aloca Payment a Obligations abertas via SettlementPolicy.
- * Cada Allocation gera LedgerEntry na hash-chain.
+ * Cada Allocation gera LedgerEntry na hash-chain sob BEGIN IMMEDIATE (ADR-029).
  * Cash só aloca se verified/deposited.
  */
 export async function allocatePayment(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    paymentId: string;
+    actor?: Actor;
+  },
+) {
+  return withTenantLedgerLockRetry(deps, (locked) => allocatePaymentLocked(locked, input));
+}
+
+async function allocatePaymentLocked(
   deps: KernelDeps,
   input: {
     tenantId: string;
@@ -545,10 +811,20 @@ export async function allocatePayment(
     return { payment, allocations: already, idempotent: true };
   }
 
+  await ensureGenesisLedgerEntry(deps, { tenantId: input.tenantId, actor: input.actor });
+
   const created = [];
   for (const ob of scoped) {
     if (remaining <= 0) break;
-    const amount = Math.min(remaining, ob.openAmountCents);
+
+    const [fresh] = await deps.db
+      .select()
+      .from(obligations)
+      .where(and(eq(obligations.id, ob.id), eq(obligations.tenantId, input.tenantId)))
+      .limit(1);
+    if (!fresh || fresh.openAmountCents <= 0) continue;
+
+    const amount = Math.min(remaining, fresh.openAmountCents);
     if (amount <= 0) continue;
 
     const allocationId = crypto.randomUUID();
@@ -560,24 +836,15 @@ export async function allocatePayment(
       .where(eq(ledgerEntries.tenantId, input.tenantId))
       .orderBy(desc(ledgerEntries.sequence))
       .limit(1);
-    if (!tip) {
-      await ensureGenesisLedgerEntry(deps, { tenantId: input.tenantId, actor: input.actor });
-    }
-    const [tip2] = await deps.db
-      .select()
-      .from(ledgerEntries)
-      .where(eq(ledgerEntries.tenantId, input.tenantId))
-      .orderBy(desc(ledgerEntries.sequence))
-      .limit(1);
-    const sequence = (tip2?.sequence ?? 0) + 1;
-    const previousHash = tip2?.entryHash ?? LEDGER_GENESIS_PREVIOUS_HASH;
+    const sequence = (tip?.sequence ?? 0) + 1;
+    const previousHash = tip?.entryHash ?? LEDGER_GENESIS_PREVIOUS_HASH;
     const entryId = crypto.randomUUID();
     const payload = {
       allocation_id: allocationId,
       amount_cents: amount,
       currency: "EUR",
       direction: "credit",
-      obligation_id: ob.id,
+      obligation_id: fresh.id,
       payment_id: payment.id,
       policy_id: policy.id,
     };
@@ -607,7 +874,7 @@ export async function allocatePayment(
         algorithmVersion: LEDGER_ALGORITHM_VERSION,
         allocationId,
         paymentId: payment.id,
-        obligationId: ob.id,
+        obligationId: fresh.id,
         amountCents: amount,
         direction: "credit",
       })
@@ -619,7 +886,7 @@ export async function allocatePayment(
         id: allocationId,
         tenantId: input.tenantId,
         paymentId: payment.id,
-        obligationId: ob.id,
+        obligationId: fresh.id,
         amountCents: amount,
         policyId: policy.id,
         confidence: 1,
@@ -629,14 +896,28 @@ export async function allocatePayment(
       })
       .returning();
 
-    const newOpen = ob.openAmountCents - amount;
-    await deps.db
+    const newOpen = fresh.openAmountCents - amount;
+    const [updatedOb] = await deps.db
       .update(obligations)
       .set({
         openAmountCents: newOpen,
         status: newOpen === 0 ? "paid" : "open",
       })
-      .where(eq(obligations.id, ob.id));
+      .where(
+        and(
+          eq(obligations.id, fresh.id),
+          eq(obligations.tenantId, input.tenantId),
+          gte(obligations.openAmountCents, amount),
+        ),
+      )
+      .returning();
+    if (!updatedOb) {
+      throw new DomainError(
+        "obligation_race",
+        "Obligation alterada concorrentemente — retry",
+        409,
+      );
+    }
 
     remaining -= amount;
     created.push(alloc!);
@@ -878,6 +1159,50 @@ export async function issuePaymentNotice(
   if (!input.obligationIds.length) {
     throw new DomainError("empty_notice", "PaymentNotice exige obligations em generated_from", 400);
   }
+  const uniqueIds = [...new Set(input.obligationIds)];
+  if (uniqueIds.length !== input.obligationIds.length) {
+    throw new DomainError("duplicate_obligations", "obligationIds duplicados", 400);
+  }
+
+  const [fracao] = await deps.db
+    .select()
+    .from(constitutionFracoes)
+    .where(
+      and(
+        eq(constitutionFracoes.id, input.fracaoId),
+        eq(constitutionFracoes.tenantId, input.tenantId),
+      ),
+    )
+    .limit(1);
+  if (!fracao) throw new DomainError("fracao_not_found", "Fração não encontrada", 404);
+
+  const obs = await deps.db
+    .select()
+    .from(obligations)
+    .where(and(eq(obligations.tenantId, input.tenantId), inArray(obligations.id, uniqueIds)));
+  if (obs.length !== uniqueIds.length) {
+    throw new DomainError(
+      "obligation_not_found",
+      "Obligations inexistentes ou doutro tenant",
+      404,
+    );
+  }
+  if (obs.some((o) => o.fracaoId !== input.fracaoId)) {
+    throw new DomainError(
+      "obligation_fracao_mismatch",
+      "Obligations não pertencem à fração do aviso",
+      400,
+    );
+  }
+  const expectedCents = obs.reduce((s, o) => s + o.amountCents, 0);
+  if (expectedCents !== input.amountCents) {
+    throw new DomainError(
+      "notice_amount_mismatch",
+      `amountCents ${input.amountCents} ≠ soma das obligations ${expectedCents}`,
+      400,
+    );
+  }
+
   const now = kernelNow(deps);
   const [doc] = await deps.db
     .insert(financialDocuments)
@@ -930,34 +1255,65 @@ export async function issueReceiptForPayment(
     throw new DomainError("empty_receipt", "Recibo nunca é emitido sem Allocation", 409);
   }
 
+  const [existing] = await deps.db
+    .select()
+    .from(financialDocuments)
+    .where(
+      and(
+        eq(financialDocuments.tenantId, input.tenantId),
+        eq(financialDocuments.docType, FINANCIAL_DOC_TYPES.receipt),
+        eq(financialDocuments.sourcePaymentId, payment.id),
+      ),
+    )
+    .limit(1);
+  if (existing) return existing;
+
   const now = kernelNow(deps);
-  const [doc] = await deps.db
-    .insert(financialDocuments)
-    .values({
-      id: crypto.randomUUID(),
+  try {
+    const [doc] = await deps.db
+      .insert(financialDocuments)
+      .values({
+        id: crypto.randomUUID(),
+        tenantId: input.tenantId,
+        fracaoId: payment.fracaoId,
+        docType: FINANCIAL_DOC_TYPES.receipt,
+        issuedAt: now,
+        amountCents: payment.amountCents,
+        status: "issued",
+        documentNumber: `RC-${payment.id.slice(0, 8)}`,
+        generatedFromJson: canonicalJson({
+          paymentId: payment.id,
+          allocationIds: allocs.map((a) => a.id),
+        }),
+        sourcePaymentId: payment.id,
+        createdAt: now,
+      })
+      .returning();
+
+    await writeAudit(deps, {
       tenantId: input.tenantId,
-      fracaoId: payment.fracaoId,
-      docType: FINANCIAL_DOC_TYPES.receipt,
-      issuedAt: now,
-      amountCents: payment.amountCents,
-      status: "issued",
-      documentNumber: `RC-${payment.id.slice(0, 8)}`,
-      generatedFromJson: canonicalJson({
-        paymentId: payment.id,
-        allocationIds: allocs.map((a) => a.id),
-      }),
-      createdAt: now,
-    })
-    .returning();
+      type: "financial_document.issued",
+      entityType: "financial_document",
+      entityId: doc!.id,
+      actor: input.actor,
+      after: { docType: FINANCIAL_DOC_TYPES.receipt, paymentId: payment.id },
+    });
 
-  await writeAudit(deps, {
-    tenantId: input.tenantId,
-    type: "financial_document.issued",
-    entityType: "financial_document",
-    entityId: doc!.id,
-    actor: input.actor,
-    after: { docType: FINANCIAL_DOC_TYPES.receipt, paymentId: payment.id },
-  });
-
-  return doc!;
+    return doc!;
+  } catch (err) {
+    if (!isUniqueConstraintError(err)) throw err;
+    const [again] = await deps.db
+      .select()
+      .from(financialDocuments)
+      .where(
+        and(
+          eq(financialDocuments.tenantId, input.tenantId),
+          eq(financialDocuments.docType, FINANCIAL_DOC_TYPES.receipt),
+          eq(financialDocuments.sourcePaymentId, payment.id),
+        ),
+      )
+      .limit(1);
+    if (again) return again;
+    throw err;
+  }
 }

@@ -31,6 +31,12 @@ export const VERIFICATION_METHOD = {
   bankDeposit: "bank_deposit",
 } as const;
 
+/** Movimento bancário do kernel F2 (tenant-scoped) — não substitui Fonte bank_transactions. */
+export const BANK_MOVEMENT_STATUS = {
+  booked: "booked",
+  reconciled: "reconciled",
+} as const;
+
 export const LEDGER_ENTRY_TYPES = {
   genesis: "genesis",
   allocation: "allocation",

@@ -111,6 +111,7 @@ const DDL = [
     status TEXT NOT NULL DEFAULT 'issued',
     document_number TEXT,
     generated_from_json TEXT NOT NULL,
+    source_payment_id TEXT,
     pdf_url TEXT,
     sent_at INTEGER,
     delivery_status TEXT,
@@ -139,6 +140,25 @@ const DDL = [
     last_break_sequence INTEGER,
     updated_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS f2_bank_movements (
+    id TEXT PRIMARY KEY NOT NULL,
+    tenant_id TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    booked_at INTEGER NOT NULL,
+    description TEXT,
+    external_ref TEXT,
+    status TEXT NOT NULL DEFAULT 'reconciled',
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS f2_bank_movements_tenant_idx
+    ON f2_bank_movements (tenant_id)`,
+  `ALTER TABLE financial_documents ADD COLUMN source_payment_id TEXT`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS financial_documents_receipt_payment_uq
+    ON financial_documents (tenant_id, source_payment_id)
+    WHERE doc_type = 'Receipt' AND source_payment_id IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS payments_tenant_bank_movement_uq
+    ON payments (tenant_id, bank_movement_id)
+    WHERE bank_movement_id IS NOT NULL`,
 ];
 
 async function execSafe(client: SqlExecutor, stmt: string): Promise<void> {

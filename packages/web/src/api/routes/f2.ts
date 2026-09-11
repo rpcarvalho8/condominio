@@ -14,7 +14,8 @@ import { DomainError } from "../domain/errors";
 import type { KernelDeps } from "../infra/kernel-deps";
 import {
   createRequireActiveMembership,
-  createRequireMembershipManager,
+  createRequireCashVerifier,
+  createRequireFinanceManager,
   type KernelVariables,
 } from "../middleware/membership";
 
@@ -46,15 +47,19 @@ function actorFrom(c: {
   };
 }
 
-/** F2 — Financeiro / Ledger. Payment ≠ Allocation ≠ Ledger. */
+/**
+ * F2 — Financeiro / Ledger.
+ * Gestor: registar / depositar / alocar / documentos.
+ * verify-cash: Fiscalizacao ou gestor (ADR-028 / ADR-031).
+ */
 export function createF2Routes(deps: KernelDeps) {
   const requireMembership = createRequireActiveMembership(deps);
-  const requireManager = createRequireMembershipManager();
+  const requireManager = createRequireFinanceManager();
+  const requireCashVerifier = createRequireCashVerifier();
 
   return new Hono<{ Variables: KernelVariables }>()
     .use(requireMembership)
-    .use(requireManager)
-    .post("/payments", async (c) => {
+    .post("/payments", requireManager, async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
           fracaoId?: string | null;
@@ -83,10 +88,11 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/payments/:id/verify-cash", async (c) => {
+    .post("/payments/:id/verify-cash", requireCashVerifier, async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
           verificationMethod?: string;
+          bankMovementId?: string | null;
         };
         if (!body.verificationMethod) {
           return c.json({ message: "verificationMethod é obrigatório" }, 400);
@@ -95,6 +101,7 @@ export function createF2Routes(deps: KernelDeps) {
           tenantId: c.get("tenantId")!,
           paymentId: c.req.param("id"),
           verificationMethod: body.verificationMethod,
+          bankMovementId: body.bankMovementId,
           actor: actorFrom(c),
         });
         return c.json(payment);
@@ -103,7 +110,7 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/payments/:id/deposit-cash", async (c) => {
+    .post("/payments/:id/deposit-cash", requireManager, async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
           bankMovementId?: string | null;
@@ -120,7 +127,7 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/payments/:id/allocate", async (c) => {
+    .post("/payments/:id/allocate", requireManager, async (c) => {
       try {
         const result = await allocatePayment(deps, {
           tenantId: c.get("tenantId")!,
@@ -133,7 +140,7 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/payments/:id/receipt", async (c) => {
+    .post("/payments/:id/receipt", requireManager, async (c) => {
       try {
         const doc = await issueReceiptForPayment(deps, {
           tenantId: c.get("tenantId")!,
@@ -146,7 +153,7 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/ledger/validate", async (c) => {
+    .post("/ledger/validate", requireManager, async (c) => {
       try {
         const result = await validateLedgerChain(deps, {
           tenantId: c.get("tenantId")!,
@@ -158,7 +165,7 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/periods/open", async (c) => {
+    .post("/periods/open", requireManager, async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
           year?: number;
@@ -179,7 +186,7 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/periods/close", async (c) => {
+    .post("/periods/close", requireManager, async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
           year?: number;
@@ -200,7 +207,7 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
-    .post("/documents/payment-notice", async (c) => {
+    .post("/documents/payment-notice", requireManager, async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
           fracaoId?: string;
