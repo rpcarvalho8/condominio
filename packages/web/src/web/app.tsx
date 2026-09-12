@@ -39,9 +39,7 @@ export default function App() {
         </ProtectedRoute>
       </Route>
       <Route path="/f3/portal">
-        <ProtectedRoute>
-          <F3PortalPage />
-        </ProtectedRoute>
+        <F3PortalPage />
       </Route>
 
       {/* Admin area — sidebar layout */}
