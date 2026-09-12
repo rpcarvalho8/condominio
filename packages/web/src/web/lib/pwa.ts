@@ -145,15 +145,19 @@ export function registerLumenServiceWorker() {
   });
 }
 
-/** Rede real: navigator.onLine pode mentir; /api/health nunca é cacheado pelo SW. */
+/**
+ * Rede real: navigator.onLine pode mentir.
+ * Sonda `/sw.js` (o SW não o intercepta; a API pode devolver 500 sem rede caída).
+ * Qualquer resposta HTTP = online; só falha de rede = offline.
+ */
 export async function probeNetworkOnline(
   fetchImpl: typeof fetch,
   navOnline = true,
 ): Promise<boolean> {
   if (!navOnline) return false;
   try {
-    const res = await fetchImpl("/api/health", { method: "GET", cache: "no-store" });
-    return res.ok;
+    await fetchImpl("/sw.js", { method: "GET", cache: "no-store", headers: { "X-Lumen-Online-Probe": "1" } });
+    return true;
   } catch {
     return false;
   }

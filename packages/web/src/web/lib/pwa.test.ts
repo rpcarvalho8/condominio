@@ -171,10 +171,11 @@ describe("spike iOS push", () => {
     expect(v.isIos).toBe(false);
   });
 
-  test("probeNetworkOnline falha fechado sem rede e não usa cache", async () => {
+  test("probeNetworkOnline: qualquer HTTP é online; só throw é offline", async () => {
     const { probeNetworkOnline } = await import("./pwa");
     expect(await probeNetworkOnline(async () => new Response("ok", { status: 200 }), true)).toBe(true);
-    expect(await probeNetworkOnline(async () => new Response("no", { status: 503 }), true)).toBe(false);
+    expect(await probeNetworkOnline(async () => new Response("no", { status: 503 }), true)).toBe(true);
+    expect(await probeNetworkOnline(async () => new Response("no", { status: 401 }), true)).toBe(true);
     expect(
       await probeNetworkOnline(() => {
         throw new TypeError("Failed to fetch");
