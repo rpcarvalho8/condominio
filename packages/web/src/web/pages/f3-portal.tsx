@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { IosPushSpikeNote } from "../components/PwaInstallPrompt";
 import { authClient, clearToken, getToken } from "../lib/auth";
 
 type Debt = {
@@ -80,9 +81,25 @@ export default function F3PortalPage() {
     enabled: Boolean(session),
   });
 
+  const [online, setOnline] = useState(
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
+
   useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!online) return;
     if (!isPending && !session) navigate("/login");
-  }, [isPending, session, navigate]);
+  }, [isPending, session, navigate, online]);
 
   const firstFracaoId = saldo.data?.fractions[0]?.fracaoId ?? null;
   const statement = useMutation({
@@ -128,6 +145,37 @@ export default function F3PortalPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Não foi possível descarregar");
     }
+  }
+
+  if (!online) {
+    return (
+      <div className="min-h-screen" style={{ background: "#F5F5F7" }}>
+        <header className="bg-white border-b" style={{ borderColor: "#E5E5EA" }}>
+          <div className="max-w-3xl mx-auto px-4 py-4">
+            <p className="text-xs uppercase tracking-wider" style={{ color: "#D0021B" }}>
+              Portal do condómino
+            </p>
+            <h1 className="text-lg font-semibold">Sem ligação</h1>
+          </div>
+        </header>
+        <main className="max-w-3xl mx-auto px-4 py-6 space-y-3">
+          <section className="bg-white rounded-2xl border p-5" style={{ borderColor: "#E5E5EA" }}>
+            <p className="text-sm text-neutral-600">
+              A app está instalada. O saldo do Ledger e os documentos precisam de rede — não há
+              cópia offline de dívidas.
+            </p>
+            <button
+              type="button"
+              className="mt-4 rounded-lg px-3 py-2 text-sm text-white"
+              style={{ background: "#D0021B" }}
+              onClick={() => window.location.reload()}
+            >
+              Tentar novamente
+            </button>
+          </section>
+        </main>
+      </div>
+    );
   }
 
   if (isPending || (session && saldo.isLoading)) {
@@ -248,6 +296,8 @@ export default function F3PortalPage() {
               (statement.error as Error | undefined)?.message}
           </p>
         )}
+
+        <IosPushSpikeNote />
       </main>
     </div>
   );
