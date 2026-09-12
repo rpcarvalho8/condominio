@@ -171,6 +171,17 @@ async function handleSweepReceipts(job: OutboxJob, deps: KernelDeps): Promise<vo
   });
 }
 
+async function handleBankSync(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const { syncBankConnection } = await import("../finance/f2-bank-sync");
+  await syncBankConnection(deps, {
+    tenantId: job.tenantId,
+    connectionId: typeof job.payload.connectionId === "string" ? job.payload.connectionId : null,
+    dateFrom: typeof job.payload.dateFrom === "string" ? job.payload.dateFrom : null,
+    dateTo: typeof job.payload.dateTo === "string" ? job.payload.dateTo : null,
+    actor: { requestId: job.correlationId },
+  });
+}
+
 const HANDLERS: Record<string, OutboxHandler> = {
   [OUTBOX_JOB_TYPES.notifyMembershipCreated]: handleNotifyMembershipCreated,
   [OUTBOX_JOB_TYPES.persistReuniaoAudit]: handlePersistReuniaoAudit,
@@ -179,6 +190,7 @@ const HANDLERS: Record<string, OutboxHandler> = {
   [OUTBOX_JOB_TYPES.issueReceipt]: handleIssueReceipt,
   [OUTBOX_JOB_TYPES.generateMonthlyPaymentNotices]: handleMonthlyPaymentNotices,
   [OUTBOX_JOB_TYPES.sweepReceipts]: handleSweepReceipts,
+  [OUTBOX_JOB_TYPES.bankSync]: handleBankSync,
 };
 
 export function backoffMs(attempts: number): number {

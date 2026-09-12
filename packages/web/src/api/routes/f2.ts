@@ -19,8 +19,20 @@ import {
 import {
   listBankConnections,
   sweepBankReauthNotices,
+  toPublicBankConnection,
   upsertBankConnection,
 } from "../application/finance/f2-bank-connection";
+import {
+  completeBankConsent,
+  enqueueBankSyncJob,
+  publicBankConsentErrorCode,
+  revokeBankConnection,
+  startBankConsent,
+  startBankReauthorization,
+  syncBankConnection,
+} from "../application/finance/f2-bank-sync";
+import { sanitizeBankError } from "../application/finance/enable-banking-adapter";
+import { canManageFinance } from "../domain/roles";
 import {
   generateMonthlyPaymentNotices,
   runF2CalendarSweep,
@@ -40,14 +52,21 @@ function requestIdFrom(c: { req: { header: (name: string) => string | undefined 
   return c.req.header("x-request-id")?.trim() || crypto.randomUUID();
 }
 
-function httpError(err: unknown): { message: string; status: 400 | 403 | 404 | 409 | 500 } {
+function httpError(err: unknown): { message: string; status: 400 | 403 | 404 | 409 | 502 | 503 | 500 } {
   if (err instanceof DomainError) {
     const status = err.httpStatus;
-    if (status === 400 || status === 403 || status === 404 || status === 409) {
+    if (
+      status === 400 ||
+      status === 403 ||
+      status === 404 ||
+      status === 409 ||
+      status === 502 ||
+      status === 503
+    ) {
       return { message: err.message, status };
     }
   }
-  console.error("[f2]", err);
+  console.error("[f2]", sanitizeBankError(err));
   return { message: "Erro interno", status: 500 };
 }
 
@@ -75,6 +94,19 @@ export function createF2Routes(deps: KernelDeps) {
   const requireCashVerifier = createRequireCashVerifier();
 
   return new Hono<{ Variables: KernelVariables }>()
+    .get("/bank/callback", async (c) => {
+      const code = c.req.query("code");
+      const state = c.req.query("state");
+      const error = c.req.query("error");
+      try {
+        await completeBankConsent(deps, { code, state, error });
+        return c.redirect("/f2/banking?bank_connected=1");
+      } catch (err) {
+        const mapped = httpError(err);
+        console.error("[f2/bank/callback]", mapped.status, publicBankConsentErrorCode(err));
+        return c.redirect(`/f2/banking?bank_error=${publicBankConsentErrorCode(err)}`);
+      }
+    })
     .use(requireMembership)
     .post("/payments", requireManager, async (c) => {
       try {
@@ -272,7 +304,7 @@ export function createF2Routes(deps: KernelDeps) {
           authorizedByMembershipId: body.authorizedByMembershipId,
           actor: actorFrom(c),
         });
-        return c.json(row, 201);
+        return c.json(toPublicBankConnection(row), 201);
       } catch (err) {
         const mapped = httpError(err);
         return c.json({ message: mapped.message }, mapped.status);
@@ -281,7 +313,85 @@ export function createF2Routes(deps: KernelDeps) {
     .get("/bank-connections", requireManager, async (c) => {
       try {
         const rows = await listBankConnections(deps, c.get("tenantId")!);
-        return c.json({ connections: rows });
+        return c.json({ connections: rows.map(toPublicBankConnection) });
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/bank-connections/authorize", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as {
+          aspsp?: string | null;
+          aspspCountry?: string | null;
+          accountIban?: string | null;
+          authorizedByMembershipId?: string | null;
+          scopes?: string[] | null;
+        };
+        const manager = (c.get("memberships") ?? []).find((m) => canManageFinance(String(m.roleCode)));
+        const result = await startBankConsent(deps, {
+          tenantId: c.get("tenantId")!,
+          aspsp: body.aspsp,
+          aspspCountry: body.aspspCountry,
+          accountIban: body.accountIban,
+          authorizedByMembershipId: body.authorizedByMembershipId ?? manager?.id ?? null,
+          scopes: body.scopes,
+          actor: actorFrom(c),
+        });
+        return c.json(result, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/bank-connections/reauthorize", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as {
+          connectionId?: string | null;
+          authorizedByMembershipId?: string | null;
+        };
+        const manager = (c.get("memberships") ?? []).find((m) => canManageFinance(String(m.roleCode)));
+        const result = await startBankReauthorization(deps, {
+          tenantId: c.get("tenantId")!,
+          connectionId: body.connectionId,
+          authorizedByMembershipId: body.authorizedByMembershipId ?? manager?.id ?? null,
+          actor: actorFrom(c),
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/bank-connections/revoke", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as { connectionId?: string | null };
+        const row = await revokeBankConnection(deps, {
+          tenantId: c.get("tenantId")!,
+          connectionId: body.connectionId,
+          actor: actorFrom(c),
+        });
+        return c.json(toPublicBankConnection(row));
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/bank-connections/sync", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as {
+          connectionId?: string | null;
+          dateFrom?: string | null;
+          dateTo?: string | null;
+        };
+        const result = await syncBankConnection(deps, {
+          tenantId: c.get("tenantId")!,
+          connectionId: body.connectionId,
+          dateFrom: body.dateFrom,
+          dateTo: body.dateTo,
+          actor: actorFrom(c),
+        });
+        return c.json(result);
       } catch (err) {
         const mapped = httpError(err);
         return c.json({ message: mapped.message }, mapped.status);
@@ -332,7 +442,13 @@ export function createF2Routes(deps: KernelDeps) {
             counterpartyIban: m.counterpartyIban,
             externalRef: m.externalRef,
             bookedAt: m.bookedAt,
-            source: m.source as "csv" | "reconciliation" | "identity_matrix" | "manual" | undefined,
+            source: m.source as
+              | "csv"
+              | "reconciliation"
+              | "identity_matrix"
+              | "manual"
+              | "enable_banking"
+              | undefined,
           }));
         if (movements.length === 0) {
           return c.json({ message: "csvText ou movements[] com amountCents é obrigatório" }, 400);
@@ -378,6 +494,27 @@ export function createF2Routes(deps: KernelDeps) {
           actor: actorFrom(c),
         });
         return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/jobs/bank-sync", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as {
+          connectionId?: string | null;
+          dateFrom?: string | null;
+          dateTo?: string | null;
+        };
+        const enqueued = await enqueueBankSyncJob(deps, {
+          tenantId: c.get("tenantId")!,
+          connectionId: body.connectionId,
+          dateFrom: body.dateFrom,
+          dateTo: body.dateTo,
+          correlationId: actorFrom(c).requestId,
+        });
+        await processOutbox(deps);
+        return c.json(enqueued);
       } catch (err) {
         const mapped = httpError(err);
         return c.json({ message: mapped.message }, mapped.status);

@@ -67,14 +67,34 @@ export const BANK_CONSENT_STATUS = {
   reauthorizationRequired: "reauthorization_required",
 } as const;
 
-/** Aviso proactivo: consentimento a expirar dentro deste prazo (não é sync PSD2). */
+/** Aviso proactivo: consentimento a expirar dentro deste prazo. Coexiste com reauth PSD2 real. */
 export const BANK_REAUTH_LEAD_DAYS = 14;
+
+/** Duração pedida ao ASPSP no consentimento (Enable Banking / PSD2). */
+export const BANK_CONSENT_DAYS = 90;
+
+/** Janela máxima por pedido e lookback típicos Enable Banking (Santander PT). */
+export const BANK_SYNC_MAX_LOOKBACK_DAYS = 89;
+export const BANK_SYNC_CHUNK_DAYS = 30;
+
+/** Scopes de consentimento persistidos em BankConnection (não o JWT técnico). */
+export const BANK_PSD2_SCOPES = {
+  accounts: "accounts",
+  balances: "balances",
+  transactions: "transactions",
+} as const;
+
+export const DEFAULT_BANK_PSD2_SCOPES = [
+  BANK_PSD2_SCOPES.accounts,
+  BANK_PSD2_SCOPES.transactions,
+] as const;
 
 export const CANDIDATE_SOURCES = {
   csv: "csv",
   reconciliation: "reconciliation",
   identityMatrix: "identity_matrix",
   manual: "manual",
+  enableBanking: "enable_banking",
 } as const;
 
 export type BankConsentStatus = (typeof BANK_CONSENT_STATUS)[keyof typeof BANK_CONSENT_STATUS];

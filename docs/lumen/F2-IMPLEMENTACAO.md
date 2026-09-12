@@ -1,7 +1,7 @@
-# F2 — Estado de implementação (Finance Kernel slice)
+# F2 — Estado de implementação (Finance Kernel + Enable Banking PSD2)
 
-**Branch:** `cursor/f2-adversarial-tests-7156`  
-**Base documental:** `docs/lumen/06-FATIAS.md`, ADR-003, ADR-012, ADR-014, ADR-028, ADR-029
+**Branch:** `cursor/f2-enable-banking-psd2`  
+**Base documental:** `docs/lumen/06-FATIAS.md` §8, ADR-003, ADR-012, ADR-014, ADR-028, ADR-029, `PRODUCTION-GATES.md` Banking
 
 ## Posição face ao plano
 
@@ -11,15 +11,15 @@ O plano (`06-FATIAS.md`) distingue:
 2. **Enable Banking** — *só depois* do Finance Kernel passar testes adversariais (ordem de execução §8)  
 3. **Critério de conclusão F2** — sync bancário **ou** aviso proactivo de reautorização, Payments candidatos, Allocation + hash-chain, cash 3 estados, avisos dia 1, recibos na confirmação, `generated_from`
 
-**Este PR fecha o critério F2 (3) no kernel**, sem Enable Banking PSD2 (2). O aviso proactivo de reautorização é o ramo escolhido do “sync **ou** aviso”; sync completo fica para o slice PSD2.
+**Este PR fecha (2):** consentimento ASPSP real, scopes, ciclo de vida, reautorização, sync → movimentos tenant-scoped + Payments candidatos. O aviso proactivo (14 dias) **coexiste** com a reauth PSD2. CSV continua o fallback. Dual-write Fonte (`Quota.pago`) fica fora.
 
 ## Fronteira dura (este slice)
 
-- **Não substitui** o modelo Fonte `Quota.pago` / `routes/quotas` / reconciliação Enable Banking. O kernel F2 coexiste; dual-write e cutover da Fonte são trabalho posterior.
-- Payments candidatos **nunca** marcam `Quota.pago=true` no caminho feliz.
+- **Não substitui** o modelo Fonte `Quota.pago` / `routes/quotas` / `routes/bank.ts`. O kernel F2 coexiste; dual-write e cutover da Fonte são trabalho posterior.
+- Payments candidatos **nunca** marcam `Quota.pago=true` no caminho feliz (sync PSD2 ou CSV).
 - Hash-chain = deteção de adulteração (ADR-029), não imutabilidade absoluta.
-- `f2_bank_movements` é evidência tenant-scoped (cash deposit **e** créditos candidatos) — **não** o ciclo PSD2 completo.
-- `BankConnection` liga-se à **conta do condomínio** (IBAN + ASPSP), não à pessoa do admin (ADR-014).
+- `BankConnection` liga-se à **conta do condomínio** (IBAN + ASPSP + sessão Enable Banking), não à pessoa do admin (ADR-014). Sobrevive a troca de administrador. `POST /bank-connections/authorize` e `/f2/banking` exigem `accountIban` quando ainda não está persistido. No callback, `pickCondoAccount` é **fail-closed**: sem IBAN preferido ou sem match ASPSP → `DomainError`, sem persistir sessão (nunca `accounts[0]`).
+- UI admin = mínimo para exercitar a API (`/f2/banking`). Sem portal condómino (F3), atas/voto (F4–F6).
 
 ## O que está implementado
 
@@ -28,40 +28,40 @@ O plano (`06-FATIAS.md`) distingue:
 | `Obligation` (origem F1) | ✅ | Reutiliza orçamento aprovado |
 | `Payment` + `allocation_status` (ADR-012) | ✅ | Válido sem Allocation; ortogonal a cash |
 | Cash `registered → verified → deposited` (ADR-028) | ✅ | Fiscalizacao `second_person`; `bank_deposit`/`deposited` exigem movimento tenant-scoped |
-| Cash `registered` não liquida Obligation | ✅ | |
-| `SettlementPolicy` + `legal_basis` | ✅ | Seed default |
-| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | Mutex por tenant + `BEGIN IMMEDIATE`; retry unique `(tenant_id, sequence)`; `open_amount >=` |
-| `AccountingPeriod` open/close | ✅ | |
-| `PaymentNotice` / `Receipt` + `generated_from` | ✅ | 1 recibo/payment; notice valida tenant+fração+**soma `openAmountCents`** |
-| Rotas `/api/f2/*` + migration `0006`/`0007` | ✅ | `applyF2FinanceSchema`; UNIQUE `(tenant_id, external_ref)` em `payments` e `f2_bank_movements` |
-| Aviso proactivo de reautorização `BankConnection` | ✅ | Lead 14 dias; outbox `notify.bank_reauth` para o **email** da Person da Membership Admin/gestor activa (`adminEmail` no payload); fallback `admin@invalid`; **nunca** o IBAN; `authorizedByMembershipId` validado (activo + tenant + papel gestor) |
-| Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; ingest transaccional + idempotente em conflito UNIQUE; match de nome por **tokens/palavras completas** (ANA ≠ JOANA/MARIANA); sem Allocation automática; sem `Quota.pago`; `POST /payments/candidates` rejeita `csvText` > 512k chars e `movements[]` > 500 |
-| Job avisos dia 1 (UTC) | ✅ | `GenerateMonthlyPaymentNotices` → `issuePaymentNotice` com montante = aberto restante |
-| Recibos na confirmação de Allocation + sweep | ✅ | Outbox `f2.issue_receipt` + `/jobs/receipt-sweep` |
-| Testes adversariais do kernel | ✅ | `test:f2-adversarial` — isolamento, concorrência, cash, AuthZ, reauth, identity, hash-chain, outbox |
+| `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | Mutex por tenant + `BEGIN IMMEDIATE` |
+| Aviso proactivo de reautorização | ✅ | Lead 14 dias; outbox `notify.bank_reauth`; destination = email do gestor, **nunca** IBAN; fallback `admin@invalid` + `skipped` |
+| Reauth PSD2 real | ✅ | `POST /bank-connections/authorize` + `/reauthorize` + `GET /bank/callback`; scopes persistidos; sessão/account_uid na conta do condomínio |
+| Sync Enable Banking → candidatos | ✅ | Créditos → `f2_bank_movements` + Payment (`candidate_source=enable_banking`); débitos só movimento; idempotente por `eb:{transaction_id}`; sem `Quota.pago`; `ownIbans` no mapping de produção (IBAN do condomínio nunca vaza como contraparte) |
+| Falhas observáveis | ✅ | `last_error` sanitizado (sem JWT/PEM/Bearer); callback OAuth redirecciona com código estável (`bank_error=consent_failed` / `account_mismatch` / …), nunca a mensagem do provider na URL; 401/403 → `reauthorization_required` + fallback CSV |
+| Jobs idempotentes | ✅ | Outbox `f2.bank_sync` (`f2:bank-sync:{tenant}:{connection}:{dia}`); calendário enfileira sync se sessão válida |
+| CSV fallback | ✅ | `POST /payments/candidates` com `csvText`; activo quando reauth / sessão em falta / last_error de auth |
+| Testes adversariais do kernel | ✅ | `test:f2-adversarial` — 8/8; AuthZ alargada às rotas PSD2 |
 
 ## Critério F2 — o que fecha aqui vs o que fica
 
-| Item do critério / tabela F2 | Estado neste PR |
+| Item do critério / tabela F2 | Estado |
 |---|---|
-| Sync bancário **ou** aviso proactivo de reautorização | ✅ aviso proactivo (`BANK_REAUTH_LEAD_DAYS = 14`) |
-| Payments candidatos via reconciliação / CSV / identity-matrix | ✅ kernel; transplante de parsers **sem** mapas Fonte hardcoded |
-| Allocation + hash-chain | ✅ (PR anterior) |
-| Dinheiro com 3 estados | ✅ (PR anterior) |
-| Job avisos dia 1 / recibos na confirmação | ✅ calendário/sweep + outbox |
-| Documentos `generated_from` | ✅ (PR anterior + jobs) |
+| Sync bancário **ou** aviso proactivo de reautorização | ✅ **ambos** — sync PSD2 + aviso 14 dias |
+| Payments candidatos via reconciliação / CSV / identity-matrix / PSD2 | ✅ kernel; sem mapas Fonte hardcoded |
+| Allocation + hash-chain | ✅ |
+| Dinheiro com 3 estados | ✅ |
+| Job avisos dia 1 / recibos na confirmação | ✅ |
+| Documentos `generated_from` | ✅ |
 | Account Statement sob pedido | ❌ (não é critério de fecho desta fatia) |
-| Enable Banking PSD2 completo (sync, consentimento real, ASPSP) | ❌ **depois** dos testes adversariais do kernel (ordem §8) |
-| UI admin | ❌ |
+| Enable Banking PSD2 (consentimento, scopes, sync, last_error, fallback CSV) | ✅ |
+| UI admin completa | ❌ só `/f2/banking` para exercitar a API |
 | Portal saldo | F3 |
 | Dual-write / cutover `Quota.pago` | ❌ explicitamente fora |
-| Testes adversariais extra do Finance Kernel | ✅ suite `test:f2-adversarial` (ver secção Adversariais) |
 
 ## Transplante Fonte (o que se reutilizou)
 
-- Extração de pagador no descritivo SEPA/Santander e CSV multi-banco → `f2-csv-movements.ts` / `f2-identity.ts` (cópia genérica; **não** importa `identity-matrix.ts` nem `csv-bank-parser.ts`, que puxam `Quota` / PII / mapas do prédio).
-- Match tenant-scoped: `constitution_fracoes` + `owner_contact_drafts` confirmados. Nome por igualdade normalizada ou tokens completos (nunca substring: ANA ≠ JOANA). Resultado = `Payment` candidato, nunca cascata Fonte.
-- Canal `email` do aviso de reauth: `Person.email` do Admin/gestor activo. Sem email → placeholder `admin@invalid` e `notification_delivery.status = skipped` (o placeholder não conta como mailbox). O IBAN da conta fica no payload só como contexto, nunca como `notification_delivery.destination`.
+- Cliente JWT RS256 + mapping snake_case/camelCase de transacções Enable Banking → `enable-banking-adapter.ts` (adaptado de `routes/bank.ts`). **Não** escreve `bank_connections` / `bank_transactions` / `Quota.pago`.
+- Extração de pagador / IBAN de contraparte: `f2-identity.ts` + `extractCounterpartyIban` (filtra o IBAN da conta do condomínio).
+- Match tenant-scoped: `constitution_fracoes` + `owner_contact_drafts` confirmados. Resultado = Payment candidato, nunca cascata Fonte.
+
+## Segredos
+
+`ENABLE_BANKING_CLIENT_ID` / `ENABLE_BANKING_PRIVATE_KEY` nunca são persistidos nem logados. `sanitizeBankError` remove Bearer, JWT e PEM antes de `last_error` / `console.error`. A resposta HTTP de `GET /bank-connections` omite `session_id` e `auth_state`.
 
 ## Como testar
 
@@ -73,18 +73,18 @@ cd packages/web && bun run test:f2-adversarial
 
 ## Adversariais
 
-Suite: `packages/web/src/api/f2.adversarial.test.ts` — `bun run test:f2-adversarial` (também corre em `test:f2`). Extende o kernel existente; não introduz modelo financeiro paralelo. Enable Banking PSD2 continua fora (ordem §8).
+Suite: `packages/web/src/api/f2.adversarial.test.ts` — `bun run test:f2-adversarial` (também corre em `test:f2`). Extende o kernel existente; não introduz modelo financeiro paralelo.
 
 | Propriedade | Resultado | Como é demonstrado |
 |---|---|---|
-| Isolamento multi-tenant: A nunca lê/escreve payments / ledger / bank_connections / outbox de B | PASS | Allocate/recibo/fração/movimento cruzados → `not_found`; `listBankConnections` e HTTP GET só devolvem o IBAN do tenant; `external_ref` igual em A e B cria Payments distintos; jobs de outbox não se misturam; aviso mensal em A não cria documentos em B |
-| Concorrência: allocate + ingest candidatos em paralelo | PASS | Dois `allocatePayment` + dois `ingestCandidateMovement` (mesmo `external_ref`) em clientes libSQL distintos: sequences únicas, 1 payment/movimento por ref, `openAmountCents = 0` sem overspend |
-| Cash: Obligation **não** liquida em `registered`; Fiscalizacao ≠ registante; deposit exige movimento tenant-scoped | PASS | `open_amount` inalterado após `registered` e após verify; allocate → `cash_not_verified`; self-verify → `self_verify_forbidden`; deposit sem movimento / com movimento de B → erro; depósito só com movimento de A |
-| AuthZ: Owner / Fiscalizacao / sem membership → 403 nas rotas gestor | PASS | `/bank-connections` GET+POST, `/payments/candidates`, `/jobs/*` devolvem 403 para Owner, Fiscalizacao e Person sem membership |
-| Reauth: destination nunca IBAN; sem gestor → `admin@invalid` + `skipped`; com gestor → email real | PASS | Sem Admin: destino `admin@invalid`, status `skipped`; com Admin: email do gestor, `attempted`; nunca o IBAN PT… |
-| Identity: substring falsa (ANA ⊄ JOANA/MARIANA); caps csv/movements → 400 | PASS | `identityNameMatches` + ingest ANA não identifica; MARIANA SILVA identifica; HTTP `movements[]` > 500 e `csvText` > 512k → 400 |
-| Hash-chain: adulteração detetável via `ledger/validate` | PASS | Tamper de `payload_json` em A: `validateLedgerChain` + `POST /ledger/validate` → `ok: false`; cadeia de B intacta; A recusa novos payments (`ledger_chain_broken`) |
-| Idempotência outbox: retry de `notify.bank_reauth` / `f2.issue_receipt` | PASS | Sweep repetido não cria segundo job; reset do job `completed` → `pending` + `processOutbox` não duplica delivery nem Receipt |
+| Isolamento multi-tenant | PASS | Payments / ledger / bank_connections / outbox de A ≠ B; GET só devolve o IBAN do tenant |
+| Concorrência allocate + ingest | PASS | Sequences únicas; 1 payment/movimento por ref |
+| Cash | PASS | `registered` não liquida; self-verify proibido; deposit exige movimento do tenant |
+| AuthZ gestor | PASS | Rotas kernel + authorize/reauthorize/revoke/sync/`jobs/bank-sync` → 403 para Owner / Fiscalizacao / sem membership |
+| Reauth: destination nunca IBAN | PASS | Email do gestor ou `admin@invalid` + `skipped` |
+| Identity + caps | PASS | ANA ⊄ JOANA; payloads grandes → 400 |
+| Hash-chain | PASS | Tamper → `ledger/validate` `ok: false` |
+| Idempotência outbox | PASS | Retry `notify.bank_reauth` / `f2.issue_receipt` sem duplicar |
 
 ## API (resumo)
 
@@ -98,8 +98,14 @@ Suite: `packages/web/src/api/f2.adversarial.test.ts` — `bun run test:f2-advers
 - `POST /api/f2/periods/open`
 - `POST /api/f2/periods/close`
 - `POST /api/f2/documents/payment-notice`
-- `POST /api/f2/bank-connections` / `GET /api/f2/bank-connections`
+- `POST /api/f2/bank-connections` / `GET /api/f2/bank-connections` — vista pública (sem `session_id`)
+- `POST /api/f2/bank-connections/authorize` — inicia consentimento ASPSP (`psu_type: business`). **`accountIban` obrigatório** se a BankConnection do tenant ainda não tiver IBAN do condomínio (400 `bank_account_iban_required`)
+- `POST /api/f2/bank-connections/reauthorize` — reauth real (aviso proactivo continua a coexistir); reutiliza o IBAN persistido
+- `POST /api/f2/bank-connections/revoke`
+- `POST /api/f2/bank-connections/sync` — movimentos + candidatos; `skipped` + `fallback: csv` quando a sessão não serve; mapping recebe `ownIbans`
+- `GET /api/f2/bank/callback` — OAuth Enable Banking (sem membership; `state` tenant-scoped). Sucesso: `?bank_connected=1`. Erro: `?bank_error=<código>` estável (`consent_failed`, `consent_denied`, `account_mismatch`, `account_iban_required`, …). Detalhe sanitizado só em `last_error` / logs / UI após refetch
 - `POST /api/f2/jobs/reauth-notices`
+- `POST /api/f2/jobs/bank-sync` — outbox idempotente
 - `POST /api/f2/jobs/monthly-notices`
 - `POST /api/f2/jobs/receipt-sweep`
-- `POST /api/f2/jobs/calendar-sweep`
+- `POST /api/f2/jobs/calendar-sweep` — reauth + enqueue sync se autorizado + avisos/recibos

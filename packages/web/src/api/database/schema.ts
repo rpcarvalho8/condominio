@@ -959,6 +959,11 @@ export const condoBankConnections = sqliteTable(
     lastError: text("last_error"),
     lastReauthNoticeAt: integer("last_reauth_notice_at", { mode: "timestamp" }),
     revokedAt: integer("revoked_at", { mode: "timestamp" }),
+    sessionId: text("session_id"),
+    accountUid: text("account_uid"),
+    consentScopes: text("consent_scopes"),
+    accountsJson: text("accounts_json"),
+    authState: text("auth_state"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -982,8 +987,8 @@ export const tenantLedgerIntegrity = sqliteTable("tenant_ledger_integrity", {
 });
 
 /**
- * Kernel F2 — movimento bancário tenant-scoped para cash deposit / bank_deposit.
- * Não substitui Fonte `bank_transactions` nem o ciclo Enable Banking.
+ * Kernel F2 — movimento bancário tenant-scoped (cash deposit + sync PSD2 / CSV).
+ * Não substitui Fonte `bank_transactions` nem marca `Quota.pago`.
  */
 export const f2BankMovements = sqliteTable(
   "f2_bank_movements",

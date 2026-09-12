@@ -47,6 +47,7 @@ const ADMIN_ITEMS = [
   { href: "/utilizadores", label: "Utilizadores", icon: UserCog },
   { href: "/quota-tipos", label: "Tipos de Quota", icon: Tag },
   { href: "/importar", label: "Importar Dados", icon: DatabaseZap },
+  { href: "/f2/banking", label: "Banking PSD2", icon: Landmark },
   { href: "/definicoes", label: "Definições", icon: Settings },
 ];
 
