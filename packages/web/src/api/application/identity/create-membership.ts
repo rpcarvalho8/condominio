@@ -72,6 +72,13 @@ async function resolvePerson(
           409,
         );
       }
+      if (input.userId && !byEmail.userId) {
+        const linked = await personRepo.linkUserId(byEmail.id, input.userId);
+        if (!linked) {
+          throw new DomainError("person_not_found", "Person não encontrada", 404);
+        }
+        return linked;
+      }
       return byEmail;
     }
     return personRepo.insert({
