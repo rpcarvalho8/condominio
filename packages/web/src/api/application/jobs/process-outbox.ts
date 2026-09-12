@@ -1,5 +1,8 @@
+import { and, eq } from "drizzle-orm";
+import { portalAdminContacts } from "../../database/schema";
 import { DOMAIN_EVENT_TYPES } from "../../domain/domain-event";
 import { OUTBOX_JOB_TYPES, type OutboxJob } from "../../domain/outbox";
+import { ADMIN_CONTACT_STATUSES } from "../../domain/ticket";
 import type { KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createContentUploadRepo } from "../../infra/repos/content-upload-repo";
@@ -15,6 +18,10 @@ import {
   isInvitationNotifyJob,
   redactInvitationOutboxPayload,
 } from "../invitation/invitation-secrets";
+import {
+  isAdminContactNotifyJob,
+  redactAdminContactOutboxPayload,
+} from "../portal/f3-contact-admin";
 
 export type OutboxHandler = (job: OutboxJob, deps: KernelDeps) => Promise<void>;
 
@@ -213,6 +220,91 @@ async function handleNotifyInvitation(
   });
 }
 
+async function handleNotifyAdminMailbox(
+  job: OutboxJob,
+  deps: KernelDeps,
+  template: string,
+  reason: string,
+): Promise<{ destination: string; hasMailbox: boolean }> {
+  const repo = createNotificationDeliveryRepo(deps.db);
+  const existing = await repo.findByIdempotency(job.tenantId, job.idempotencyKey);
+  if (existing) {
+    return {
+      destination: existing.destination,
+      hasMailbox: existing.status === "attempted",
+    };
+  }
+
+  const liveEmails = await resolveFinanceManagerEmails(deps, job.tenantId);
+  const payloadEmails = Array.isArray(job.payload.notifyEmails)
+    ? job.payload.notifyEmails.map((e) => String(e ?? "").trim()).filter(isResolvedAdminMailbox)
+    : [];
+  const notifyEmails = liveEmails.length > 0 ? liveEmails : payloadEmails;
+  let destination = notifyEmails[0] ?? BANK_REAUTH_ADMIN_FALLBACK;
+  if (!looksLikeEmail(destination) || !isResolvedAdminMailbox(destination)) {
+    destination = BANK_REAUTH_ADMIN_FALLBACK;
+  }
+  const hasMailbox = isResolvedAdminMailbox(destination);
+
+  await repo.insert({
+    tenantId: job.tenantId,
+    channel: "email",
+    destination,
+    template,
+    status: hasMailbox ? "attempted" : "skipped",
+    providerMessageId: `local-${job.id}`,
+    idempotencyKey: job.idempotencyKey,
+  });
+
+  await createAuditEventRepo(deps.db).append({
+    tenantId: job.tenantId,
+    type: hasMailbox ? "notification.email.attempted" : "notification.email.skipped",
+    entityType: "notification_delivery",
+    entityId: job.idempotencyKey,
+    payload: {
+      destination,
+      notifyEmails,
+      template,
+      jobId: job.id,
+      ticketId: job.payload.ticketId ?? null,
+      contactId: job.payload.contactId ?? null,
+    },
+    reason,
+    source: "outbox",
+    requestId: job.correlationId,
+  });
+
+  return { destination, hasMailbox };
+}
+
+async function handleNotifyTicketCreated(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  await handleNotifyAdminMailbox(
+    job,
+    deps,
+    "ticket_created",
+    "outbox_notify_ticket_created",
+  );
+}
+
+async function handleNotifyAdminContact(job: OutboxJob, deps: KernelDeps): Promise<void> {
+  const { hasMailbox } = await handleNotifyAdminMailbox(
+    job,
+    deps,
+    "admin_contact",
+    "outbox_notify_admin_contact",
+  );
+  const contactId = String(job.payload.contactId ?? "").trim();
+  if (!contactId) return;
+  await deps.db
+    .update(portalAdminContacts)
+    .set({
+      status: hasMailbox ? ADMIN_CONTACT_STATUSES.attempted : ADMIN_CONTACT_STATUSES.skipped,
+    })
+    .where(
+      and(eq(portalAdminContacts.id, contactId), eq(portalAdminContacts.tenantId, job.tenantId)),
+    );
+}
+
 async function handleBankSync(job: OutboxJob, deps: KernelDeps): Promise<void> {
   const { syncBankConnection } = await import("../finance/f2-bank-sync");
   await syncBankConnection(deps, {
@@ -237,6 +329,8 @@ const HANDLERS: Record<string, OutboxHandler> = {
     handleNotifyInvitation(job, deps, "invitation_created", "outbox_notify_invitation_created"),
   [OUTBOX_JOB_TYPES.notifyInvitationVerify]: (job, deps) =>
     handleNotifyInvitation(job, deps, "invitation_verify", "outbox_notify_invitation_verify"),
+  [OUTBOX_JOB_TYPES.notifyTicketCreated]: handleNotifyTicketCreated,
+  [OUTBOX_JOB_TYPES.notifyAdminContact]: handleNotifyAdminContact,
 };
 
 export function backoffMs(attempts: number): number {
@@ -263,10 +357,16 @@ export async function processOutbox(
     }
     try {
       await handler(job, deps);
-      const redacted = isInvitationNotifyJob(job.jobType)
-        ? JSON.stringify(redactInvitationOutboxPayload(job.payload))
-        : undefined;
-      await repo.markCompleted(job.id, now, redacted ? { payloadJson: redacted } : undefined);
+      const redactedPayload = isInvitationNotifyJob(job.jobType)
+        ? redactInvitationOutboxPayload(job.payload)
+        : isAdminContactNotifyJob(job.jobType)
+          ? redactAdminContactOutboxPayload(job.payload)
+          : null;
+      await repo.markCompleted(
+        job.id,
+        now,
+        redactedPayload ? { payloadJson: JSON.stringify(redactedPayload) } : undefined,
+      );
       completed++;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
