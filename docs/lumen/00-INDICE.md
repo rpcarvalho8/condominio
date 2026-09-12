@@ -62,3 +62,11 @@ Resumo: congelar a documentação v6.1 → implementar F0 e F1 → F2 → piloto
 ## Nota de execução
 
 Documentação primeiro. Código de plataforma (tenant, auth, ingestão) só depois do freeze v6.1. Código da Orquestra LLM não antes de tenant + ingestão.
+
+### Estado documental ≠ estado operacional ≠ validação de negócio
+
+Os veredictos deste índice dizem respeito à especificação e às condições de avanço. Não certificam a implementação integrada nem o cumprimento dos gates de produção.
+
+[F1-IMPLEMENTACAO](F1-IMPLEMENTACAO.md) e [F2-IMPLEMENTACAO](F2-IMPLEMENTACAO.md) reportam capacidades e limites de recortes de implementação. As auditorias referem-se às branches, commits e datas nelas identificados; não constituem, por si só, uma verificação do código actual.
+
+Validar o negócio exige evidência separada de compra, resultado utilizado, custo de entrega e renovação. Concluir F0–F6 não demonstra essas propriedades.

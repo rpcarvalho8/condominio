@@ -7,6 +7,8 @@
 **Âmbito:** código de produto em `packages/web` (API Hono + UI React). Arquivos `_archive/` e artefactos de build ignorados salvo quando encodam config errada.  
 **Fora de âmbito desta auditoria:** implementar correcções.
 
+> **Nota de leitura — 2026-09-12:** os resultados abaixo pertencem ao snapshot identificado no cabeçalho. Os relatórios `F1-IMPLEMENTACAO.md` e `F2-IMPLEMENTACAO.md` descrevem outros recortes de implementação; não actualizam retroactivamente esta auditoria nem demonstram, por si só, o estado integrado actual. Uma conclusão actual exige nova verificação com commit e evidência identificados.
+
 ---
 
 ## 1. Executive summary

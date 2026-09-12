@@ -11,7 +11,9 @@ O plano (`06-FATIAS.md`) distingue:
 2. **Enable Banking** — *só depois* do Finance Kernel passar testes adversariais (ordem de execução §8)  
 3. **Critério de conclusão F2** — sync bancário **ou** aviso proactivo de reautorização, Payments candidatos, Allocation + hash-chain, cash 3 estados, avisos dia 1, recibos na confirmação, `generated_from`
 
-**Este PR fecha (2):** consentimento ASPSP real, scopes, ciclo de vida, reautorização, sync → movimentos tenant-scoped + Payments candidatos. O aviso proactivo (14 dias) **coexiste** com a reauth PSD2. CSV continua o fallback. Dual-write Fonte (`Quota.pago`) fica fora.
+**Este PR reporta cobertura do critério F2 (3) no recorte do kernel**, sem Enable Banking PSD2 (2). O aviso proactivo de reautorização é o ramo escolhido do “sync **ou** aviso”; sync completo fica para o slice PSD2.
+
+Esta cobertura não equivale a F2 operacional de ponta a ponta, a cutover da Fonte concluído, a gates de produção cumpridos ou a negócio validado. A verificação da implementação integrada deve identificar o commit, o ambiente, os testes executados e a evidência do percurso real; os resultados reportados abaixo mantêm o âmbito deste PR.
 
 ## Fronteira dura (este slice)
 

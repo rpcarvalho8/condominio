@@ -178,7 +178,7 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 **GO:** só depois do Domain Kernel (F0) congelado e do vertical slice F1 a passar.
 
-**Estado de código:** ver [F2-IMPLEMENTACAO.md](F2-IMPLEMENTACAO.md) — Finance Kernel + critério F2 + testes adversariais + Enable Banking PSD2 (consentimento ASPSP, sync → candidatos, reauth real + aviso proactivo, fallback CSV). Dual-write Fonte (`Quota.pago`) fica fora deste slice.
+**Estado de código:** ver [F2-IMPLEMENTACAO.md](F2-IMPLEMENTACAO.md) — capacidades do Finance Kernel e testes adversariais reportados (`test:f2-adversarial`), com os limites do recorte explicitados. Isto não demonstra, por si só, F2 operacional de ponta a ponta nem cutover da Fonte. Enable Banking PSD2 só depois (ordem §8); integração, cutover e gates exigem evidência própria.
 
 ---
 
@@ -263,9 +263,9 @@ DRAFT
 ```
 
 - Presidente **assina**; presentes **subscrevem** individualmente (manuscrita / eletrónica qualificada / declaração eletrónica) — nunca “só a mesa assina”
-- `hash_aprovada` ≠ `hash_final_subscrita`
+- `hash_aprovada` ≠ `hash_final`
 - OCR compara estrutura; **nunca** valida assinaturas juridicamente
-- Consulta no portal piloto/comercial: só Actas `PUBLISHED` (ou equivalente explícito de publicação)
+- Consulta da Acta final no portal: só em `PUBLISHED`. Em F5, o draft submetido à aprovação pode ser mostrado aos condóminos autorizados para essa acção, sem o apresentar como Acta final publicada (ADR-034)
 - Validar com advogado de propriedade horizontal antes de produção (ADR-034)
 
 **Critério:** áudio multi-segmento → transcrição ordenada → Acta; convocatória por meio com evidência de envio; quórum via `ResolutionRule`; deliberação eficaz na aprovação; votação no portal; assinatura/subscrição; documento final vs. aprovado; comunicação de deliberações separada; áudio eliminado após aprovação.

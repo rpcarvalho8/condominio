@@ -351,8 +351,8 @@ sequenceDiagram
         Note over LLM: LLM sugere; NUNCA decide alocação final sozinho
     end
 
-    alt Confiança suficiente (transferência/banco)
-        Engine->>Settle: Payment candidato<br/>verification_method = bank_match / deterministic
+    alt Match determinístico validado (transferência/banco)
+        Engine->>Settle: Payment candidato de movimento bancário<br/>imputação sujeita às regras determinísticas do domínio
         Settle->>Policy: Ordem de imputação vigente
         Policy-->>Settle: Regras de SettlementPolicy
         Settle->>Settle: Aloca contra Obligations

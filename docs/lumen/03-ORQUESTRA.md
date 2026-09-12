@@ -177,7 +177,7 @@ Gravação, transcrição e resumo de reuniões informais (fornecedor, advogado,
   5. Votação: por fração, ponderada por permilagem (domínio, não LLM)
   6. Aprovação da Acta pelos condóminos segundo `ResolutionRule` / regras do condomínio — não pelo Risk Engine. A deliberação torna-se eficaz com a aprovação (DL 268/94 art. 1.º n.º 3), não com a assinatura
   7. Risk Engine pode validar apenas outputs LLM do pipeline (ex.: qualidade/risco da minuta antes de ir a votação) — nunca o "sim" da assembleia
-  8. PDF + `hash_aprovada`; presidente assina; presentes subscrevem; estados até `FINAL` com `hash_final_subscrita` (ver diagramas e 02)
+  8. PDF + `hash_aprovada`; presidente assina; presentes subscrevem; arquivo em `FINAL` com `hash_final` e disponibilização da Acta final no portal apenas em `PUBLISHED` (ver 02-DOMINIO)
 - **Assinatura ≠ subscrição:** presidente assina; presentes subscrevem — ver 02-DOMINIO
 - **Retenção de áudio:** só durante o pipeline; eliminar após `APPROVED` (confirmar com DPO)
 - **Transplante:** `atas-llm.ts`, `reuniao-llm.ts`, `stt.ts`, `ata-pdf.ts`, `reuniao-pdf.ts`
