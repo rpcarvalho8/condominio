@@ -578,7 +578,11 @@ export async function syncBankConnection(
   let reused = 0;
   let credits = 0;
   let debits = 0;
+  const seenRefs = new Set<string>();
   for (const tx of transactions) {
+    const ref = movementExternalRef(row.id, tx);
+    if (seenRefs.has(ref)) continue;
+    seenRefs.add(ref);
     const applied = await applySyncedTransaction(deps, {
       tenantId: input.tenantId,
       connectionId: row.id,

@@ -74,7 +74,8 @@ export function sanitizeBankError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err ?? "unknown_error");
   const redacted = String(redactSecrets(raw))
     .replace(PEM_RE, "[REDACTED_PEM]")
-    .replace(JWT_RE, "[REDACTED_JWT]");
+    .replace(JWT_RE, "[REDACTED_JWT]")
+    .replace(/\bBearer\s+(\[REDACTED\])?/gi, "[REDACTED]");
   return redacted.replace(/\s+/g, " ").trim().slice(0, 480);
 }
 
