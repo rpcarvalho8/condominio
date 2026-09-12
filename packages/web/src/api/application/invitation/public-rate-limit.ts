@@ -15,14 +15,7 @@ export function clientIpFromHeaders(header: (name: string) => string | undefined
   return forwarded || header("x-real-ip")?.trim() || "local";
 }
 
-/** Minimal IP + invitation-token limiter for public F3 endpoints. */
-export function assertF3PublicRateLimit(input: {
-  ip: string;
-  token: string;
-  action: string;
-}): void {
-  const tokenPart = hashOpaqueSecret(input.token).slice(0, 16);
-  const key = `${input.action}:${input.ip}:${tokenPart}`;
+function consumeRateLimit(key: string): void {
   const now = Date.now();
   const windowStart = now - F3_PUBLIC_RATE_WINDOW_MS;
   const recent = (buckets.get(key) ?? []).filter((ts) => ts > windowStart);
@@ -35,4 +28,30 @@ export function assertF3PublicRateLimit(input: {
   }
   recent.push(now);
   buckets.set(key, recent);
+}
+
+function hashedSubject(value: string): string {
+  return hashOpaqueSecret(value).slice(0, 16);
+}
+
+/** Minimal IP + invitation-token limiter for public F3 endpoints. */
+export function assertF3PublicRateLimit(input: {
+  ip: string;
+  token: string;
+  action: string;
+}): void {
+  consumeRateLimit(`${input.action}:${input.ip}:${hashedSubject(input.token)}`);
+}
+
+/** Authenticated portal limiter: IP + user/membership + action (same window/max as public). */
+export function assertF3AuthenticatedRateLimit(input: {
+  ip: string;
+  userId?: string | null;
+  personId?: string | null;
+  membershipId?: string | null;
+  action: string;
+}): void {
+  const subject =
+    [input.userId, input.personId, input.membershipId].filter(Boolean).join(":") || "unknown";
+  consumeRateLimit(`${input.action}:${input.ip}:${hashedSubject(subject)}`);
 }

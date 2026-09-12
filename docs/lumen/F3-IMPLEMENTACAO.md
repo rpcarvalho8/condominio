@@ -38,7 +38,7 @@ Transplante do fluxo Fonte (`titulo` / `descricao` / `categoria` / `urgencia` / 
 
 - Persistência em `portal_tickets` + `portal_ticket_photos` (kernel, `tenant_id`).
 - AuthZ: só Membership **activa** com `fracao_id`. Admin sem fração, Membership revogada, outro tenant ou outra fração → fail-closed (401/403/404).
-- Foto: JPEG/PNG/WebP/GIF, máx. 5, 8MB. Bytes no **content-blob-store F1** (sha256 / tenant); metadados em `content_uploads`. Sem vídeo neste slice.
+- Foto: JPEG/PNG/WebP/GIF, máx. 5, 8MB. Bytes no **content-blob-store F1** (sha256 / tenant); metadados em `content_uploads`. Sem vídeo neste slice. `Content-Length` acima de 5×8MB (+ overhead) é rejeitado **antes** de `parseBody` (413); `file.size` é validado antes de `arrayBuffer`. Download da foto envia `X-Content-Type-Options: nosniff`.
 - Sem categorização LLM (F4). Categoria/urgência aceites se válidas; default `outro` / `normal`.
 - Outbox `notify.ticket_created` idempotente (`notify:ticket:{id}:created`) → email aos Admin/PlatformAdmin (mesmo resolvedor que F2) + `notification_deliveries` + AuditEvent.
 
@@ -48,8 +48,8 @@ Canal mínimo, **não CRM**:
 
 - `POST /api/f3/portal/contact-admin` `{ subject, body, fracaoId? }`
 - Registo em `portal_admin_contacts` + AuditEvent `admin_contact.created`
-- Outbox `notify.admin_contact` idempotente (`notify:admin_contact:{id}:created`)
-- Estado observável: `queued` → `attempted` (há mailbox de admin) ou `skipped` (sem email de gestor; fallback `admin@invalid` nunca é tratado como entrega)
+- Outbox `notify.admin_contact` idempotente (`notify:admin_contact:{id}:created`); após complete o `body` no payload é `[REDACTED]` (espelho invitation)
+- Estado observável: `queued` → `attempted` (há mailbox de admin) ou `skipped` (sem email de gestor; fallback `admin@invalid` nunca é tratado como entrega); UPDATE de status inclui `tenant_id`
 - Condómino lista as suas mensagens e o estado no portal
 
 ## Critério F3 — o que fecha aqui vs o que fica
@@ -95,11 +95,11 @@ Portal condómino (Membership activa da fração):
 - `GET  /api/f3/portal/documents/:id/download` — HTML rastreável (`generated_from`); AuditEvent `financial_document.seen`
 - `POST /api/f3/portal/documents/account-statement` `{ fracaoId? }` — extrato sob pedido; idempotente por tenant+fração+período
 - `GET  /api/f3/portal/tickets` — tickets da(s) fração(ões) da Membership
-- `POST /api/f3/portal/tickets` — multipart (`titulo`, `descricao`, `file`/`files`) ou JSON; foto no blob F1
+- `POST /api/f3/portal/tickets` — multipart (`titulo`, `descricao`, `file`/`files`) ou JSON; foto no blob F1; rate-limit autenticado (IP + user/membership + action) → 429
 - `GET  /api/f3/portal/tickets/:id`
 - `GET  /api/f3/portal/tickets/:id/photos/:photoId`
 - `GET  /api/f3/portal/contact-admin` — mensagens do actor + estado
-- `POST /api/f3/portal/contact-admin` `{ subject, body, fracaoId? }`
+- `POST /api/f3/portal/contact-admin` `{ subject, body, fracaoId? }` — rate-limit autenticado → 429
 
 Público (token opaco; sem Membership):
 
@@ -109,3 +109,5 @@ Público (token opaco; sem Membership):
 - `POST /api/f3/public/invitations/:token/accept`
 
 Rate limit mínimo (IP + token) em verify/request, verify/confirm e accept.
+
+Portal autenticado: rate limit (IP + user/membership + action) em `POST /portal/tickets` e `POST /portal/contact-admin` — mesma janela/máximo que o público (20/min).

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { portalAdminContacts } from "../../database/schema";
 import { DOMAIN_EVENT_TYPES } from "../../domain/domain-event";
 import { OUTBOX_JOB_TYPES, type OutboxJob } from "../../domain/outbox";
@@ -18,6 +18,10 @@ import {
   isInvitationNotifyJob,
   redactInvitationOutboxPayload,
 } from "../invitation/invitation-secrets";
+import {
+  isAdminContactNotifyJob,
+  redactAdminContactOutboxPayload,
+} from "../portal/f3-contact-admin";
 
 export type OutboxHandler = (job: OutboxJob, deps: KernelDeps) => Promise<void>;
 
@@ -296,7 +300,9 @@ async function handleNotifyAdminContact(job: OutboxJob, deps: KernelDeps): Promi
     .set({
       status: hasMailbox ? ADMIN_CONTACT_STATUSES.attempted : ADMIN_CONTACT_STATUSES.skipped,
     })
-    .where(eq(portalAdminContacts.id, contactId));
+    .where(
+      and(eq(portalAdminContacts.id, contactId), eq(portalAdminContacts.tenantId, job.tenantId)),
+    );
 }
 
 async function handleBankSync(job: OutboxJob, deps: KernelDeps): Promise<void> {
@@ -351,10 +357,16 @@ export async function processOutbox(
     }
     try {
       await handler(job, deps);
-      const redacted = isInvitationNotifyJob(job.jobType)
-        ? JSON.stringify(redactInvitationOutboxPayload(job.payload))
-        : undefined;
-      await repo.markCompleted(job.id, now, redacted ? { payloadJson: redacted } : undefined);
+      const redactedPayload = isInvitationNotifyJob(job.jobType)
+        ? redactInvitationOutboxPayload(job.payload)
+        : isAdminContactNotifyJob(job.jobType)
+          ? redactAdminContactOutboxPayload(job.payload)
+          : null;
+      await repo.markCompleted(
+        job.id,
+        now,
+        redactedPayload ? { payloadJson: JSON.stringify(redactedPayload) } : undefined,
+      );
       completed++;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

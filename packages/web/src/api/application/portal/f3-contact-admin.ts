@@ -22,6 +22,22 @@ import {
   type PortalActor,
 } from "./f3-portal";
 
+const SENSITIVE_ADMIN_CONTACT_KEYS = new Set(["body"]);
+
+export function redactAdminContactOutboxPayload(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    out[key] = SENSITIVE_ADMIN_CONTACT_KEYS.has(key) ? "[REDACTED]" : value;
+  }
+  return out;
+}
+
+export function isAdminContactNotifyJob(jobType: string): boolean {
+  return jobType === OUTBOX_JOB_TYPES.notifyAdminContact;
+}
+
 export type PortalAdminContactView = {
   id: string;
   fracaoId: string;

@@ -21,7 +21,8 @@ import {
 import { acceptInvitation } from "./application/invitation/accept-invitation";
 import { createInvitation } from "./application/invitation/create-invitation";
 import { readContactVerificationFromOutbox, resetInvitationSecretHarness } from "./application/invitation/invitation-secrets";
-import { resetF3PublicRateLimit } from "./application/invitation/public-rate-limit";
+import { F3_PUBLIC_RATE_MAX, resetF3PublicRateLimit } from "./application/invitation/public-rate-limit";
+import { TICKET_UPLOAD_MAX_CONTENT_LENGTH } from "./application/portal/f3-ticket-upload-guard";
 import { confirmContactVerification, requestContactVerification } from "./application/invitation/verify-contact";
 import { getActivationPanel } from "./application/invitation/activation-panel";
 import {
@@ -668,6 +669,7 @@ describe("F3 portal — tickets+foto + contactar admin", () => {
     );
     expect(photo.status).toBe(200);
     expect(photo.headers.get("content-type")).toContain("image/");
+    expect(photo.headers.get("x-content-type-options")).toBe("nosniff");
     const bytes = Buffer.from(await photo.arrayBuffer());
     expect(bytes.equals(TINY_PNG)).toBe(true);
 
@@ -717,6 +719,18 @@ describe("F3 portal — tickets+foto + contactar admin", () => {
     );
     const tooBig = await app.request("/f3/portal/tickets", { method: "POST", body: huge });
     expect(tooBig.status).toBe(400);
+
+    const early = await app.request("/f3/portal/tickets", {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=----f3ticket",
+        "content-length": String(TICKET_UPLOAD_MAX_CONTENT_LENGTH + 1),
+      },
+      body: "tiny",
+    });
+    expect(early.status).toBe(413);
+    const earlyBody = (await early.json()) as { message: string };
+    expect(earlyBody.message.toLowerCase()).toContain("grande");
   });
 
   test("contactar admin: AuditEvent + outbox idempotente + estado observável", async () => {
@@ -764,6 +778,10 @@ describe("F3 portal — tickets+foto + contactar admin", () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.idempotencyKey).toBe(`notify:admin_contact:${firstBody.contact.id}:created`);
     expect(jobs[0]!.status).toBe("completed");
+    const outboxPayload = JSON.parse(jobs[0]!.payloadJson) as { subject?: string; body?: string };
+    expect(outboxPayload.subject).toBe("Dúvida de quota");
+    expect(outboxPayload.body).toBe("[REDACTED]");
+    expect(String(jobs[0]!.payloadJson)).not.toContain("O extrato não bate");
 
     await processOutbox(deps);
     const jobsAfter = (await deps.db.select().from(schema.outboxJobs)).filter(
@@ -888,5 +906,76 @@ describe("F3 portal — tickets+foto + contactar admin", () => {
       body: JSON.stringify({ titulo: "Revogado", descricao: "Não" }),
     });
     expect(revoked.status).toBe(403);
+  });
+
+  test("POST tickets e contact-admin: rate limit IP+user/membership → 429", async () => {
+    const { fracoes } = await seedFracoesWithBudget(TENANT_A, ["A"]);
+    const fracao = fracoes[0]!;
+    await acceptOwnerForFracao({
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      email: "rl-portal@condo.test",
+      userId: "user-rl-portal",
+      name: "RL Portal",
+    });
+    currentUser = { id: "user-rl-portal", email: "rl-portal@condo.test" };
+
+    let lastTicket = 0;
+    for (let i = 0; i < F3_PUBLIC_RATE_MAX + 1; i++) {
+      const res = await app.request("/f3/portal/tickets", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "203.0.113.88",
+        },
+        body: JSON.stringify({
+          titulo: `Pedido ${i}`,
+          descricao: "Rate limit tickets",
+          fracaoId: fracao.id,
+        }),
+      });
+      lastTicket = res.status;
+    }
+    expect(lastTicket).toBe(429);
+    const ticketBody = (await (
+      await app.request("/f3/portal/tickets", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "203.0.113.88",
+        },
+        body: JSON.stringify({ titulo: "ainda", descricao: "não" }),
+      })
+    ).json()) as { message: string };
+    expect(ticketBody.message).toMatch(/Demasiados pedidos/);
+
+    const photoHeavy = new FormData();
+    photoHeavy.set("titulo", "Foto");
+    photoHeavy.set("descricao", "Mesmo endpoint");
+    photoHeavy.set("file", new File([TINY_PNG], "fuga.png", { type: "image/png" }));
+    const photoRl = await app.request("/f3/portal/tickets", {
+      method: "POST",
+      headers: { "x-forwarded-for": "203.0.113.88" },
+      body: photoHeavy,
+    });
+    expect(photoRl.status).toBe(429);
+
+    let lastContact = 0;
+    for (let i = 0; i < F3_PUBLIC_RATE_MAX + 1; i++) {
+      const res = await app.request("/f3/portal/contact-admin", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "203.0.113.88",
+        },
+        body: JSON.stringify({
+          subject: `Assunto ${i}`,
+          body: "Mensagem de contacto",
+          fracaoId: fracao.id,
+        }),
+      });
+      lastContact = res.status;
+    }
+    expect(lastContact).toBe(429);
   });
 });
