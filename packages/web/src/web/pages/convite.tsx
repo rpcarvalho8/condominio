@@ -104,7 +104,7 @@ export default function ConvitePage() {
         body: JSON.stringify({ name, email: accountEmail }),
       });
       setStep("done");
-      navigate("/portal");
+      navigate("/f3/portal");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Não foi possível aceitar o convite");
     } finally {

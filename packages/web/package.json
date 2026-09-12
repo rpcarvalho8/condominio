@@ -25,7 +25,7 @@
     "test:f1": "bun test src/api/f1.integration.test.ts src/api/infra/content-blob-store.test.ts src/api/application/constitution/f1-upload-guard.test.ts",
     "test:f2": "bun test src/api/f2.integration.test.ts src/api/f2.adversarial.test.ts src/api/application/finance/enable-banking-adapter.test.ts",
     "test:f2-adversarial": "bun test src/api/f2.adversarial.test.ts",
-    "test:f3": "bun test src/api/domain/invitation.test.ts src/api/f3.integration.test.ts",
+    "test:f3": "bun test src/api/domain/invitation.test.ts src/api/f3.integration.test.ts src/api/f3.portal.test.ts",
     "db:studio": "bun --env-file=../../.env drizzle-kit studio",
     "import:excel-2026": "bun run scripts/import-excel-2026.ts",
     "db:setup-local": "bun run scripts/setup-local-db.ts",

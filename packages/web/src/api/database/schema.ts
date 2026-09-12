@@ -982,6 +982,11 @@ export const financialDocuments = sqliteTable(
   (t) => ({
     tenantTypeIdx: index("financial_documents_tenant_type_idx").on(t.tenantId, t.docType),
     fracaoIdx: index("financial_documents_fracao_idx").on(t.fracaoId),
+    statementPeriodUq: uniqueIndex("financial_documents_statement_period_uq")
+      .on(t.tenantId, t.fracaoId, t.periodLabel)
+      .where(
+        sql`${t.docType} = 'AccountStatement' AND ${t.fracaoId} is not null AND ${t.periodLabel} is not null`,
+      ),
   }),
 );
 

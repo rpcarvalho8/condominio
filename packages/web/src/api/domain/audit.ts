@@ -22,6 +22,8 @@ export const AUDIT_TYPES = {
   invitationRevoked: "invitation.revoked",
   invitationAccepted: "invitation.accepted",
   invitationContactVerified: "invitation.contact_verified",
+  portalOpened: "portal.opened",
+  financialDocumentSeen: "financial_document.seen",
 } as const;
 
 export type AppendAuditEventInput = {

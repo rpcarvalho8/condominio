@@ -54,7 +54,7 @@ Resumo: congelar a documentação v6.1 → implementar F0 e F1 → F2 → piloto
 | — | [AUDITORIA-COMPLEMENTAR-V61](AUDITORIA-COMPLEMENTAR-V61.md) | Existe | Análise complementar (convocatória, RecordingSegment); v6.1 permanece fechada |
 | — | [AUDITORIA-ALINHAMENTO-PRODUTO](AUDITORIA-ALINHAMENTO-PRODUTO.md) | Existe | Auditoria de alinhamento `produto` vs v6.1 |
 | — | [Diagramas de Arquitetura](LUMEN-diagramas-arquitetura.md) | Existe | Mermaid: domínio, onboarding, sequências, roadmap |
-| — | [F3-IMPLEMENTACAO](F3-IMPLEMENTACAO.md) | Implementação | Estado do núcleo Invitation (Essencial); fronteira vs portal/PWA |
+| — | [F3-IMPLEMENTACAO](F3-IMPLEMENTACAO.md) | Implementação | Invitation + portal saldo Ledger / documentos F2; fronteira vs PWA |
 | 09 | `09-ANALISE-CODEBASE-E-PROMPTS-CURSOR.md` | **FORA DESTE PACOTE** | A incorporar quando for implementar (análise do codebase + prompts) |
 
 ---

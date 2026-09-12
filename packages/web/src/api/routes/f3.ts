@@ -5,6 +5,12 @@ import {
   getActivationPanel,
 } from "../application/invitation/activation-panel";
 import {
+  downloadPortalDocument,
+  getPortalSaldo,
+  listPortalDocuments,
+  requestPortalAccountStatement,
+} from "../application/portal/f3-portal";
+import {
   createInvitation,
   createInvitationLote,
 } from "../application/invitation/create-invitation";
@@ -250,7 +256,80 @@ export function createF3Routes(deps: KernelDeps) {
       }
     });
 
+  const portalRoutes = new Hono<{ Variables: KernelVariables }>()
+    .use(requireMembership)
+    .get("/portal/saldo", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const result = await getPortalSaldo(deps, {
+          tenantId: c.get("tenantId")!,
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .get("/portal/documents", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const result = await listPortalDocuments(deps, {
+          tenantId: c.get("tenantId")!,
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .get("/portal/documents/:id/download", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const result = await downloadPortalDocument(deps, {
+          tenantId: c.get("tenantId")!,
+          documentId: c.req.param("id"),
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        return new Response(result.body, {
+          status: 200,
+          headers: {
+            "Content-Type": result.contentType,
+            "Content-Disposition": `attachment; filename="${result.filename}"`,
+          },
+        });
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/portal/documents/account-statement", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const body = (await c.req.json().catch(() => ({}))) as { fracaoId?: string };
+        const document = await requestPortalAccountStatement(deps, {
+          tenantId: c.get("tenantId")!,
+          fracaoId: body.fracaoId,
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        return c.json({ document }, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    });
+
   return new Hono<{ Variables: KernelVariables }>()
     .route("/", publicRoutes)
+    .route("/", portalRoutes)
     .route("/", managerRoutes);
 }

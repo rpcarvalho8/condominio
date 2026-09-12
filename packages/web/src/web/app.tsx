@@ -22,6 +22,7 @@ import PedidosPage from "./pages/pedidos";
 import EmailsPage from "./pages/emails";
 import F2BankingPage from "./pages/f2-banking";
 import F3AtivacaoPage from "./pages/f3-ativacao";
+import F3PortalPage from "./pages/f3-portal";
 import ConvitePage from "./pages/convite";
 
 export default function App() {
@@ -35,6 +36,11 @@ export default function App() {
       <Route path="/portal">
         <ProtectedRoute>
           <PortalPage />
+        </ProtectedRoute>
+      </Route>
+      <Route path="/f3/portal">
+        <ProtectedRoute>
+          <F3PortalPage />
         </ProtectedRoute>
       </Route>
 
