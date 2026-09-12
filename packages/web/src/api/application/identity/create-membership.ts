@@ -114,6 +114,7 @@ function snapshot(membership: Membership): Record<string, unknown> {
 export async function createMembership(
   deps: KernelDeps,
   input: CreateMembershipInput,
+  opts?: { drain?: boolean },
 ): Promise<CreateMembershipResult> {
   const tenantId = input.tenantId.trim();
   if (!tenantId) {
@@ -190,7 +191,7 @@ export async function createMembership(
       },
       correlationId: input.actor.requestId ?? null,
     },
-    { drain: true },
+    { drain: opts?.drain !== false },
   );
 
   return { person, membership };
