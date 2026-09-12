@@ -72,6 +72,13 @@ async function resolvePerson(
           409,
         );
       }
+      if (input.userId && !byEmail.userId) {
+        const linked = await personRepo.linkUserId(byEmail.id, input.userId);
+        if (!linked) {
+          throw new DomainError("person_not_found", "Person não encontrada", 404);
+        }
+        return linked;
+      }
       return byEmail;
     }
     return personRepo.insert({
@@ -107,6 +114,7 @@ function snapshot(membership: Membership): Record<string, unknown> {
 export async function createMembership(
   deps: KernelDeps,
   input: CreateMembershipInput,
+  opts?: { drain?: boolean },
 ): Promise<CreateMembershipResult> {
   const tenantId = input.tenantId.trim();
   if (!tenantId) {
@@ -183,7 +191,7 @@ export async function createMembership(
       },
       correlationId: input.actor.requestId ?? null,
     },
-    { drain: true },
+    { drain: opts?.drain !== false },
   );
 
   return { person, membership };

@@ -59,6 +59,14 @@ export function createPersonRepo(db: KernelDb) {
         .returning();
       return mapPerson(row!);
     },
+    async linkUserId(personId: string, userId: string): Promise<Person | null> {
+      const [row] = await db
+        .update(persons)
+        .set({ userId, updatedAt: new Date() })
+        .where(eq(persons.id, personId))
+        .returning();
+      return row ? mapPerson(row) : null;
+    },
   };
 }
 

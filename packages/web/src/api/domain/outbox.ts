@@ -24,6 +24,10 @@ export const OUTBOX_JOB_TYPES = {
   bankReauthNotice: "notify.bank_reauth",
   /** F2 — sync Enable Banking → movimentos + Payments candidatos. */
   bankSync: "f2.bank_sync",
+  /** F3 — envio do convite (estado observável; sem fire-and-forget). */
+  notifyInvitationCreated: "notify.invitation_created",
+  /** F3 — código/link de verificação de contacto (não KYC). */
+  notifyInvitationVerify: "notify.invitation_verify",
 } as const;
 
 export type OutboxJob = {

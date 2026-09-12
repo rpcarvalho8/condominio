@@ -14,6 +14,9 @@ export const DOMAIN_EVENT_TYPES = {
   membershipRevoked: "MembershipRevoked",
   auditAppendRequested: "AuditAppendRequested",
   uploadRegistered: "UploadRegistered",
+  invitationCreated: "InvitationCreated",
+  invitationRevoked: "InvitationRevoked",
+  invitationAccepted: "InvitationAccepted",
 } as const;
 
 export type PublishDomainEventInput = {

@@ -110,13 +110,18 @@ export function createOutboxRepo(db: KernelDb) {
       }
       return claimed;
     },
-    async markCompleted(id: string, processedAt = new Date()): Promise<void> {
+    async markCompleted(
+      id: string,
+      processedAt = new Date(),
+      opts?: { payloadJson?: string },
+    ): Promise<void> {
       await db
         .update(outboxJobs)
         .set({
           status: OUTBOX_STATUS.completed,
           processedAt,
           lastError: null,
+          ...(opts?.payloadJson !== undefined ? { payloadJson: opts.payloadJson } : {}),
         })
         .where(eq(outboxJobs.id, id));
     },

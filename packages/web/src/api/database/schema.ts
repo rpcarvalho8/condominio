@@ -488,6 +488,48 @@ export const memberships = sqliteTable(
 );
 
 /**
+ * Invitation (F3 / ADR-001) — onboarding por convite, nunca QR físico.
+ * Token is stored only as SHA-256; plaintext is returned once at create.
+ */
+export const invitations = sqliteTable(
+  "invitations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id").notNull(),
+    canal: text("canal").notNull(),
+    contacto: text("contacto").notNull(),
+    personName: text("person_name"),
+    roleCode: text("role_code").notNull().default("Owner"),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+    status: text("status").notNull().default("pending"),
+    usedAt: integer("used_at", { mode: "timestamp" }),
+    revokedAt: integer("revoked_at", { mode: "timestamp" }),
+    revokedByPersonId: text("revoked_by_person_id"),
+    loteId: text("lote_id"),
+    contactVerifiedAt: integer("contact_verified_at", { mode: "timestamp" }),
+    verificationCodeHash: text("verification_code_hash"),
+    verificationTokenHash: text("verification_token_hash"),
+    verificationExpiresAt: integer("verification_expires_at", { mode: "timestamp" }),
+    verificationAttempts: integer("verification_attempts").notNull().default(0),
+    verificationRequests: integer("verification_requests").notNull().default(0),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+    acceptedPersonId: text("accepted_person_id"),
+    acceptedMembershipId: text("accepted_membership_id"),
+  },
+  (t) => ({
+    tokenHashUq: uniqueIndex("invitations_token_hash_uq").on(t.tokenHash),
+    tenantStatusIdx: index("invitations_tenant_status_idx").on(t.tenantId, t.status),
+    tenantLoteIdx: index("invitations_tenant_lote_idx").on(t.tenantId, t.loteId),
+    tenantContactoIdx: index("invitations_tenant_contacto_idx").on(t.tenantId, t.contacto),
+  }),
+);
+
+/**
  * DomainEvent bus (ADR-009) — append-only facts inside the tenant DB.
  */
 export const domainEvents = sqliteTable(

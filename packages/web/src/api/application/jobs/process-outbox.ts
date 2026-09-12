@@ -11,6 +11,10 @@ import {
   looksLikeEmail,
   resolveFinanceManagerEmails,
 } from "../finance/f2-bank-connection";
+import {
+  isInvitationNotifyJob,
+  redactInvitationOutboxPayload,
+} from "../invitation/invitation-secrets";
 
 export type OutboxHandler = (job: OutboxJob, deps: KernelDeps) => Promise<void>;
 
@@ -171,6 +175,44 @@ async function handleSweepReceipts(job: OutboxJob, deps: KernelDeps): Promise<vo
   });
 }
 
+async function handleNotifyInvitation(
+  job: OutboxJob,
+  deps: KernelDeps,
+  template: "invitation_created" | "invitation_verify",
+  reason: string,
+): Promise<void> {
+  const repo = createNotificationDeliveryRepo(deps.db);
+  const existing = await repo.findByIdempotency(job.tenantId, job.idempotencyKey);
+  if (existing) return;
+
+  const destination = String(job.payload.destination ?? "").trim() || "unknown@invalid";
+  await repo.insert({
+    tenantId: job.tenantId,
+    channel: String(job.payload.canal ?? "email"),
+    destination,
+    template,
+    status: "attempted",
+    providerMessageId: `local-${job.id}`,
+    idempotencyKey: job.idempotencyKey,
+  });
+
+  await createAuditEventRepo(deps.db).append({
+    tenantId: job.tenantId,
+    type: "notification.email.attempted",
+    entityType: "notification_delivery",
+    entityId: job.idempotencyKey,
+    payload: {
+      destination,
+      template,
+      jobId: job.id,
+      invitationId: job.payload.invitationId ?? null,
+    },
+    reason,
+    source: "outbox",
+    requestId: job.correlationId,
+  });
+}
+
 async function handleBankSync(job: OutboxJob, deps: KernelDeps): Promise<void> {
   const { syncBankConnection } = await import("../finance/f2-bank-sync");
   await syncBankConnection(deps, {
@@ -191,6 +233,10 @@ const HANDLERS: Record<string, OutboxHandler> = {
   [OUTBOX_JOB_TYPES.generateMonthlyPaymentNotices]: handleMonthlyPaymentNotices,
   [OUTBOX_JOB_TYPES.sweepReceipts]: handleSweepReceipts,
   [OUTBOX_JOB_TYPES.bankSync]: handleBankSync,
+  [OUTBOX_JOB_TYPES.notifyInvitationCreated]: (job, deps) =>
+    handleNotifyInvitation(job, deps, "invitation_created", "outbox_notify_invitation_created"),
+  [OUTBOX_JOB_TYPES.notifyInvitationVerify]: (job, deps) =>
+    handleNotifyInvitation(job, deps, "invitation_verify", "outbox_notify_invitation_verify"),
 };
 
 export function backoffMs(attempts: number): number {
@@ -217,7 +263,10 @@ export async function processOutbox(
     }
     try {
       await handler(job, deps);
-      await repo.markCompleted(job.id, now);
+      const redacted = isInvitationNotifyJob(job.jobType)
+        ? JSON.stringify(redactInvitationOutboxPayload(job.payload))
+        : undefined;
+      await repo.markCompleted(job.id, now, redacted ? { payloadJson: redacted } : undefined);
       completed++;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
