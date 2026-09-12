@@ -1391,6 +1391,15 @@ export async function issueAccountStatement(
     input.periodLabel?.trim() ||
     `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 
+  const existingWhere = and(
+    eq(financialDocuments.tenantId, input.tenantId),
+    eq(financialDocuments.fracaoId, input.fracaoId),
+    eq(financialDocuments.docType, FINANCIAL_DOC_TYPES.accountStatement),
+    eq(financialDocuments.periodLabel, periodLabel),
+  );
+  const [existing] = await deps.db.select().from(financialDocuments).where(existingWhere).limit(1);
+  if (existing) return existing;
+
   const obligationIds = balance.debts.map((d) => d.obligationId);
   const entries =
     obligationIds.length === 0
@@ -1405,40 +1414,47 @@ export async function issueAccountStatement(
             ),
           );
 
-  const [doc] = await deps.db
-    .insert(financialDocuments)
-    .values({
-      id: crypto.randomUUID(),
+  try {
+    const [doc] = await deps.db
+      .insert(financialDocuments)
+      .values({
+        id: crypto.randomUUID(),
+        tenantId: input.tenantId,
+        fracaoId: input.fracaoId,
+        docType: FINANCIAL_DOC_TYPES.accountStatement,
+        periodLabel,
+        issuedAt: now,
+        amountCents: balance.openCents,
+        status: "issued",
+        documentNumber: `EX-${periodLabel}-${input.fracaoId.slice(0, 8)}-${now.getTime().toString(36)}`,
+        generatedFromJson: canonicalJson({
+          obligationIds,
+          ledgerEntryIds: entries.map((e) => e.id),
+          originalCents: balance.originalCents,
+          allocatedCents: balance.allocatedCents,
+          adjustmentCents: balance.adjustmentCents,
+          openCents: balance.openCents,
+        }),
+        createdAt: now,
+      })
+      .returning();
+
+    await writeAudit(deps, {
       tenantId: input.tenantId,
-      fracaoId: input.fracaoId,
-      docType: FINANCIAL_DOC_TYPES.accountStatement,
-      periodLabel,
-      issuedAt: now,
-      amountCents: balance.openCents,
-      status: "issued",
-      documentNumber: `EX-${periodLabel}-${input.fracaoId.slice(0, 8)}-${now.getTime().toString(36)}`,
-      generatedFromJson: canonicalJson({
-        obligationIds,
-        ledgerEntryIds: entries.map((e) => e.id),
-        originalCents: balance.originalCents,
-        allocatedCents: balance.allocatedCents,
-        adjustmentCents: balance.adjustmentCents,
-        openCents: balance.openCents,
-      }),
-      createdAt: now,
-    })
-    .returning();
+      type: "financial_document.issued",
+      entityType: "financial_document",
+      entityId: doc!.id,
+      actor: input.actor,
+      after: { docType: FINANCIAL_DOC_TYPES.accountStatement, amountCents: balance.openCents },
+    });
 
-  await writeAudit(deps, {
-    tenantId: input.tenantId,
-    type: "financial_document.issued",
-    entityType: "financial_document",
-    entityId: doc!.id,
-    actor: input.actor,
-    after: { docType: FINANCIAL_DOC_TYPES.accountStatement, amountCents: balance.openCents },
-  });
-
-  return doc!;
+    return doc!;
+  } catch (err) {
+    if (!isUniqueConstraintError(err)) throw err;
+    const [again] = await deps.db.select().from(financialDocuments).where(existingWhere).limit(1);
+    if (again) return again;
+    throw err;
+  }
 }
 
 export async function listFinancialDocumentsForFracoes(

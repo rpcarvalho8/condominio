@@ -2,6 +2,8 @@
  * F3 portal Essencial — saldo Ledger + FinancialDocument, scoped à Membership.
  * Fail-closed: só Membership activa com fração; tenant da sessão.
  */
+import { and, eq } from "drizzle-orm";
+import { auditEvents } from "../../database/schema";
 import { AUDIT_TYPES } from "../../domain/audit";
 import { FINANCIAL_DOC_TYPES } from "../../domain/finance";
 import { DomainError } from "../../domain/errors";
@@ -149,14 +151,27 @@ export async function getPortalSaldo(
     fractions.push(await reconstructFracaoBalance(deps, { tenantId, fracaoId }));
   }
 
-  await recordPortalSignal(deps, {
-    tenantId,
-    type: AUDIT_TYPES.portalOpened,
-    entityType: "membership",
-    entityId: input.memberships.find((m) => m.fracaoId === fracaoIds[0])?.id ?? input.actor.personId,
-    actor: input.actor,
-    after: { fracaoIds, source: "ledger" },
-  });
+  const [alreadyOpened] = await deps.db
+    .select({ id: auditEvents.id })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.tenantId, tenantId),
+        eq(auditEvents.type, AUDIT_TYPES.portalOpened),
+        eq(auditEvents.actorPersonId, input.actor.personId),
+      ),
+    )
+    .limit(1);
+  if (!alreadyOpened) {
+    await recordPortalSignal(deps, {
+      tenantId,
+      type: AUDIT_TYPES.portalOpened,
+      entityType: "membership",
+      entityId: input.memberships.find((m) => m.fracaoId === fracaoIds[0])?.id ?? input.actor.personId,
+      actor: input.actor,
+      after: { fracaoIds, source: "ledger" },
+    });
+  }
 
   return { source: "ledger", fractions };
 }

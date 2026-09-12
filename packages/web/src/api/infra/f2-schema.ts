@@ -195,6 +195,9 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS financial_documents_notice_period_uq
     ON financial_documents (tenant_id, fracao_id, period_label)
     WHERE doc_type = 'PaymentNotice' AND fracao_id IS NOT NULL AND period_label IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS financial_documents_statement_period_uq
+    ON financial_documents (tenant_id, fracao_id, period_label)
+    WHERE doc_type = 'AccountStatement' AND fracao_id IS NOT NULL AND period_label IS NOT NULL`,
   `ALTER TABLE condo_bank_connections ADD COLUMN session_id TEXT`,
   `ALTER TABLE condo_bank_connections ADD COLUMN account_uid TEXT`,
   `ALTER TABLE condo_bank_connections ADD COLUMN consent_scopes TEXT`,

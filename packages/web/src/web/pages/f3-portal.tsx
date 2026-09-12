@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { authClient, clearToken, getToken } from "../lib/auth";
@@ -80,6 +80,10 @@ export default function F3PortalPage() {
     enabled: Boolean(session),
   });
 
+  useEffect(() => {
+    if (!isPending && !session) navigate("/login");
+  }, [isPending, session, navigate]);
+
   const firstFracaoId = saldo.data?.fractions[0]?.fracaoId ?? null;
   const statement = useMutation({
     mutationFn: () =>
@@ -135,7 +139,6 @@ export default function F3PortalPage() {
   }
 
   if (!session) {
-    navigate("/login");
     return null;
   }
 

@@ -2,7 +2,9 @@
  * Reconstructs fraction saldo / dívidas from the Ledger.
  * Never Quota.pago. Never Obligation.openAmountCents as source of truth.
  *
- * SoT (02-DOMINIO): Σ Obligation.amountCents − Σ Ledger credits (+ adjustments).
+ * SoT (02-DOMINIO): Σ Obligation.amountCents − (Σ allocations + Σ adjustments)
+ * em cêntimos com sinal do Ledger (crédito = +, débito = −).
+ * Um abate a crédito reduz dívida; um ajuste a débito aumenta.
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { constitutionFracoes, ledgerEntries, obligations } from "../../database/schema";
@@ -90,7 +92,7 @@ export async function reconstructFracaoBalance(
     .map((o) => {
       const allocatedCents = allocatedByOb.get(o.id) ?? 0;
       const adjustmentCents = adjustmentByOb.get(o.id) ?? 0;
-      const openCents = o.amountCents - allocatedCents + adjustmentCents;
+      const openCents = o.amountCents - allocatedCents - adjustmentCents;
       return {
         obligationId: o.id,
         kind: o.kind,

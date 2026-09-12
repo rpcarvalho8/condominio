@@ -26,6 +26,7 @@ import { confirmContactVerification, requestContactVerification } from "./applic
 import { getActivationPanel } from "./application/invitation/activation-panel";
 import {
   allocatePayment,
+  issueAccountStatement,
   issuePaymentNotice,
   issueReceiptForPayment,
   registerPayment,
@@ -34,7 +35,7 @@ import { reconstructFracaoBalance } from "./application/finance/f2-ledger-balanc
 import { processOutbox } from "./application/jobs/process-outbox";
 import { BUDGET_LINE_KINDS, INGEST_DOCUMENT_KINDS } from "./domain/constitution";
 import { AUDIT_TYPES } from "./domain/audit";
-import { PAYMENT_METHODS } from "./domain/finance";
+import { LEDGER_ENTRY_TYPES, PAYMENT_METHODS } from "./domain/finance";
 import { applyDomainKernelSchema } from "./infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "./infra/f1-schema";
 import { applyF2FinanceSchema } from "./infra/f2-schema";
@@ -295,6 +296,118 @@ describe("F3 portal — saldo Ledger + documentos", () => {
     expect(JSON.stringify(body)).not.toContain("pago");
   });
 
+  test("ajuste a crédito reduz dívida; ajuste a débito aumenta (sinal do Ledger)", async () => {
+    const { fracoes, obligations: obs } = await seedFracoesWithBudget(TENANT_A, ["A"]);
+    const fracao = fracoes[0]!;
+    const quota = obs.find((o) => o.fracaoId === fracao.id && o.kind === "quota_corrente") ?? obs[0]!;
+    const original = obs.filter((o) => o.fracaoId === fracao.id).reduce((s, o) => s + o.amountCents, 0);
+
+    async function insertAdjustment(opts: {
+      obligationId: string;
+      direction: "credit" | "debit";
+      amountCents: number;
+      sequence: number;
+    }) {
+      await deps.db.insert(schema.ledgerEntries).values({
+        id: crypto.randomUUID(),
+        tenantId: TENANT_A,
+        sequence: opts.sequence,
+        entryType: LEDGER_ENTRY_TYPES.adjustment,
+        createdAt: new Date(),
+        payloadJson: JSON.stringify({
+          amount_cents: opts.amountCents,
+          direction: opts.direction,
+          obligation_id: opts.obligationId,
+        }),
+        previousHash: "prev",
+        entryHash: `hash-adj-${opts.sequence}-${opts.direction}`,
+        algorithmVersion: "sha256-v1",
+        obligationId: opts.obligationId,
+        amountCents: opts.amountCents,
+        direction: opts.direction,
+      });
+    }
+
+    await insertAdjustment({
+      obligationId: quota.id,
+      direction: "credit",
+      amountCents: 5_000,
+      sequence: 1,
+    });
+    const afterCredit = await reconstructFracaoBalance(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+    });
+    expect(afterCredit.adjustmentCents).toBe(5_000);
+    expect(afterCredit.openCents).toBe(original - 5_000);
+
+    await insertAdjustment({
+      obligationId: quota.id,
+      direction: "debit",
+      amountCents: 3_000,
+      sequence: 2,
+    });
+    const afterDebit = await reconstructFracaoBalance(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+    });
+    expect(afterDebit.adjustmentCents).toBe(2_000);
+    expect(afterDebit.openCents).toBe(original - 2_000);
+    expect(afterDebit.openCents).not.toBe(original + 2_000);
+  });
+
+  test("extrato é idempotente por tenant+fração+período (duplo clique / corrida)", async () => {
+    const { fracoes } = await seedFracoesWithBudget(TENANT_A, ["A"]);
+    const fracao = fracoes[0]!;
+    await acceptOwnerForFracao({
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      email: "extrato@condo.test",
+      userId: "user-extrato",
+      name: "Extrato",
+    });
+    currentUser = { id: "user-extrato", email: "extrato@condo.test" };
+    deps.now = () => new Date("2026-09-12T10:00:00.000Z");
+
+    const first = await issueAccountStatement(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      periodLabel: "2026-09",
+    });
+    const second = await issueAccountStatement(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      periodLabel: "2026-09",
+    });
+    expect(second.id).toBe(first.id);
+
+    const [viaHttpA, viaHttpB] = await Promise.all([
+      app.request("/f3/portal/documents/account-statement", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fracaoId: fracao.id }),
+      }),
+      app.request("/f3/portal/documents/account-statement", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fracaoId: fracao.id }),
+      }),
+    ]);
+    expect(viaHttpA.status).toBeLessThan(300);
+    expect(viaHttpB.status).toBeLessThan(300);
+    const bodyA = (await viaHttpA.json()) as { document: { id: string } };
+    const bodyB = (await viaHttpB.json()) as { document: { id: string } };
+    expect(bodyA.document.id).toBe(first.id);
+    expect(bodyB.document.id).toBe(first.id);
+
+    const statements = (await deps.db.select().from(schema.financialDocuments)).filter(
+      (d) => d.docType === "AccountStatement",
+    );
+    expect(statements).toHaveLength(1);
+    expect(statements[0]!.periodLabel).toBe("2026-09");
+    expect(statements[0]!.fracaoId).toBe(fracao.id);
+  });
+
   test("lista e descarrega FinancialDocument da fração; extrato sob pedido com generated_from", async () => {
     const { fracoes, obligations: obs } = await seedFracoesWithBudget(TENANT_A, ["A"]);
     const fracao = fracoes[0]!;
@@ -363,9 +476,14 @@ describe("F3 portal — saldo Ledger + documentos", () => {
     const panel = await getActivationPanel(deps, { tenantId: TENANT_A });
     expect(panel.portalOpen).toBe(0);
     await app.request("/f3/portal/saldo");
+    await app.request("/f3/portal/saldo");
     const after = await getActivationPanel(deps, { tenantId: TENANT_A });
     expect(after.portalOpen).toBe(1);
     expect(after.documentsSeen).toBe(1);
+    const opened = (await deps.db.select().from(schema.auditEvents)).filter(
+      (a) => a.type === AUDIT_TYPES.portalOpened,
+    );
+    expect(opened).toHaveLength(1);
   });
 
   test("isolamento multi-tenant e AuthZ fail-closed", async () => {

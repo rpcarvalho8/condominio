@@ -73,10 +73,10 @@ Gestor (Membership Admin/PlatformAdmin):
 
 Portal condómino (Membership activa da fração):
 
-- `GET  /api/f3/portal/saldo` — saldo/dívidas por fração, `source: "ledger"`; AuditEvent `portal.opened`
+- `GET  /api/f3/portal/saldo` — saldo/dívidas por fração, `source: "ledger"`; `portal.opened` só na primeira abertura
 - `GET  /api/f3/portal/documents` — avisos / recibos / extratos da(s) fração(ões) da Membership
 - `GET  /api/f3/portal/documents/:id/download` — HTML rastreável (`generated_from`); AuditEvent `financial_document.seen`
-- `POST /api/f3/portal/documents/account-statement` `{ fracaoId? }` — extrato sob pedido a partir do Ledger
+- `POST /api/f3/portal/documents/account-statement` `{ fracaoId? }` — extrato sob pedido; idempotente por tenant+fração+período
 
 Público (token opaco; sem Membership):
 
