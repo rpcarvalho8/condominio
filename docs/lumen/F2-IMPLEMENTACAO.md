@@ -1,6 +1,6 @@
 # F2 — Estado de implementação (Finance Kernel slice)
 
-**Branch:** `cursor/f2-criterio-candidatos-jobs-reauth`  
+**Branch:** `cursor/f2-adversarial-tests-7156`  
 **Base documental:** `docs/lumen/06-FATIAS.md`, ADR-003, ADR-012, ADR-014, ADR-028, ADR-029
 
 ## Posição face ao plano
@@ -38,6 +38,7 @@ O plano (`06-FATIAS.md`) distingue:
 | Payments candidatos (CSV / reconciliação / identity-matrix) | ✅ | `identificado` ou `nao_alocado_pendente`; ingest transaccional + idempotente em conflito UNIQUE; match de nome por **tokens/palavras completas** (ANA ≠ JOANA/MARIANA); sem Allocation automática; sem `Quota.pago`; `POST /payments/candidates` rejeita `csvText` > 512k chars e `movements[]` > 500 |
 | Job avisos dia 1 (UTC) | ✅ | `GenerateMonthlyPaymentNotices` → `issuePaymentNotice` com montante = aberto restante |
 | Recibos na confirmação de Allocation + sweep | ✅ | Outbox `f2.issue_receipt` + `/jobs/receipt-sweep` |
+| Testes adversariais do kernel | ✅ | `test:f2-adversarial` — isolamento, concorrência, cash, AuthZ, reauth, identity, hash-chain, outbox |
 
 ## Critério F2 — o que fecha aqui vs o que fica
 
@@ -54,7 +55,7 @@ O plano (`06-FATIAS.md`) distingue:
 | UI admin | ❌ |
 | Portal saldo | F3 |
 | Dual-write / cutover `Quota.pago` | ❌ explicitamente fora |
-| Testes adversariais extra do Finance Kernel | ❌ explicitamente depois deste PR |
+| Testes adversariais extra do Finance Kernel | ✅ suite `test:f2-adversarial` (ver secção Adversariais) |
 
 ## Transplante Fonte (o que se reutilizou)
 
@@ -66,7 +67,24 @@ O plano (`06-FATIAS.md`) distingue:
 
 ```bash
 cd packages/web && bun run test:f1 && bun run test:f2
+# suite adversária isolada (já incluída em test:f2):
+cd packages/web && bun run test:f2-adversarial
 ```
+
+## Adversariais
+
+Suite: `packages/web/src/api/f2.adversarial.test.ts` — `bun run test:f2-adversarial` (também corre em `test:f2`). Extende o kernel existente; não introduz modelo financeiro paralelo. Enable Banking PSD2 continua fora (ordem §8).
+
+| Propriedade | Resultado | Como é demonstrado |
+|---|---|---|
+| Isolamento multi-tenant: A nunca lê/escreve payments / ledger / bank_connections / outbox de B | PASS | Allocate/recibo/fração/movimento cruzados → `not_found`; `listBankConnections` e HTTP GET só devolvem o IBAN do tenant; `external_ref` igual em A e B cria Payments distintos; jobs de outbox não se misturam; aviso mensal em A não cria documentos em B |
+| Concorrência: allocate + ingest candidatos em paralelo | PASS | Dois `allocatePayment` + dois `ingestCandidateMovement` (mesmo `external_ref`) em clientes libSQL distintos: sequences únicas, 1 payment/movimento por ref, `openAmountCents = 0` sem overspend |
+| Cash: Obligation **não** liquida em `registered`; Fiscalizacao ≠ registante; deposit exige movimento tenant-scoped | PASS | `open_amount` inalterado após `registered` e após verify; allocate → `cash_not_verified`; self-verify → `self_verify_forbidden`; deposit sem movimento / com movimento de B → erro; depósito só com movimento de A |
+| AuthZ: Owner / Fiscalizacao / sem membership → 403 nas rotas gestor | PASS | `/bank-connections` GET+POST, `/payments/candidates`, `/jobs/*` devolvem 403 para Owner, Fiscalizacao e Person sem membership |
+| Reauth: destination nunca IBAN; sem gestor → `admin@invalid` + `skipped`; com gestor → email real | PASS | Sem Admin: destino `admin@invalid`, status `skipped`; com Admin: email do gestor, `attempted`; nunca o IBAN PT… |
+| Identity: substring falsa (ANA ⊄ JOANA/MARIANA); caps csv/movements → 400 | PASS | `identityNameMatches` + ingest ANA não identifica; MARIANA SILVA identifica; HTTP `movements[]` > 500 e `csvText` > 512k → 400 |
+| Hash-chain: adulteração detetável via `ledger/validate` | PASS | Tamper de `payload_json` em A: `validateLedgerChain` + `POST /ledger/validate` → `ok: false`; cadeia de B intacta; A recusa novos payments (`ledger_chain_broken`) |
+| Idempotência outbox: retry de `notify.bank_reauth` / `f2.issue_receipt` | PASS | Sweep repetido não cria segundo job; reset do job `completed` → `pending` + `processOutbox` não duplica delivery nem Receipt |
 
 ## API (resumo)
 
