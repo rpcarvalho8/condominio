@@ -63,6 +63,8 @@ export type EnableBankingClient = {
     accountUid: string;
     dateFrom: string;
     dateTo: string;
+    /** IBANs da conta do condomínio — nunca persistir como contraparte. */
+    ownIbans?: Array<string | null | undefined>;
   }): Promise<EnableBankingTransaction[]>;
   revokeSession?(sessionId: string): Promise<void>;
 };
@@ -281,17 +283,17 @@ export function splitSyncDateChunks(
   return chunks.length ? chunks : [{ from: start.toISOString().slice(0, 10), to: end.toISOString().slice(0, 10) }];
 }
 
+/**
+ * Conta ASPSP da conta do condomínio (ADR-014).
+ * Fail-closed: sem IBAN preferido, ou sem match, devolve null — nunca `accounts[0]`.
+ */
 export function pickCondoAccount(
   accounts: EnableBankingAccount[],
   preferredIban?: string | null,
 ): EnableBankingAccount | null {
-  if (accounts.length === 0) return null;
   const want = normalizeIBAN(preferredIban);
-  if (want) {
-    const match = accounts.find((a) => normalizeIBAN(a.iban) === want);
-    if (match) return match;
-  }
-  return accounts.find((a) => a.iban) ?? accounts[0] ?? null;
+  if (!want) return null;
+  return accounts.find((a) => normalizeIBAN(a.iban) === want) ?? null;
 }
 
 export function defaultConsentValidUntil(now: Date, days = BANK_CONSENT_DAYS): Date {
@@ -376,7 +378,7 @@ export function createEnableBankingClientFromEnv(
       const raw = data?.transactions;
       const list = Array.isArray(raw) ? raw : [];
       return list
-        .map((tx) => mapEnableBankingTransaction(tx))
+        .map((tx) => mapEnableBankingTransaction(tx, { ownIbans: input.ownIbans }))
         .filter((tx): tx is EnableBankingTransaction => Boolean(tx));
     },
     async revokeSession(sessionId) {

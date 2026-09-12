@@ -18,7 +18,7 @@ O plano (`06-FATIAS.md`) distingue:
 - **Não substitui** o modelo Fonte `Quota.pago` / `routes/quotas` / `routes/bank.ts`. O kernel F2 coexiste; dual-write e cutover da Fonte são trabalho posterior.
 - Payments candidatos **nunca** marcam `Quota.pago=true` no caminho feliz (sync PSD2 ou CSV).
 - Hash-chain = deteção de adulteração (ADR-029), não imutabilidade absoluta.
-- `BankConnection` liga-se à **conta do condomínio** (IBAN + ASPSP + sessão Enable Banking), não à pessoa do admin (ADR-014). Sobrevive a troca de administrador.
+- `BankConnection` liga-se à **conta do condomínio** (IBAN + ASPSP + sessão Enable Banking), não à pessoa do admin (ADR-014). Sobrevive a troca de administrador. `POST /bank-connections/authorize` e `/f2/banking` exigem `accountIban` quando ainda não está persistido. No callback, `pickCondoAccount` é **fail-closed**: sem IBAN preferido ou sem match ASPSP → `DomainError`, sem persistir sessão (nunca `accounts[0]`).
 - UI admin = mínimo para exercitar a API (`/f2/banking`). Sem portal condómino (F3), atas/voto (F4–F6).
 
 ## O que está implementado
@@ -31,8 +31,8 @@ O plano (`06-FATIAS.md`) distingue:
 | `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | Mutex por tenant + `BEGIN IMMEDIATE` |
 | Aviso proactivo de reautorização | ✅ | Lead 14 dias; outbox `notify.bank_reauth`; destination = email do gestor, **nunca** IBAN; fallback `admin@invalid` + `skipped` |
 | Reauth PSD2 real | ✅ | `POST /bank-connections/authorize` + `/reauthorize` + `GET /bank/callback`; scopes persistidos; sessão/account_uid na conta do condomínio |
-| Sync Enable Banking → candidatos | ✅ | Créditos → `f2_bank_movements` + Payment (`candidate_source=enable_banking`); débitos só movimento; idempotente por `eb:{transaction_id}`; sem `Quota.pago` |
-| Falhas observáveis | ✅ | `last_error` sanitizado (sem JWT/PEM/Bearer); 401/403 → `reauthorization_required` + fallback CSV |
+| Sync Enable Banking → candidatos | ✅ | Créditos → `f2_bank_movements` + Payment (`candidate_source=enable_banking`); débitos só movimento; idempotente por `eb:{transaction_id}`; sem `Quota.pago`; `ownIbans` no mapping de produção (IBAN do condomínio nunca vaza como contraparte) |
+| Falhas observáveis | ✅ | `last_error` sanitizado (sem JWT/PEM/Bearer); callback OAuth redirecciona com código estável (`bank_error=consent_failed` / `account_mismatch` / …), nunca a mensagem do provider na URL; 401/403 → `reauthorization_required` + fallback CSV |
 | Jobs idempotentes | ✅ | Outbox `f2.bank_sync` (`f2:bank-sync:{tenant}:{connection}:{dia}`); calendário enfileira sync se sessão válida |
 | CSV fallback | ✅ | `POST /payments/candidates` com `csvText`; activo quando reauth / sessão em falta / last_error de auth |
 | Testes adversariais do kernel | ✅ | `test:f2-adversarial` — 8/8; AuthZ alargada às rotas PSD2 |
@@ -99,11 +99,11 @@ Suite: `packages/web/src/api/f2.adversarial.test.ts` — `bun run test:f2-advers
 - `POST /api/f2/periods/close`
 - `POST /api/f2/documents/payment-notice`
 - `POST /api/f2/bank-connections` / `GET /api/f2/bank-connections` — vista pública (sem `session_id`)
-- `POST /api/f2/bank-connections/authorize` — inicia consentimento ASPSP (`psu_type: business`)
-- `POST /api/f2/bank-connections/reauthorize` — reauth real (aviso proactivo continua a coexistir)
+- `POST /api/f2/bank-connections/authorize` — inicia consentimento ASPSP (`psu_type: business`). **`accountIban` obrigatório** se a BankConnection do tenant ainda não tiver IBAN do condomínio (400 `bank_account_iban_required`)
+- `POST /api/f2/bank-connections/reauthorize` — reauth real (aviso proactivo continua a coexistir); reutiliza o IBAN persistido
 - `POST /api/f2/bank-connections/revoke`
-- `POST /api/f2/bank-connections/sync` — movimentos + candidatos; `skipped` + `fallback: csv` quando a sessão não serve
-- `GET /api/f2/bank/callback` — OAuth Enable Banking (sem membership; `state` tenant-scoped)
+- `POST /api/f2/bank-connections/sync` — movimentos + candidatos; `skipped` + `fallback: csv` quando a sessão não serve; mapping recebe `ownIbans`
+- `GET /api/f2/bank/callback` — OAuth Enable Banking (sem membership; `state` tenant-scoped). Sucesso: `?bank_connected=1`. Erro: `?bank_error=<código>` estável (`consent_failed`, `consent_denied`, `account_mismatch`, `account_iban_required`, …). Detalhe sanitizado só em `last_error` / logs / UI após refetch
 - `POST /api/f2/jobs/reauth-notices`
 - `POST /api/f2/jobs/bank-sync` — outbox idempotente
 - `POST /api/f2/jobs/monthly-notices`

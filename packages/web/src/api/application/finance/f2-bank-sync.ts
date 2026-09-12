@@ -12,6 +12,7 @@ import {
   CANDIDATE_SOURCES,
 } from "../../domain/finance";
 import { DomainError } from "../../domain/errors";
+import { normalizeIBAN } from "../../lib/iban";
 import { OUTBOX_JOB_TYPES } from "../../domain/outbox";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
@@ -70,6 +71,81 @@ function requireConfiguredClient(deps: KernelDeps): EnableBankingClient {
 
 function encodeConsentState(state: BankConsentState): string {
   return Buffer.from(JSON.stringify(state), "utf8").toString("base64url");
+}
+
+/** Código curto e estável para redirects OAuth — nunca a mensagem de domínio na URL. */
+export function publicBankConsentErrorCode(err: unknown): string {
+  if (err instanceof DomainError) {
+    switch (err.code) {
+      case "bank_account_iban_required":
+        return "account_iban_required";
+      case "bank_account_iban_mismatch":
+        return "account_mismatch";
+      case "bank_consent_denied":
+        return "consent_denied";
+      case "bank_consent_no_code":
+        return "no_code";
+      case "bank_consent_invalid_state":
+        return "invalid_state";
+      case "bank_consent_tenant_mismatch":
+        return "tenant_mismatch";
+      case "enable_banking_not_configured":
+        return "not_configured";
+      default:
+        return "consent_failed";
+    }
+  }
+  return "consent_failed";
+}
+
+function requireCondoIban(
+  requested?: string | null,
+  stored?: string | null,
+): string {
+  const preferred = normalizeIBAN(requested) ?? normalizeIBAN(stored);
+  if (!preferred) {
+    throw new DomainError(
+      "bank_account_iban_required",
+      "IBAN da conta do condomínio é obrigatório para autorizar o ASPSP (ADR-014)",
+      400,
+    );
+  }
+  return preferred;
+}
+
+function condoOwnIbans(row: BankConnectionRow): string[] {
+  const own = new Set<string>();
+  const preferred = normalizeIBAN(row.accountIban);
+  if (preferred) own.add(preferred);
+  if (!row.accountsJson?.trim()) return [...own];
+  try {
+    const parsed = JSON.parse(row.accountsJson) as unknown;
+    const list = Array.isArray(parsed) ? parsed : [];
+    for (const item of list) {
+      const rec = item && typeof item === "object" ? (item as { iban?: unknown }) : null;
+      const iban = normalizeIBAN(typeof rec?.iban === "string" ? rec.iban : null);
+      if (iban && (!preferred || iban === preferred)) own.add(iban);
+    }
+  } catch {
+    /* accounts_json malformado — o IBAN persistido continua a valer */
+  }
+  return [...own];
+}
+
+function withoutOwnCounterparty(
+  tx: EnableBankingTransaction,
+  ownIbans: Iterable<string>,
+): EnableBankingTransaction {
+  const own = new Set(
+    [...ownIbans]
+      .map((iban) => normalizeIBAN(iban))
+      .filter((iban): iban is string => Boolean(iban)),
+  );
+  const counterparty = normalizeIBAN(tx.counterpartyIban);
+  if (counterparty && own.has(counterparty)) {
+    return { ...tx, counterpartyIban: null };
+  }
+  return tx;
 }
 
 export function decodeConsentState(raw: string | null | undefined): BankConsentState | null {
@@ -243,12 +319,13 @@ export async function startBankConsent(
       409,
     );
   }
+  const accountIban = requireCondoIban(input.accountIban, existing?.accountIban);
 
   const row = await upsertBankConnection(deps, {
     tenantId: input.tenantId,
     provider: "enable_banking",
     aspsp,
-    accountIban: input.accountIban ?? existing?.accountIban ?? null,
+    accountIban,
     consentStatus: input.reauthorize
       ? BANK_CONSENT_STATUS.reauthorizationRequired
       : existing?.consentStatus === BANK_CONSENT_STATUS.authorized
@@ -382,12 +459,31 @@ export async function completeBankConsent(
     throw new DomainError("bank_consent_invalid_state", "state de consentimento não reconhecido", 400);
   }
 
+  const preferredIban = normalizeIBAN(row.accountIban);
+  if (!preferredIban) {
+    const err = new DomainError(
+      "bank_account_iban_required",
+      "BankConnection sem IBAN do condomínio — recusa fail-closed (ADR-014)",
+      400,
+    );
+    await upsertBankConnection(deps, {
+      tenantId: parsed.tenantId,
+      lastError: sanitizeBankError(err),
+      consentStatus: BANK_CONSENT_STATUS.reauthorizationRequired,
+    });
+    throw err;
+  }
+
   const client = requireConfiguredClient(deps);
   try {
     const session = await client.exchangeCode(input.code.trim());
-    const account = pickCondoAccount(session.accounts, row.accountIban);
+    const account = pickCondoAccount(session.accounts, preferredIban);
     if (!account) {
-      throw new DomainError("bank_account_missing", "Sessão ASPSP sem conta do condomínio", 400);
+      throw new DomainError(
+        "bank_account_iban_mismatch",
+        "Nenhuma conta ASPSP corresponde ao IBAN do condomínio",
+        400,
+      );
     }
     const validUntil = session.accessValidUntil
       ? new Date(session.accessValidUntil)
@@ -395,7 +491,7 @@ export async function completeBankConsent(
     const updated = await upsertBankConnection(deps, {
       tenantId: parsed.tenantId,
       aspsp: row.aspsp,
-      accountIban: account.iban ?? row.accountIban,
+      accountIban: preferredIban,
       consentStatus: BANK_CONSENT_STATUS.authorized,
       consentValidUntil: validUntil,
       sessionId: session.sessionId,
@@ -524,6 +620,7 @@ export async function syncBankConnection(
   }
 
   const client = requireConfiguredClient(deps);
+  const ownIbans = condoOwnIbans(row);
   const dateTo = input.dateTo ? new Date(input.dateTo) : now;
   const dateFrom = input.dateFrom
     ? new Date(input.dateFrom)
@@ -540,8 +637,9 @@ export async function syncBankConnection(
         accountUid: row.accountUid,
         dateFrom: chunk.from,
         dateTo: chunk.to,
+        ownIbans,
       });
-      transactions.push(...page);
+      transactions.push(...page.map((tx) => withoutOwnCounterparty(tx, ownIbans)));
     } catch (err) {
       syncErrors.push(sanitizeBankError(err));
     }

@@ -50,7 +50,11 @@ import {
   startBankReauthorization,
   syncBankConnection,
 } from "./application/finance/f2-bank-sync";
-import type { EnableBankingClient, EnableBankingTransaction } from "./application/finance/enable-banking-adapter";
+import {
+  mapEnableBankingTransaction,
+  type EnableBankingClient,
+  type EnableBankingTransaction,
+} from "./application/finance/enable-banking-adapter";
 import { OUTBOX_JOB_TYPES } from "./domain/outbox";
 import {
   generateMonthlyPaymentNotices,
@@ -1519,7 +1523,10 @@ describe("F2 Enable Banking PSD2", () => {
         "Enable Banking API 401: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ4In0.signature",
       ),
     });
-    const started = await startBankConsent(deps, { tenantId: TENANT });
+    const started = await startBankConsent(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+    });
     const state = new URL(started.authorizationUrl).searchParams.get("state");
     await completeBankConsent(deps, { code: "ok-code", state });
 
@@ -1549,7 +1556,10 @@ describe("F2 Enable Banking PSD2", () => {
     await seedFracaoWithObligations();
     await seedConfirmedOwner("A", "Maria Silva");
     deps.enableBanking = mockEnableBanking();
-    const started = await startBankConsent(deps, { tenantId: TENANT });
+    const started = await startBankConsent(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+    });
     const state = new URL(started.authorizationUrl).searchParams.get("state");
     await completeBankConsent(deps, { code: "ok-code", state });
 
@@ -1579,7 +1589,10 @@ describe("F2 Enable Banking PSD2", () => {
     const otherTenant = "tenant-f2-other";
     const otherDeps = { ...deps, getTenantId: () => otherTenant };
     otherDeps.enableBanking = mockEnableBanking();
-    const otherStart = await startBankConsent(otherDeps, { tenantId: otherTenant });
+    const otherStart = await startBankConsent(otherDeps, {
+      tenantId: otherTenant,
+      accountIban: "PT50001800034978380602065",
+    });
     const otherState = new URL(otherStart.authorizationUrl).searchParams.get("state");
     await completeBankConsent(otherDeps, { code: "ok-other", state: otherState });
     await syncBankConnection(otherDeps, { tenantId: otherTenant });
@@ -1621,7 +1634,10 @@ describe("F2 Enable Banking PSD2", () => {
     const authRes = await app.request("/f2/bank-connections/authorize", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ aspsp: "Mock ASPSP" }),
+      body: JSON.stringify({
+        aspsp: "Mock ASPSP",
+        accountIban: "PT50001800034978380602065",
+      }),
     });
     expect(authRes.status).toBe(201);
     const authBody = (await authRes.json()) as { authorizationUrl: string };
@@ -1640,6 +1656,182 @@ describe("F2 Enable Banking PSD2", () => {
     const syncBody = (await syncRes.json()) as { created: number; skipped: boolean };
     expect(syncBody.skipped).toBe(false);
     expect(syncBody.created).toBeGreaterThan(0);
+  });
+
+  test("authorize sem IBAN do condomínio → 400", async () => {
+    const admin = await seedActor({
+      userId: "user-admin-iban-required",
+      roleCode: "Admin",
+      name: "Admin IBAN",
+      email: "admin-iban-required@test",
+    });
+    currentUser = { id: admin.userId!, email: "admin-iban-required@test" };
+    deps.enableBanking = mockEnableBanking();
+
+    const authRes = await app.request("/f2/bank-connections/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ aspsp: "Mock ASPSP" }),
+    });
+    expect(authRes.status).toBe(400);
+    const body = (await authRes.json()) as { message: string };
+    expect(body.message).toMatch(/IBAN/);
+
+    await expect(startBankConsent(deps, { tenantId: TENANT })).rejects.toMatchObject({
+      code: "bank_account_iban_required",
+      httpStatus: 400,
+    });
+    const rows = await listBankConnections(deps, TENANT);
+    expect(rows.length).toBe(0);
+
+    await upsertBankConnection(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+    });
+    const reused = await app.request("/f2/bank-connections/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ aspsp: "Mock ASPSP" }),
+    });
+    expect(reused.status).toBe(201);
+  });
+
+  test("callback com IBAN preferido ausente da sessão falha e não persiste sessão", async () => {
+    deps.enableBanking = mockEnableBanking({ iban: "PT50000201231234567890154" });
+    const started = await startBankConsent(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+    });
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    await expect(completeBankConsent(deps, { code: "ok-code", state })).rejects.toMatchObject({
+      code: "bank_account_iban_mismatch",
+      httpStatus: 400,
+    });
+    const [row] = await listBankConnections(deps, TENANT);
+    expect(row!.sessionId).toBeNull();
+    expect(row!.accountUid).toBeNull();
+    expect(row!.consentStatus).toBe(BANK_CONSENT_STATUS.reauthorizationRequired);
+    expect(row!.lastError).toBeTruthy();
+    expect(String(row!.lastError)).toMatch(/IBAN/i);
+  });
+
+  test("callback sem IBAN preferido falha fechado e não persiste sessão", async () => {
+    deps.enableBanking = mockEnableBanking();
+    const started = await startBankConsent(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+    });
+    await upsertBankConnection(deps, { tenantId: TENANT, accountIban: null });
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    await expect(completeBankConsent(deps, { code: "ok-code", state })).rejects.toMatchObject({
+      code: "bank_account_iban_required",
+      httpStatus: 400,
+    });
+    const [row] = await listBankConnections(deps, TENANT);
+    expect(row!.sessionId).toBeNull();
+    expect(row!.accountUid).toBeNull();
+    expect(row!.accountIban).toBeNull();
+  });
+
+  test("sync/mapping remove o IBAN do condomínio da contraparte", async () => {
+    const condoIban = "PT50003501234567890123451";
+    const payerIban = "PT50000201231234567890154";
+    let seenOwnIbans: Array<string | null | undefined> | undefined;
+    deps.enableBanking = {
+      ...mockEnableBanking({ iban: condoIban }),
+      listTransactions: async (input) => {
+        seenOwnIbans = input.ownIbans;
+        const fromRaw = mapEnableBankingTransaction(
+          {
+            transaction_id: "eb-own-map",
+            credit_debit_indicator: "CRDT",
+            booking_date: "2026-09-01",
+            remittance_information: ["TRF CRED"],
+            transaction_amount: { amount: "40.00", currency: "EUR" },
+            debtor: { name: "CONTA PROPRIA" },
+            debtor_account: { iban: condoIban },
+          },
+          { ownIbans: input.ownIbans },
+        );
+        return [
+          fromRaw!,
+          {
+            transactionId: "eb-own-leak",
+            amountCents: 30_00,
+            bookedAt: new Date("2026-09-03T00:00:00.000Z"),
+            description: "TRF CRED",
+            debtorName: "PAGADOR",
+            counterpartyIban: condoIban,
+            creditDebit: "CRDT",
+          },
+          {
+            transactionId: "eb-payer",
+            amountCents: 25_00,
+            bookedAt: new Date("2026-09-04T00:00:00.000Z"),
+            description: "TRF CRED SEPA+ DE MARIA SILVA",
+            debtorName: "MARIA SILVA",
+            counterpartyIban: payerIban,
+            creditDebit: "CRDT",
+          },
+        ];
+      },
+    };
+
+    const started = await startBankConsent(deps, { tenantId: TENANT, accountIban: condoIban });
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    await completeBankConsent(deps, { code: "ok-code", state });
+
+    const synced = await syncBankConnection(deps, { tenantId: TENANT });
+    expect(synced.skipped).toBe(false);
+    expect(synced.created).toBe(3);
+    expect(seenOwnIbans).toContain(condoIban);
+
+    const movs = await client.execute(
+      `SELECT external_ref, counterparty_iban FROM f2_bank_movements WHERE tenant_id = ?`,
+      [TENANT],
+    );
+    const byRef = Object.fromEntries(
+      movs.rows.map((r) => [String(r.external_ref), r.counterparty_iban]),
+    );
+    expect(byRef["eb:eb-own-map"]).toBeNull();
+    expect(byRef["eb:eb-own-leak"]).toBeNull();
+    expect(byRef["eb:eb-payer"]).toBe(payerIban);
+  });
+
+  test("callback OAuth usa código estável na URL e detalhe só em last_error", async () => {
+    deps.enableBanking = mockEnableBanking({ iban: "PT50000201231234567890154" });
+    const started = await startBankConsent(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+    });
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    const providerMessage = "access_denied: Bearer eyJhbGciOiJSUzI1NiJ9.payload.sig detalhe-sensivel";
+
+    const denied = await app.request(
+      `/f2/bank/callback?error=${encodeURIComponent(providerMessage)}&state=${encodeURIComponent(state!)}`,
+    );
+    expect(denied.status).toBe(302);
+    expect(denied.headers.get("location")).toBe("/f2/banking?bank_error=consent_denied");
+    expect(denied.headers.get("location")).not.toContain("access_denied");
+    expect(denied.headers.get("location")).not.toContain("eyJ");
+    expect(denied.headers.get("location")).not.toContain("detalhe-sensivel");
+    expect(denied.headers.get("location")).not.toContain(encodeURIComponent(providerMessage));
+
+    const [afterDenied] = await listBankConnections(deps, TENANT);
+    expect(afterDenied!.lastError).toBeTruthy();
+    expect(String(afterDenied!.lastError)).not.toContain("eyJ");
+    expect(afterDenied!.sessionId).toBeNull();
+
+    const mismatch = await app.request(
+      `/f2/bank/callback?code=ok-code&state=${encodeURIComponent(state!)}`,
+    );
+    expect(mismatch.status).toBe(302);
+    expect(mismatch.headers.get("location")).toBe("/f2/banking?bank_error=account_mismatch");
+    expect(mismatch.headers.get("location")).not.toMatch(/Nenhuma|corresponde|detalhe/i);
+
+    const [afterMismatch] = await listBankConnections(deps, TENANT);
+    expect(afterMismatch!.sessionId).toBeNull();
+    expect(afterMismatch!.lastError).toBeTruthy();
   });
 });
 

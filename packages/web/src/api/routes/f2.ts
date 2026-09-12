@@ -25,6 +25,7 @@ import {
 import {
   completeBankConsent,
   enqueueBankSyncJob,
+  publicBankConsentErrorCode,
   revokeBankConnection,
   startBankConsent,
   startBankReauthorization,
@@ -102,7 +103,8 @@ export function createF2Routes(deps: KernelDeps) {
         return c.redirect("/f2/banking?bank_connected=1");
       } catch (err) {
         const mapped = httpError(err);
-        return c.redirect(`/f2/banking?bank_error=${encodeURIComponent(mapped.message)}`);
+        console.error("[f2/bank/callback]", mapped.status, publicBankConsentErrorCode(err));
+        return c.redirect(`/f2/banking?bank_error=${publicBankConsentErrorCode(err)}`);
       }
     })
     .use(requireMembership)

@@ -43,15 +43,28 @@ function statusBadge(status: string): "green" | "amber" | "red" | "muted" {
   return "muted";
 }
 
+const BANK_ERROR_FLASH: Record<string, string> = {
+  consent_failed: "Consentimento ASPSP falhou. Ver last_error na ligação.",
+  consent_denied: "Consentimento ASPSP recusado. Ver last_error na ligação.",
+  no_code: "Callback sem código de autorização.",
+  invalid_state: "Estado de consentimento inválido.",
+  tenant_mismatch: "Consentimento não pertence a este condomínio.",
+  account_mismatch: "Nenhuma conta ASPSP corresponde ao IBAN do condomínio.",
+  account_iban_required: "IBAN da conta do condomínio é obrigatório.",
+  not_configured: "Enable Banking não está configurado no servidor.",
+};
+
 export default function F2BankingPage() {
   const qc = useQueryClient();
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const [csvText, setCsvText] = useState("");
+  const [accountIban, setAccountIban] = useState("");
+  const errorCode = params.get("bank_error");
   const flash =
     params.get("bank_connected") === "1"
       ? "Consentimento ASPSP concluído."
-      : params.get("bank_error")
-        ? params.get("bank_error")
+      : errorCode
+        ? (BANK_ERROR_FLASH[errorCode] ?? "Consentimento ASPSP falhou. Ver last_error na ligação.")
         : null;
 
   const { data } = useQuery({
@@ -59,9 +72,18 @@ export default function F2BankingPage() {
     queryFn: () => f2Fetch<{ connections: PublicBankConnection[] }>("/bank-connections"),
   });
   const connection = data?.connections[0] ?? null;
+  const ibanToAuthorize = accountIban.trim() || connection?.accountIban || "";
 
   const authorize = useMutation({
-    mutationFn: () => f2Fetch<{ authorizationUrl: string }>("/bank-connections/authorize", { method: "POST", body: "{}" }),
+    mutationFn: () => {
+      if (!ibanToAuthorize) {
+        throw new Error("IBAN da conta do condomínio é obrigatório");
+      }
+      return f2Fetch<{ authorizationUrl: string }>("/bank-connections/authorize", {
+        method: "POST",
+        body: JSON.stringify({ accountIban: ibanToAuthorize }),
+      });
+    },
     onSuccess: (body) => {
       window.location.href = body.authorizationUrl;
     },
@@ -104,6 +126,21 @@ export default function F2BankingPage() {
             {connection && <Badge variant={statusBadge(connection.consentStatus)}>{connection.consentStatus}</Badge>}
           </CardHeader>
           <CardContent className="space-y-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+            <label className="block space-y-1">
+              <span>IBAN da conta do condomínio (obrigatório na primeira autorização)</span>
+              <input
+                value={accountIban}
+                onChange={(e) => setAccountIban(e.target.value)}
+                className="w-full rounded-md border px-3 py-2 text-sm font-mono"
+                style={{
+                  background: "var(--bg-secondary)",
+                  borderColor: "var(--border-strong)",
+                  color: "var(--text-primary)",
+                }}
+                placeholder={connection?.accountIban ?? "PT50…"}
+                autoComplete="off"
+              />
+            </label>
             {connection ? (
               <>
                 <p>ASPSP: {connection.aspsp ?? "—"}</p>
@@ -122,7 +159,12 @@ export default function F2BankingPage() {
               <p>Ainda não há ligação à conta do condomínio.</p>
             )}
             <div className="flex flex-wrap gap-2 pt-2">
-              <Button size="sm" onClick={() => authorize.mutate()} loading={authorize.isPending}>
+              <Button
+                size="sm"
+                onClick={() => authorize.mutate()}
+                loading={authorize.isPending}
+                disabled={!ibanToAuthorize}
+              >
                 Autorizar ASPSP
               </Button>
               <Button

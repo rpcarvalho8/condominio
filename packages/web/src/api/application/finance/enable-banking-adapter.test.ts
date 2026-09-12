@@ -22,6 +22,18 @@ describe("Enable Banking adapter", () => {
     expect(picked?.uid).toBe("acc-condo");
   });
 
+  test("pickCondoAccount falha fechado sem IBAN preferido ou sem match", () => {
+    const accounts = [
+      { uid: "acc-other", iban: "PT50000201231234567890154", currency: "EUR" },
+      { uid: "acc-condo", iban: "PT50001800034978380602065", currency: "EUR" },
+    ];
+    expect(pickCondoAccount(accounts, null)).toBeNull();
+    expect(pickCondoAccount(accounts, undefined)).toBeNull();
+    expect(pickCondoAccount(accounts, "")).toBeNull();
+    expect(pickCondoAccount(accounts, "PT50003501234567890123451")).toBeNull();
+    expect(pickCondoAccount([], "PT50001800034978380602065")).toBeNull();
+  });
+
   test("mapeia crédito Enable Banking sem gravar o IBAN do condomínio como contraparte", () => {
     const tx = mapEnableBankingTransaction(
       {
@@ -43,6 +55,23 @@ describe("Enable Banking adapter", () => {
       debtorName: "MARIA SILVA",
       counterpartyIban: "PT50000201231234567890154",
     });
+  });
+
+  test("ownIbans impede o IBAN do condomínio (não hardcoded) de vazar como contraparte", () => {
+    const condoIban = "PT50003501234567890123451";
+    const raw = {
+      transaction_id: "eb-own",
+      credit_debit_indicator: "CRDT",
+      booking_date: "2026-09-01",
+      remittance_information: ["TRF CRED"],
+      transaction_amount: { amount: "50.00", currency: "EUR" },
+      debtor: { name: "CONTA PROPRIA" },
+      debtor_account: { iban: condoIban },
+    };
+    const leaked = mapEnableBankingTransaction(raw);
+    expect(leaked?.counterpartyIban).toBe(condoIban);
+    const stripped = mapEnableBankingTransaction(raw, { ownIbans: [condoIban] });
+    expect(stripped?.counterpartyIban).toBeNull();
   });
 
   test("sanitizeBankError remove JWT, PEM e Bearer", () => {
