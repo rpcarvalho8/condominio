@@ -32,6 +32,7 @@ import { canVerifyCash } from "../../domain/roles";
 import { kernelNow, type KernelDb, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
+import { reconstructFracaoBalance } from "./f2-ledger-balance";
 
 type Actor = {
   personId?: string | null;
@@ -1374,4 +1375,98 @@ export async function issueReceiptForPayment(
     if (again) return again;
     throw err;
   }
+}
+
+/** Extrato sob pedido — representação imutável reconstruída do Ledger (ADR-015). */
+export async function issueAccountStatement(
+  deps: KernelDeps,
+  input: { tenantId: string; fracaoId: string; periodLabel?: string | null; actor?: Actor },
+) {
+  const balance = await reconstructFracaoBalance(deps, {
+    tenantId: input.tenantId,
+    fracaoId: input.fracaoId,
+  });
+  const now = kernelNow(deps);
+  const periodLabel =
+    input.periodLabel?.trim() ||
+    `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
+  const obligationIds = balance.debts.map((d) => d.obligationId);
+  const entries =
+    obligationIds.length === 0
+      ? []
+      : await deps.db
+          .select({ id: ledgerEntries.id })
+          .from(ledgerEntries)
+          .where(
+            and(
+              eq(ledgerEntries.tenantId, input.tenantId),
+              inArray(ledgerEntries.obligationId, obligationIds),
+            ),
+          );
+
+  const [doc] = await deps.db
+    .insert(financialDocuments)
+    .values({
+      id: crypto.randomUUID(),
+      tenantId: input.tenantId,
+      fracaoId: input.fracaoId,
+      docType: FINANCIAL_DOC_TYPES.accountStatement,
+      periodLabel,
+      issuedAt: now,
+      amountCents: balance.openCents,
+      status: "issued",
+      documentNumber: `EX-${periodLabel}-${input.fracaoId.slice(0, 8)}-${now.getTime().toString(36)}`,
+      generatedFromJson: canonicalJson({
+        obligationIds,
+        ledgerEntryIds: entries.map((e) => e.id),
+        originalCents: balance.originalCents,
+        allocatedCents: balance.allocatedCents,
+        adjustmentCents: balance.adjustmentCents,
+        openCents: balance.openCents,
+      }),
+      createdAt: now,
+    })
+    .returning();
+
+  await writeAudit(deps, {
+    tenantId: input.tenantId,
+    type: "financial_document.issued",
+    entityType: "financial_document",
+    entityId: doc!.id,
+    actor: input.actor,
+    after: { docType: FINANCIAL_DOC_TYPES.accountStatement, amountCents: balance.openCents },
+  });
+
+  return doc!;
+}
+
+export async function listFinancialDocumentsForFracoes(
+  deps: KernelDeps,
+  input: { tenantId: string; fracaoIds: string[] },
+) {
+  if (input.fracaoIds.length === 0) return [];
+  return deps.db
+    .select()
+    .from(financialDocuments)
+    .where(
+      and(
+        eq(financialDocuments.tenantId, input.tenantId),
+        inArray(financialDocuments.fracaoId, input.fracaoIds),
+      ),
+    );
+}
+
+export async function getFinancialDocumentInTenant(
+  deps: KernelDeps,
+  input: { tenantId: string; documentId: string },
+) {
+  const [doc] = await deps.db
+    .select()
+    .from(financialDocuments)
+    .where(
+      and(eq(financialDocuments.id, input.documentId), eq(financialDocuments.tenantId, input.tenantId)),
+    )
+    .limit(1);
+  return doc ?? null;
 }

@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { auditEvents } from "../../database/schema";
 import type { AppendAuditEventInput, AuditEvent } from "../../domain/audit";
 import type { KernelDb } from "../kernel-deps";
@@ -65,6 +65,23 @@ export function createAuditEventRepo(db: KernelDb) {
         .where(eq(auditEvents.entityId, entityId))
         .orderBy(desc(auditEvents.createdAt));
       return rows.filter((r) => r.entityType === entityType).map(mapEvent);
+    },
+    /** Distinct persons (or users) who produced a given audit type in the tenant. */
+    async countDistinctActorsByTypes(tenantId: string, types: string[]): Promise<number> {
+      if (types.length === 0) return 0;
+      const rows = await db
+        .select({
+          actorPersonId: auditEvents.actorPersonId,
+          actorUserId: auditEvents.actorUserId,
+        })
+        .from(auditEvents)
+        .where(and(eq(auditEvents.tenantId, tenantId), inArray(auditEvents.type, types)));
+      const keys = new Set<string>();
+      for (const row of rows) {
+        const key = row.actorPersonId || row.actorUserId;
+        if (key) keys.add(key);
+      }
+      return keys.size;
     },
   };
 }

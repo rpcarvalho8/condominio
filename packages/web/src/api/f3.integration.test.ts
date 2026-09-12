@@ -598,9 +598,10 @@ describe("F3 Invitation — AuthZ HTTP", () => {
 
     const panel = await app.request("/f3/activation");
     expect(panel.status).toBe(200);
-    const panelBody = (await panel.json()) as { invited: number; portalOpen: null };
+    const panelBody = (await panel.json()) as { invited: number; portalOpen: number; documentsSeen: number };
     expect(panelBody.invited).toBeGreaterThanOrEqual(2);
-    expect(panelBody.portalOpen).toBeNull();
+    expect(panelBody.portalOpen).toBe(0);
+    expect(panelBody.documentsSeen).toBe(0);
   });
 
   test("fluxo público HTTP: verify + accept sem QR", async () => {

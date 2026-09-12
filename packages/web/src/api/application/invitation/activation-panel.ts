@@ -8,7 +8,9 @@ import {
   maskContact,
   type InvitationStatus,
 } from "../../domain/invitation";
+import { AUDIT_TYPES } from "../../domain/audit";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
+import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createInvitationRepo } from "../../infra/repos/invitation-repo";
 import type { InvitationActor } from "./create-invitation";
 
@@ -30,9 +32,10 @@ export type ActivationPanel = {
   revoked: number;
   expired: number;
   accounts: number;
-  /** Portal saldo Ledger — follow-up (F2 fiável + portal). */
-  portalOpen: number | null;
-  documentsSeen: number | null;
+  /** Condóminos com Membership que abriram o portal (saldo Ledger). */
+  portalOpen: number;
+  /** Condóminos que descarregaram um FinancialDocument. */
+  documentsSeen: number;
   preview: ActivationPreviewRow[];
 };
 
@@ -97,8 +100,12 @@ export async function getActivationPanel(
     revoked: counts.revoked,
     expired: counts.expired,
     accounts: counts.accepted,
-    portalOpen: null,
-    documentsSeen: null,
+    portalOpen: await createAuditEventRepo(deps.db).countDistinctActorsByTypes(tenantId, [
+      AUDIT_TYPES.portalOpened,
+    ]),
+    documentsSeen: await createAuditEventRepo(deps.db).countDistinctActorsByTypes(tenantId, [
+      AUDIT_TYPES.financialDocumentSeen,
+    ]),
     preview,
   };
 }

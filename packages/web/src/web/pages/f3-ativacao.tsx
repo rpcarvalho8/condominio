@@ -36,8 +36,8 @@ type ActivationPanel = {
   revoked: number;
   expired: number;
   accounts: number;
-  portalOpen: number | null;
-  documentsSeen: number | null;
+  portalOpen: number;
+  documentsSeen: number;
   preview: PreviewRow[];
 };
 
@@ -126,12 +126,13 @@ export default function F3AtivacaoPage() {
         subtitle="Convites individuais ou em lote — nunca automáticos a partir de OCR. Sem QR físico."
       />
       <div className="p-6 space-y-4 max-w-5xl">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           {[
             ["Convidados", panel.data?.invited ?? 0],
             ["Pendentes", panel.data?.pending ?? 0],
             ["Contas", panel.data?.accounts ?? 0],
-            ["Portal / docs", "follow-up"],
+            ["Portal aberto", panel.data?.portalOpen ?? 0],
+            ["Docs vistos", panel.data?.documentsSeen ?? 0],
           ].map(([label, value]) => (
             <Card key={String(label)}>
               <CardContent className="p-4">
