@@ -171,6 +171,18 @@ describe("spike iOS push", () => {
     expect(v.isIos).toBe(false);
   });
 
+  test("probeNetworkOnline falha fechado sem rede e não usa cache", async () => {
+    const { probeNetworkOnline } = await import("./pwa");
+    expect(await probeNetworkOnline(async () => new Response("ok", { status: 200 }), true)).toBe(true);
+    expect(await probeNetworkOnline(async () => new Response("no", { status: 503 }), true)).toBe(false);
+    expect(
+      await probeNetworkOnline(() => {
+        throw new TypeError("Failed to fetch");
+      }, true),
+    ).toBe(false);
+    expect(await probeNetworkOnline(async () => new Response("ok"), false)).toBe(false);
+  });
+
   test("iPadOS desktop UA conta como iOS", () => {
     expect(isIosDevice("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "MacIntel", 5)).toBe(true);
     expect(compareVersion({ major: 16, minor: 4 }, { major: 16, minor: 3 })).toBeGreaterThan(0);

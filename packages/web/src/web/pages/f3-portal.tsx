@@ -3,6 +3,7 @@ import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { IosPushSpikeNote } from "../components/PwaInstallPrompt";
 import { authClient, clearToken, getToken } from "../lib/auth";
+import { probeNetworkOnline } from "../lib/pwa";
 
 type Debt = {
   obligationId: string;
@@ -84,22 +85,38 @@ export default function F3PortalPage() {
   const [online, setOnline] = useState(
     typeof navigator === "undefined" ? true : navigator.onLine,
   );
+  const [networkReady, setNetworkReady] = useState(false);
 
   useEffect(() => {
-    const on = () => setOnline(true);
-    const off = () => setOnline(false);
+    let cancelled = false;
+    const apply = (value: boolean) => {
+      if (!cancelled) setOnline(value);
+    };
+    const probe = () => {
+      void probeNetworkOnline(fetch, navigator.onLine).then((value) => {
+        apply(value);
+        if (!cancelled) setNetworkReady(true);
+      });
+    };
+    const on = () => probe();
+    const off = () => {
+      apply(false);
+      if (!cancelled) setNetworkReady(true);
+    };
+    probe();
     window.addEventListener("online", on);
     window.addEventListener("offline", off);
     return () => {
+      cancelled = true;
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
     };
   }, []);
 
   useEffect(() => {
-    if (!online) return;
+    if (!networkReady || !online) return;
     if (!isPending && !session) navigate("/login");
-  }, [isPending, session, navigate, online]);
+  }, [isPending, session, navigate, online, networkReady]);
 
   const firstFracaoId = saldo.data?.fractions[0]?.fracaoId ?? null;
   const statement = useMutation({
@@ -178,7 +195,7 @@ export default function F3PortalPage() {
     );
   }
 
-  if (isPending || (session && saldo.isLoading)) {
+  if (!networkReady || isPending || (session && saldo.isLoading)) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ background: "#F5F5F7" }}>
         <p className="text-neutral-500">A carregar o portal…</p>

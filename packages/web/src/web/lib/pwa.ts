@@ -145,6 +145,20 @@ export function registerLumenServiceWorker() {
   });
 }
 
+/** Rede real: navigator.onLine pode mentir; /api/health nunca é cacheado pelo SW. */
+export async function probeNetworkOnline(
+  fetchImpl: typeof fetch,
+  navOnline = true,
+): Promise<boolean> {
+  if (!navOnline) return false;
+  try {
+    const res = await fetchImpl("/api/health", { method: "GET", cache: "no-store" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function detectRuntimePushInput(): PushCapabilityInput {
   const nav = typeof navigator === "undefined" ? undefined : navigator;
   const win = typeof window === "undefined" ? undefined : window;
