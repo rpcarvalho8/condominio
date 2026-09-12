@@ -39,6 +39,8 @@ import { LEDGER_ENTRY_TYPES, PAYMENT_METHODS } from "./domain/finance";
 import { applyDomainKernelSchema } from "./infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "./infra/f1-schema";
 import { applyF2FinanceSchema } from "./infra/f2-schema";
+import { OUTBOX_JOB_TYPES } from "./domain/outbox";
+import { TICKET_PHOTO_MAX_BYTES } from "./domain/ticket";
 import type { KernelDeps } from "./infra/kernel-deps";
 import { createMembershipRepo } from "./infra/repos/membership-repo";
 import { createPersonRepo } from "./infra/repos/person-repo";
@@ -47,8 +49,16 @@ import { createF3Routes } from "./routes/f3";
 import { createKernelRoutes } from "./routes/kernel";
 
 const DB_PATH = path.join(import.meta.dir, "..", "..", ".tmp-test-f3-portal.db");
+const BLOB_ROOT = path.join(import.meta.dir, "..", "..", ".tmp-test-f3-portal-content");
+process.env.CONTENT_BLOB_ROOT = BLOB_ROOT;
 const TENANT_A = "tenant-f3-portal-a";
 const TENANT_B = "tenant-f3-portal-b";
+
+/** 1×1 PNG — foto mínima para o critério ticket+foto. */
+const TINY_PNG = Buffer.from(
+  "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082",
+  "hex",
+);
 
 let client: ReturnType<typeof createClient>;
 let deps: KernelDeps;
@@ -166,11 +176,18 @@ function buildApp() {
 }
 
 beforeAll(async () => {
+  process.env.CONTENT_BLOB_ROOT = BLOB_ROOT;
   try {
     if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
   } catch {
     /* ignore */
   }
+  try {
+    fs.rmSync(BLOB_ROOT, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+  fs.mkdirSync(BLOB_ROOT, { recursive: true });
   client = createClient({ url: `file:${DB_PATH}` });
   await client.execute("PRAGMA journal_mode=WAL");
   await client.execute("PRAGMA busy_timeout=8000");
@@ -221,6 +238,10 @@ beforeEach(async () => {
     "ingest_documents",
     "outbox_jobs",
     "notification_deliveries",
+    "portal_ticket_photos",
+    "portal_tickets",
+    "portal_admin_contacts",
+    "content_uploads",
     "audit_events",
     "domain_events",
     "quotas",
@@ -237,6 +258,11 @@ afterAll(() => {
   }
   try {
     if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.rmSync(BLOB_ROOT, { recursive: true, force: true });
   } catch {
     /* ignore */
   }
@@ -583,5 +609,284 @@ describe("F3 portal — saldo Ledger + documentos", () => {
     const panelB = await getActivationPanel(deps, { tenantId: TENANT_B });
     expect(panelA.portalOpen).toBe(1);
     expect(panelB.portalOpen).toBe(0);
+  });
+});
+
+describe("F3 portal — tickets+foto + contactar admin", () => {
+  test("condómino cria ticket com foto (blob F1), lista só a sua fração e notifica admin via outbox", async () => {
+    const seeded = await seedFracoesWithBudget(TENANT_A, ["A", "B"]);
+    const fracaoA = seeded.fracoes.find((f) => f.codigo === "A")!;
+    const fracaoB = seeded.fracoes.find((f) => f.codigo === "B")!;
+    await acceptOwnerForFracao({
+      tenantId: TENANT_A,
+      fracaoId: fracaoA.id,
+      email: "maria-ticket@condo.test",
+      userId: "user-maria-ticket",
+      name: "Maria Ticket",
+    });
+    await seedActor({
+      userId: "user-admin-ticket",
+      roleCode: "Admin",
+      name: "Admin Ticket",
+      email: "admin-ticket@condo.test",
+      tenantId: TENANT_A,
+    });
+
+    currentUser = { id: "user-maria-ticket", email: "maria-ticket@condo.test" };
+    const form = new FormData();
+    form.set("titulo", "Infiltração na cave");
+    form.set("descricao", "Há água a entrar junto ao elevador.");
+    form.set("fracaoId", fracaoA.id);
+    form.set("categoria", "manutencao");
+    form.set("file", new File([TINY_PNG], "fuga.png", { type: "image/png" }));
+
+    const created = await app.request("/f3/portal/tickets", { method: "POST", body: form });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as {
+      ticket: {
+        id: string;
+        fracaoId: string;
+        titulo: string;
+        photoCount: number;
+        photos: Array<{ id: string; contentHash: string; mimeType: string }>;
+      };
+    };
+    expect(createdBody.ticket.fracaoId).toBe(fracaoA.id);
+    expect(createdBody.ticket.titulo).toBe("Infiltração na cave");
+    expect(createdBody.ticket.photoCount).toBe(1);
+    expect(createdBody.ticket.photos[0]!.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(createdBody.ticket.photos[0]!.mimeType).toContain("image/");
+
+    const listed = await app.request("/f3/portal/tickets");
+    expect(listed.status).toBe(200);
+    const listBody = (await listed.json()) as { tickets: Array<{ id: string; fracaoId: string }> };
+    expect(listBody.tickets).toHaveLength(1);
+    expect(listBody.tickets[0]!.id).toBe(createdBody.ticket.id);
+
+    const photo = await app.request(
+      `/f3/portal/tickets/${createdBody.ticket.id}/photos/${createdBody.ticket.photos[0]!.id}`,
+    );
+    expect(photo.status).toBe(200);
+    expect(photo.headers.get("content-type")).toContain("image/");
+    const bytes = Buffer.from(await photo.arrayBuffer());
+    expect(bytes.equals(TINY_PNG)).toBe(true);
+
+    const audits = await deps.db.select().from(schema.auditEvents);
+    expect(audits.some((a) => a.type === AUDIT_TYPES.ticketCreated)).toBe(true);
+    const jobs = await deps.db.select().from(schema.outboxJobs);
+    const ticketJobs = jobs.filter((j) => j.jobType === OUTBOX_JOB_TYPES.notifyTicketCreated);
+    expect(ticketJobs).toHaveLength(1);
+    expect(ticketJobs[0]!.status).toBe("completed");
+    const deliveries = await deps.db.select().from(schema.notificationDeliveries);
+    expect(deliveries.some((d) => d.template === "ticket_created" && d.destination === "admin-ticket@condo.test")).toBe(
+      true,
+    );
+
+    await acceptOwnerForFracao({
+      tenantId: TENANT_A,
+      fracaoId: fracaoB.id,
+      email: "owner-b-ticket@condo.test",
+      userId: "user-owner-b-ticket",
+      name: "Owner B Ticket",
+    });
+    currentUser = { id: "user-owner-b-ticket", email: "owner-b-ticket@condo.test" };
+    const stealList = await app.request("/f3/portal/tickets");
+    const stealListBody = (await stealList.json()) as { tickets: Array<{ id: string }> };
+    expect(stealListBody.tickets.some((t) => t.id === createdBody.ticket.id)).toBe(false);
+    const stealGet = await app.request(`/f3/portal/tickets/${createdBody.ticket.id}`);
+    expect(stealGet.status).toBe(403);
+    const stealPhoto = await app.request(
+      `/f3/portal/tickets/${createdBody.ticket.id}/photos/${createdBody.ticket.photos[0]!.id}`,
+    );
+    expect(stealPhoto.status).toBe(403);
+
+    currentUser = { id: "user-maria-ticket", email: "maria-ticket@condo.test" };
+    const pdf = new FormData();
+    pdf.set("titulo", "Documento");
+    pdf.set("descricao", "Não é foto");
+    pdf.set("file", new File(["%PDF-1.4"], "nota.pdf", { type: "application/pdf" }));
+    const badType = await app.request("/f3/portal/tickets", { method: "POST", body: pdf });
+    expect(badType.status).toBe(400);
+
+    const huge = new FormData();
+    huge.set("titulo", "Foto enorme");
+    huge.set("descricao", "Não cabe");
+    huge.set(
+      "file",
+      new File([new Uint8Array(TICKET_PHOTO_MAX_BYTES + 1)], "grande.jpg", { type: "image/jpeg" }),
+    );
+    const tooBig = await app.request("/f3/portal/tickets", { method: "POST", body: huge });
+    expect(tooBig.status).toBe(400);
+  });
+
+  test("contactar admin: AuditEvent + outbox idempotente + estado observável", async () => {
+    const { fracoes } = await seedFracoesWithBudget(TENANT_A, ["A"]);
+    const fracao = fracoes[0]!;
+    await acceptOwnerForFracao({
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      email: "contacto@condo.test",
+      userId: "user-contacto",
+      name: "Contacto",
+    });
+    await seedActor({
+      userId: "user-admin-mail",
+      roleCode: "Admin",
+      name: "Admin Mail",
+      email: "admin-mail@condo.test",
+      tenantId: TENANT_A,
+    });
+    currentUser = { id: "user-contacto", email: "contacto@condo.test" };
+
+    const first = await app.request("/f3/portal/contact-admin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        subject: "Dúvida de quota",
+        body: "O extrato não bate com o que paguei.",
+        fracaoId: fracao.id,
+      }),
+    });
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { contact: { id: string; status: string; subject: string } };
+    expect(firstBody.contact.subject).toBe("Dúvida de quota");
+    expect(["attempted", "queued"]).toContain(firstBody.contact.status);
+
+    const listed = await app.request("/f3/portal/contact-admin");
+    expect(listed.status).toBe(200);
+    const listBody = (await listed.json()) as { contacts: Array<{ id: string; status: string }> };
+    expect(listBody.contacts).toHaveLength(1);
+    expect(listBody.contacts[0]!.status).toBe("attempted");
+
+    const jobs = (await deps.db.select().from(schema.outboxJobs)).filter(
+      (j) => j.jobType === OUTBOX_JOB_TYPES.notifyAdminContact,
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.idempotencyKey).toBe(`notify:admin_contact:${firstBody.contact.id}:created`);
+    expect(jobs[0]!.status).toBe("completed");
+
+    await processOutbox(deps);
+    const jobsAfter = (await deps.db.select().from(schema.outboxJobs)).filter(
+      (j) => j.jobType === OUTBOX_JOB_TYPES.notifyAdminContact,
+    );
+    expect(jobsAfter).toHaveLength(1);
+    const deliveries = (await deps.db.select().from(schema.notificationDeliveries)).filter(
+      (d) => d.template === "admin_contact",
+    );
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.destination).toBe("admin-mail@condo.test");
+    expect(deliveries[0]!.status).toBe("attempted");
+
+    const audits = await deps.db.select().from(schema.auditEvents);
+    expect(audits.some((a) => a.type === AUDIT_TYPES.adminContactCreated)).toBe(true);
+    expect(audits.some((a) => a.type === "notification.email.attempted")).toBe(true);
+
+    currentUser = null;
+    const anon = await app.request("/f3/portal/contact-admin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subject: "x", body: "y" }),
+    });
+    expect(anon.status).toBe(401);
+  });
+
+  test("tickets e contacto fail-closed: sem tenant, outra fração, outro tenant, Membership revogada", async () => {
+    const seededA = await seedFracoesWithBudget(TENANT_A, ["A", "B"]);
+    const fracaoA = seededA.fracoes.find((f) => f.codigo === "A")!;
+    const fracaoB = seededA.fracoes.find((f) => f.codigo === "B")!;
+    const seededB = await seedFracoesWithBudget(TENANT_B, ["A"]);
+    const fracaoX = seededB.fracoes[0]!;
+
+    await acceptOwnerForFracao({
+      tenantId: TENANT_A,
+      fracaoId: fracaoA.id,
+      email: "iso-a@condo.test",
+      userId: "user-iso-a",
+      name: "Iso A",
+    });
+    await acceptOwnerForFracao({
+      tenantId: TENANT_A,
+      fracaoId: fracaoB.id,
+      email: "iso-b@condo.test",
+      userId: "user-iso-b",
+      name: "Iso B",
+    });
+    await acceptOwnerForFracao({
+      tenantId: TENANT_B,
+      fracaoId: fracaoX.id,
+      email: "iso-x@other.test",
+      userId: "user-iso-x",
+      name: "Iso X",
+    });
+    await seedActor({
+      userId: "user-admin-iso",
+      roleCode: "Admin",
+      name: "Admin Iso",
+      email: "admin-iso@condo.test",
+      tenantId: TENANT_A,
+    });
+
+    currentUser = { id: "user-iso-a", email: "iso-a@condo.test" };
+    tenantIdOverride = TENANT_A;
+    const created = await app.request("/f3/portal/tickets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        titulo: "Pedido A",
+        descricao: "Só da fração A",
+        fracaoId: fracaoA.id,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { ticket: { id: string } };
+
+    const stealFracao = await app.request("/f3/portal/tickets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        titulo: "Não é minha",
+        descricao: "Fração B",
+        fracaoId: fracaoB.id,
+      }),
+    });
+    expect(stealFracao.status).toBe(403);
+
+    const stealContact = await app.request("/f3/portal/contact-admin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        subject: "Não",
+        body: "Fração B",
+        fracaoId: fracaoB.id,
+      }),
+    });
+    expect(stealContact.status).toBe(403);
+
+    tenantIdOverride = TENANT_B;
+    const crossTenant = await app.request(`/f3/portal/tickets/${createdBody.ticket.id}`);
+    expect(crossTenant.status).toBe(403);
+
+    tenantIdOverride = TENANT_A;
+    currentUser = { id: "user-admin-iso", email: "admin-iso@condo.test" };
+    const adminPortal = await app.request("/f3/portal/tickets");
+    expect(adminPortal.status).toBe(403);
+
+    currentUser = null;
+    const anon = await app.request("/f3/portal/tickets");
+    expect(anon.status).toBe(401);
+
+    const ownerB = await createPersonRepo(deps.db).findByUserId("user-iso-b");
+    const membershipsB = await createMembershipRepo(deps.db).findActiveForPersonTenant(ownerB!.id, TENANT_A);
+    await createMembershipRepo(deps.db).revoke({
+      id: membershipsB[0]!.id,
+      revokedAt: new Date(),
+    });
+    currentUser = { id: "user-iso-b", email: "iso-b@condo.test" };
+    const revoked = await app.request("/f3/portal/tickets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ titulo: "Revogado", descricao: "Não" }),
+    });
+    expect(revoked.status).toBe(403);
   });
 });

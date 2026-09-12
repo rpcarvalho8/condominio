@@ -52,7 +52,7 @@ export function authorizedFracaoIds(memberships: Membership[]): string[] {
   return [...ids];
 }
 
-function assertPortalMembership(memberships: Membership[]): string[] {
+export function assertPortalMembership(memberships: Membership[]): string[] {
   const fracaoIds = authorizedFracaoIds(memberships);
   if (fracaoIds.length === 0) {
     throw new DomainError(
@@ -64,11 +64,17 @@ function assertPortalMembership(memberships: Membership[]): string[] {
   return fracaoIds;
 }
 
-function assertFracaoAuthorized(fracaoIds: string[], fracaoId: string | null | undefined): string {
+export function assertFracaoAuthorized(fracaoIds: string[], fracaoId: string | null | undefined): string {
   if (!fracaoId || !fracaoIds.includes(fracaoId)) {
     throw new DomainError("portal_fracao_forbidden", "Acesso negado a esta fração", 403);
   }
   return fracaoId;
+}
+
+export function assertPortalTenant(tenantId: string): string {
+  const id = tenantId.trim();
+  if (!id) throw new DomainError("tenant_required", "tenant_id é obrigatório", 403);
+  return id;
 }
 
 function parseGeneratedFrom(raw: string): Record<string, unknown> {
@@ -110,7 +116,7 @@ function toDocumentView(row: {
   };
 }
 
-async function recordPortalSignal(
+export async function recordPortalSignal(
   deps: KernelDeps,
   input: {
     tenantId: string;

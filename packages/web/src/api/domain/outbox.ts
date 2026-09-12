@@ -28,6 +28,10 @@ export const OUTBOX_JOB_TYPES = {
   notifyInvitationCreated: "notify.invitation_created",
   /** F3 — código/link de verificação de contacto (não KYC). */
   notifyInvitationVerify: "notify.invitation_verify",
+  /** F3 — aviso ao admin de ticket criado no portal. */
+  notifyTicketCreated: "notify.ticket_created",
+  /** F3 — mensagem «contactar admin» (email primário; estado observável). */
+  notifyAdminContact: "notify.admin_contact",
 } as const;
 
 export type OutboxJob = {

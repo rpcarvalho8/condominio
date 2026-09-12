@@ -5,11 +5,21 @@ import {
   getActivationPanel,
 } from "../application/invitation/activation-panel";
 import {
+  createPortalAdminContact,
+  listPortalAdminContacts,
+} from "../application/portal/f3-contact-admin";
+import {
   downloadPortalDocument,
   getPortalSaldo,
   listPortalDocuments,
   requestPortalAccountStatement,
 } from "../application/portal/f3-portal";
+import {
+  createPortalTicket,
+  downloadPortalTicketPhoto,
+  getPortalTicket,
+  listPortalTickets,
+} from "../application/portal/f3-tickets";
 import {
   createInvitation,
   createInvitationLote,
@@ -322,6 +332,163 @@ export function createF3Routes(deps: KernelDeps) {
           actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
         });
         return c.json({ document }, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .get("/portal/tickets", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const result = await listPortalTickets(deps, {
+          tenantId: c.get("tenantId")!,
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .get("/portal/tickets/:id", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const ticket = await getPortalTicket(deps, {
+          tenantId: c.get("tenantId")!,
+          ticketId: c.req.param("id"),
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        return c.json({ ticket });
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .get("/portal/tickets/:id/photos/:photoId", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const result = await downloadPortalTicketPhoto(deps, {
+          tenantId: c.get("tenantId")!,
+          ticketId: c.req.param("id"),
+          photoId: c.req.param("photoId"),
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        const safeName = result.filename.replace(/"/g, "");
+        return new Response(result.body, {
+          status: 200,
+          headers: {
+            "Content-Type": result.contentType,
+            "Content-Disposition": `inline; filename="${safeName}"`,
+            "Cache-Control": "private, max-age=3600",
+          },
+        });
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/portal/tickets", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const contentType = c.req.header("content-type") ?? "";
+        let titulo = "";
+        let descricao = "";
+        let fracaoId: string | undefined;
+        let categoria: string | undefined;
+        let urgencia: string | undefined;
+        const files: Array<{ filename: string; mimeType?: string | null; bytes: Uint8Array }> = [];
+
+        if (contentType.includes("multipart/form-data")) {
+          const body = await c.req.parseBody({ all: true });
+          titulo = String(body.titulo ?? "");
+          descricao = String(body.descricao ?? "");
+          if (typeof body.fracaoId === "string") fracaoId = body.fracaoId;
+          if (typeof body.categoria === "string") categoria = body.categoria;
+          if (typeof body.urgencia === "string") urgencia = body.urgencia;
+          const raw = body.files ?? body.file ?? body.photo ?? body.photos;
+          const list = raw == null ? [] : Array.isArray(raw) ? raw : [raw];
+          for (const item of list) {
+            if (!item || typeof item === "string") continue;
+            const file = item as File;
+            files.push({
+              filename: file.name || "foto.jpg",
+              mimeType: file.type || null,
+              bytes: new Uint8Array(await file.arrayBuffer()),
+            });
+          }
+        } else {
+          const body = (await c.req.json().catch(() => ({}))) as {
+            titulo?: string;
+            descricao?: string;
+            fracaoId?: string;
+            categoria?: string;
+            urgencia?: string;
+          };
+          titulo = String(body.titulo ?? "");
+          descricao = String(body.descricao ?? "");
+          fracaoId = body.fracaoId;
+          categoria = body.categoria;
+          urgencia = body.urgencia;
+        }
+
+        const ticket = await createPortalTicket(deps, {
+          tenantId: c.get("tenantId")!,
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+          fracaoId,
+          titulo,
+          descricao,
+          categoria,
+          urgencia,
+          files,
+        });
+        return c.json({ ticket }, 201);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .get("/portal/contact-admin", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const result = await listPortalAdminContacts(deps, {
+          tenantId: c.get("tenantId")!,
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/portal/contact-admin", async (c) => {
+      try {
+        const person = c.get("person");
+        if (!person) return c.json({ message: "Acesso negado" }, 403);
+        const body = (await c.req.json().catch(() => ({}))) as {
+          subject?: string;
+          body?: string;
+          mensagem?: string;
+          fracaoId?: string;
+        };
+        const contact = await createPortalAdminContact(deps, {
+          tenantId: c.get("tenantId")!,
+          memberships: c.get("memberships") ?? [],
+          actor: { personId: person.id, userId: c.get("user")?.id ?? null, requestId: requestIdFrom(c) },
+          fracaoId: body.fracaoId,
+          subject: String(body.subject ?? ""),
+          body: String(body.body ?? body.mensagem ?? ""),
+        });
+        return c.json({ contact }, 201);
       } catch (err) {
         const mapped = httpError(err);
         return c.json({ message: mapped.message }, mapped.status);

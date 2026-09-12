@@ -24,6 +24,8 @@ export const AUDIT_TYPES = {
   invitationContactVerified: "invitation.contact_verified",
   portalOpened: "portal.opened",
   financialDocumentSeen: "financial_document.seen",
+  ticketCreated: "ticket.created",
+  adminContactCreated: "admin_contact.created",
 } as const;
 
 export type AppendAuditEventInput = {

@@ -530,6 +530,90 @@ export const invitations = sqliteTable(
 );
 
 /**
+ * F3 portal Ticket — Membership/fração, multi-tenant.
+ * Transplante do modelo Fonte (sem LLM / sem FK a user.fracaoId).
+ */
+export const portalTickets = sqliteTable(
+  "portal_tickets",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id").notNull(),
+    createdByPersonId: text("created_by_person_id").notNull(),
+    createdByUserId: text("created_by_user_id"),
+    titulo: text("titulo").notNull(),
+    descricao: text("descricao").notNull(),
+    categoria: text("categoria").notNull().default("outro"),
+    urgencia: text("urgencia").notNull().default("normal"),
+    status: text("status").notNull().default("aberto"),
+    origem: text("origem").notNull().default("portal"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantFracaoIdx: index("portal_tickets_tenant_fracao_idx").on(t.tenantId, t.fracaoId),
+    tenantCreatedIdx: index("portal_tickets_tenant_created_idx").on(t.tenantId, t.createdAt),
+  }),
+);
+
+/** Fotos do ticket — content-addressed (F1 blob store), não `data/tickets`. */
+export const portalTicketPhotos = sqliteTable(
+  "portal_ticket_photos",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    ticketId: text("ticket_id")
+      .notNull()
+      .references(() => portalTickets.id, { onDelete: "cascade" }),
+    contentHash: text("content_hash").notNull(),
+    filename: text("filename").notNull(),
+    mimeType: text("mime_type").notNull(),
+    originalName: text("original_name").notNull(),
+    sizeBytes: integer("size_bytes").notNull().default(0),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    createdByPersonId: text("created_by_person_id"),
+  },
+  (t) => ({
+    ticketIdx: index("portal_ticket_photos_ticket_idx").on(t.ticketId),
+    tenantHashIdx: index("portal_ticket_photos_tenant_hash_idx").on(t.tenantId, t.contentHash),
+  }),
+);
+
+/**
+ * Contactar admin — canal mínimo (não é CRM).
+ * Estado observável: queued → attempted | skipped | failed via outbox.
+ */
+export const portalAdminContacts = sqliteTable(
+  "portal_admin_contacts",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    tenantId: text("tenant_id").notNull(),
+    fracaoId: text("fracao_id").notNull(),
+    createdByPersonId: text("created_by_person_id").notNull(),
+    createdByUserId: text("created_by_user_id"),
+    subject: text("subject").notNull(),
+    body: text("body").notNull(),
+    status: text("status").notNull().default("queued"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => ({
+    tenantPersonIdx: index("portal_admin_contacts_tenant_person_idx").on(
+      t.tenantId,
+      t.createdByPersonId,
+    ),
+    tenantCreatedIdx: index("portal_admin_contacts_tenant_created_idx").on(t.tenantId, t.createdAt),
+  }),
+);
+
+/**
  * DomainEvent bus (ADR-009) — append-only facts inside the tenant DB.
  */
 export const domainEvents = sqliteTable(

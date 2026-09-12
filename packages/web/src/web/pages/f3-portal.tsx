@@ -36,6 +36,48 @@ type PortalDocument = {
   generatedFrom: Record<string, unknown>;
 };
 
+type PortalTicketPhoto = {
+  id: string;
+  originalName: string;
+  mimeType: string;
+};
+
+type PortalTicket = {
+  id: string;
+  fracaoId: string;
+  titulo: string;
+  descricao: string;
+  categoria: string;
+  urgencia: string;
+  status: string;
+  createdAt: string;
+  photoCount: number;
+  photos: PortalTicketPhoto[];
+};
+
+type AdminContact = {
+  id: string;
+  subject: string;
+  body: string;
+  status: string;
+  createdAt: string;
+};
+
+const TICKET_STATUS: Record<string, string> = {
+  aberto: "Aberto",
+  em_curso: "Em curso",
+  aguarda_condomino: "Aguarda a sua resposta",
+  resolvido: "Resolvido",
+  cancelado: "Cancelado",
+};
+
+const CONTACT_STATUS: Record<string, string> = {
+  queued: "Na fila",
+  attempted: "Enviado à administração",
+  skipped: "Registado (sem email de admin)",
+  failed: "Falhou o envio",
+};
+
 function formatCents(cents: number) {
   return (cents / 100).toLocaleString("pt-PT", { style: "currency", currency: "EUR" });
 }
@@ -49,13 +91,15 @@ function docLabel(docType: string) {
 
 async function portalFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const isForm = typeof FormData !== "undefined" && init?.body instanceof FormData;
+  if (!isForm && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const res = await fetch(`/api/f3${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
+    headers,
     credentials: "include",
   });
   if (!res.ok) {
@@ -81,6 +125,24 @@ export default function F3PortalPage() {
     queryFn: () => portalFetch<{ documents: PortalDocument[] }>("/portal/documents"),
     enabled: Boolean(session),
   });
+  const tickets = useQuery({
+    queryKey: ["f3-portal-tickets"],
+    queryFn: () => portalFetch<{ tickets: PortalTicket[] }>("/portal/tickets"),
+    enabled: Boolean(session),
+  });
+  const contacts = useQuery({
+    queryKey: ["f3-portal-contacts"],
+    queryFn: () => portalFetch<{ contacts: AdminContact[] }>("/portal/contact-admin"),
+    enabled: Boolean(session),
+  });
+
+  const [titulo, setTitulo] = useState("");
+  const [descricao, setDescricao] = useState("");
+  const [fotos, setFotos] = useState<FileList | null>(null);
+  const [selectedTicketId, setSelectedTicketId] = useState("");
+  const [contactSubject, setContactSubject] = useState("");
+  const [contactBody, setContactBody] = useState("");
+  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
 
   const [online, setOnline] = useState(
     typeof navigator === "undefined" ? true : navigator.onLine,
@@ -127,6 +189,72 @@ export default function F3PortalPage() {
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["f3-portal-docs"] }),
   });
+  const createTicket = useMutation({
+    mutationFn: async () => {
+      const form = new FormData();
+      form.append("titulo", titulo);
+      form.append("descricao", descricao);
+      if (firstFracaoId) form.append("fracaoId", firstFracaoId);
+      if (fotos) {
+        Array.from(fotos).slice(0, 5).forEach((f) => form.append("files", f));
+      }
+      return portalFetch<{ ticket: PortalTicket }>("/portal/tickets", {
+        method: "POST",
+        body: form,
+      });
+    },
+    onSuccess: (data) => {
+      setTitulo("");
+      setDescricao("");
+      setFotos(null);
+      setSelectedTicketId(data.ticket.id);
+      qc.invalidateQueries({ queryKey: ["f3-portal-tickets"] });
+    },
+  });
+  const sendContact = useMutation({
+    mutationFn: () =>
+      portalFetch<{ contact: AdminContact }>("/portal/contact-admin", {
+        method: "POST",
+        body: JSON.stringify({
+          subject: contactSubject,
+          body: contactBody,
+          fracaoId: firstFracaoId,
+        }),
+      }),
+    onSuccess: () => {
+      setContactSubject("");
+      setContactBody("");
+      qc.invalidateQueries({ queryKey: ["f3-portal-contacts"] });
+    },
+  });
+
+  const selectedTicket = (tickets.data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null;
+
+  useEffect(() => {
+    if (!selectedTicket) return;
+    let cancelled = false;
+    const token = getToken();
+    for (const photo of selectedTicket.photos) {
+      void fetch(`/api/f3/portal/tickets/${selectedTicket.id}/photos/${photo.id}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: "include",
+      })
+        .then(async (res) => {
+          if (!res.ok) return;
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          if (!cancelled) {
+            setPhotoUrls((prev) => (prev[photo.id] ? prev : { ...prev, [photo.id]: url }));
+          }
+        })
+        .catch(() => {
+          /* ignore */
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTicket]);
 
   const openCents = useMemo(
     () => (saldo.data?.fractions ?? []).reduce((s, f) => s + f.openCents, 0),
@@ -215,7 +343,7 @@ export default function F3PortalPage() {
             <p className="text-xs uppercase tracking-wider" style={{ color: "#D0021B" }}>
               Portal do condómino
             </p>
-            <h1 className="text-lg font-semibold">Saldo e documentos</h1>
+            <h1 className="text-lg font-semibold">Saldo, pedidos e contacto</h1>
           </div>
           <button type="button" onClick={handleLogout} className="text-sm text-neutral-500">
             Sair
@@ -305,12 +433,166 @@ export default function F3PortalPage() {
           )}
         </section>
 
-        {(error || saldo.error || documents.error || statement.error) && (
+        <section className="bg-white rounded-2xl border p-5 space-y-3" style={{ borderColor: "#E5E5EA" }}>
+          <h2 className="font-semibold">Novo pedido (com foto)</h2>
+          <p className="text-sm text-neutral-500">
+            Ex.: lâmpada fundida, infiltração, elevador. Anexe uma foto quando possível.
+          </p>
+          <input
+            className="w-full rounded-lg border px-3 py-2 text-sm"
+            style={{ borderColor: "#E5E5EA" }}
+            placeholder="Título"
+            value={titulo}
+            onChange={(e) => setTitulo(e.target.value)}
+          />
+          <textarea
+            className="w-full rounded-lg border px-3 py-2 text-sm min-h-[90px]"
+            style={{ borderColor: "#E5E5EA" }}
+            placeholder="Descreva o pedido"
+            value={descricao}
+            onChange={(e) => setDescricao(e.target.value)}
+          />
+          <label className="block text-sm text-neutral-500">
+            Foto (JPEG, PNG, WebP ou GIF, máx. 5)
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              multiple
+              className="mt-2 block w-full text-sm"
+              onChange={(e) => setFotos(e.target.files)}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => createTicket.mutate()}
+            disabled={createTicket.isPending || !titulo.trim() || !descricao.trim()}
+            className="rounded-lg px-3 py-2 text-sm text-white"
+            style={{ background: "#D0021B" }}
+          >
+            {createTicket.isPending ? "A enviar…" : "Enviar pedido"}
+          </button>
+        </section>
+
+        <section className="bg-white rounded-2xl border p-5 space-y-3" style={{ borderColor: "#E5E5EA" }}>
+          <h2 className="font-semibold">Os seus pedidos</h2>
+          {(tickets.data?.tickets ?? []).length === 0 ? (
+            <p className="text-sm text-neutral-500">Ainda não tem pedidos.</p>
+          ) : (
+            <div className="space-y-2">
+              {(tickets.data?.tickets ?? []).map((ticket) => (
+                <button
+                  key={ticket.id}
+                  type="button"
+                  onClick={() => setSelectedTicketId(ticket.id)}
+                  className="w-full text-left rounded-xl border p-3"
+                  style={{
+                    borderColor: selectedTicketId === ticket.id ? "#D0021B" : "#E5E5EA",
+                    background: selectedTicketId === ticket.id ? "#FFF5F5" : "#fff",
+                  }}
+                >
+                  <div className="flex justify-between gap-2">
+                    <span className="text-sm font-medium">{ticket.titulo}</span>
+                    <span className="text-xs text-neutral-500">
+                      {TICKET_STATUS[ticket.status] ?? ticket.status}
+                    </span>
+                  </div>
+                  <p className="text-xs text-neutral-500 mt-1">
+                    {new Date(ticket.createdAt).toLocaleString("pt-PT")} · {ticket.categoria} ·{" "}
+                    {ticket.photoCount} foto{ticket.photoCount === 1 ? "" : "s"}
+                  </p>
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedTicket && (
+            <div className="border-t pt-3 space-y-2" style={{ borderColor: "#E5E5EA" }}>
+              <p className="text-sm whitespace-pre-wrap">{selectedTicket.descricao}</p>
+              {selectedTicket.photos.length > 0 && (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {selectedTicket.photos.map((photo) =>
+                    photoUrls[photo.id] ? (
+                      <img
+                        key={photo.id}
+                        src={photoUrls[photo.id]}
+                        alt={photo.originalName}
+                        className="w-full max-h-48 object-cover rounded-lg"
+                      />
+                    ) : (
+                      <p key={photo.id} className="text-xs text-neutral-500">
+                        A carregar {photo.originalName}…
+                      </p>
+                    ),
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="bg-white rounded-2xl border p-5 space-y-3" style={{ borderColor: "#E5E5EA" }}>
+          <h2 className="font-semibold">Contactar a administração</h2>
+          <p className="text-sm text-neutral-500">
+            Canal de suporte do portal. Email é o envio primário; o estado fica registado mesmo sem mailbox.
+          </p>
+          <input
+            className="w-full rounded-lg border px-3 py-2 text-sm"
+            style={{ borderColor: "#E5E5EA" }}
+            placeholder="Assunto"
+            value={contactSubject}
+            onChange={(e) => setContactSubject(e.target.value)}
+          />
+          <textarea
+            className="w-full rounded-lg border px-3 py-2 text-sm min-h-[90px]"
+            style={{ borderColor: "#E5E5EA" }}
+            placeholder="Mensagem para a administração"
+            value={contactBody}
+            onChange={(e) => setContactBody(e.target.value)}
+          />
+          <button
+            type="button"
+            onClick={() => sendContact.mutate()}
+            disabled={sendContact.isPending || !contactSubject.trim() || !contactBody.trim()}
+            className="rounded-lg px-3 py-2 text-sm text-white"
+            style={{ background: "#D0021B" }}
+          >
+            {sendContact.isPending ? "A enviar…" : "Enviar mensagem"}
+          </button>
+          {(contacts.data?.contacts ?? []).length > 0 && (
+            <div className="space-y-2 border-t pt-3" style={{ borderColor: "#E5E5EA" }}>
+              {(contacts.data?.contacts ?? []).map((item) => (
+                <div key={item.id} className="text-sm">
+                  <div className="flex justify-between gap-2">
+                    <span className="font-medium">{item.subject}</span>
+                    <span className="text-xs text-neutral-500">
+                      {CONTACT_STATUS[item.status] ?? item.status}
+                    </span>
+                  </div>
+                  <p className="text-xs text-neutral-500 mt-1">
+                    {new Date(item.createdAt).toLocaleString("pt-PT")}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {(error ||
+          saldo.error ||
+          documents.error ||
+          statement.error ||
+          tickets.error ||
+          contacts.error ||
+          createTicket.error ||
+          sendContact.error) && (
           <p className="text-sm" style={{ color: "#D0021B" }}>
             {error ||
               (saldo.error as Error | undefined)?.message ||
               (documents.error as Error | undefined)?.message ||
-              (statement.error as Error | undefined)?.message}
+              (statement.error as Error | undefined)?.message ||
+              (tickets.error as Error | undefined)?.message ||
+              (contacts.error as Error | undefined)?.message ||
+              (createTicket.error as Error | undefined)?.message ||
+              (sendContact.error as Error | undefined)?.message}
           </p>
         )}
 
