@@ -38,7 +38,7 @@ O piloto Essencial fecha Invitation + verificação de contacto + Membership + p
 - Navegação: network-first; se a rede falhar, `index.html` em cache (SPA) ou `/offline.html`.
 - Assets same-origin: network-first com fallback à cache (primeira visita online precacheia a shell).
 - Pedidos `/api/*` passam sempre à rede — o Ledger não é SoT offline. A shell **não** mostra `0,00 €` sem rede (isso seria uma mentira de saldo).
-- `/f3/portal` deixa de passar por `ProtectedRoute` (redirect imediato para `/login`) para a shell offline poder renderizar sem sessão.
+- `/f3/portal` deixa de passar por `ProtectedRoute` (redirect imediato para `/login`) para a shell offline poder renderizar sem sessão. A detecção de rede sonda `/api/health` (nunca cacheado) para não depender só de `navigator.onLine`.
 
 ## Spike iOS push — resultado
 
