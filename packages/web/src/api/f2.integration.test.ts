@@ -38,9 +38,20 @@ import {
 import {
   BANK_REAUTH_ADMIN_FALLBACK,
   isResolvedAdminMailbox,
+  listBankConnections,
   sweepBankReauthNotices,
   upsertBankConnection,
 } from "./application/finance/f2-bank-connection";
+import {
+  completeBankConsent,
+  decodeConsentState,
+  enqueueBankSyncJob,
+  startBankConsent,
+  startBankReauthorization,
+  syncBankConnection,
+} from "./application/finance/f2-bank-sync";
+import type { EnableBankingClient, EnableBankingTransaction } from "./application/finance/enable-banking-adapter";
+import { OUTBOX_JOB_TYPES } from "./domain/outbox";
 import {
   generateMonthlyPaymentNotices,
   runF2CalendarSweep,
@@ -188,6 +199,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   currentUser = null;
   deps.now = undefined;
+  deps.enableBanking = undefined;
   for (const table of [
     "financial_documents",
     "allocations",
@@ -1305,6 +1317,332 @@ describe("F2 jobs avisos dia 1 e recibos na Allocation", () => {
   });
 });
 
+function mockEnableBanking(opts?: {
+  transactions?: EnableBankingTransaction[];
+  failList?: Error;
+  failExchange?: Error;
+  iban?: string;
+}): EnableBankingClient {
+  const iban = opts?.iban ?? "PT50001800034978380602065";
+  return {
+    isConfigured: () => true,
+    createAuthSession: async ({ state }) => ({
+      url: `https://eb.test/auth?state=${encodeURIComponent(state)}`,
+      authorizationId: "auth-1",
+    }),
+    exchangeCode: async () => {
+      if (opts?.failExchange) throw opts.failExchange;
+      return {
+        sessionId: "sess-condo-1",
+        accounts: [{ uid: "acc-condo", iban, currency: "EUR" }],
+        accessValidUntil: "2026-12-10T00:00:00.000Z",
+      };
+    },
+    listTransactions: async () => {
+      if (opts?.failList) throw opts.failList;
+      return (
+        opts?.transactions ?? [
+          {
+            transactionId: "eb-credit-1",
+            amountCents: 50_00,
+            bookedAt: new Date("2026-09-01T00:00:00.000Z"),
+            description: "TRF CRED SEPA+ DE MARIA SILVA",
+            debtorName: "MARIA SILVA",
+            counterpartyIban: "PT50000201231234567890154",
+            creditDebit: "CRDT" as const,
+          },
+          {
+            transactionId: "eb-debit-1",
+            amountCents: -12_00,
+            bookedAt: new Date("2026-09-02T00:00:00.000Z"),
+            description: "COMISSAO MANUTENCAO",
+            debtorName: null,
+            counterpartyIban: null,
+            creditDebit: "DBIT" as const,
+          },
+        ]
+      );
+    },
+    revokeSession: async () => {},
+  };
+}
+
+describe("F2 Enable Banking PSD2", () => {
+  test("consentimento ASPSP + sync cria movimentos e Payments candidatos sem Quota.pago", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    await seedConfirmedOwner("A", "Maria Silva");
+    await client.execute({
+      sql: `INSERT INTO quotas (id, fracao_id, tipo, mes, ano, valor, pago) VALUES (?, ?, 'condominio', 9, 2026, 50, 0)`,
+      args: ["quota-psd2-1", fracao.id],
+    });
+    const admin = await seedActor({
+      userId: "user-admin-psd2",
+      roleCode: "Admin",
+      name: "Admin PSD2",
+      email: "admin-psd2@test",
+    });
+    const membershipId = String(
+      (await client.execute(`SELECT id FROM memberships WHERE person_id = ?`, [admin.id])).rows[0]!.id,
+    );
+    deps.enableBanking = mockEnableBanking();
+
+    const started = await startBankConsent(deps, {
+      tenantId: TENANT,
+      aspsp: "Mock ASPSP",
+      accountIban: "PT50001800034978380602065",
+      authorizedByMembershipId: membershipId,
+      scopes: ["accounts", "transactions"],
+    });
+    expect(started.authorizationUrl).toContain("https://eb.test/auth");
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    expect(decodeConsentState(state)?.tenantId).toBe(TENANT);
+
+    const authorized = await completeBankConsent(deps, { code: "ok-code", state });
+    expect(authorized.consentStatus).toBe(BANK_CONSENT_STATUS.authorized);
+    expect(authorized.accountIban).toBe("PT50001800034978380602065");
+    expect(authorized.sessionId).toBe("sess-condo-1");
+    expect(authorized.accountUid).toBe("acc-condo");
+    expect(authorized.authorizedByMembershipId).toBe(membershipId);
+
+    const synced = await syncBankConnection(deps, { tenantId: TENANT });
+    expect(synced.skipped).toBe(false);
+    expect(synced.created).toBe(2);
+    expect(synced.credits).toBe(1);
+    expect(synced.debits).toBe(1);
+
+    const again = await syncBankConnection(deps, { tenantId: TENANT });
+    expect(again.created).toBe(0);
+    expect(again.reused).toBe(2);
+
+    const payments = await client.execute(
+      `SELECT allocation_status, candidate_source, fracao_id FROM payments WHERE tenant_id = ? AND external_ref = 'eb:eb-credit-1'`,
+      [TENANT],
+    );
+    expect(payments.rows.length).toBe(1);
+    expect(String(payments.rows[0]!.allocation_status)).toBe(ALLOCATION_STATUS.identificado);
+    expect(String(payments.rows[0]!.candidate_source)).toBe(CANDIDATE_SOURCES.enableBanking);
+    expect(String(payments.rows[0]!.fracao_id)).toBe(fracao.id);
+
+    const movs = await client.execute(
+      `SELECT external_ref, amount_cents FROM f2_bank_movements WHERE tenant_id = ? ORDER BY external_ref`,
+      [TENANT],
+    );
+    expect(movs.rows.map((r) => r.external_ref)).toEqual(["eb:eb-credit-1", "eb:eb-debit-1"]);
+
+    const pago = await client.execute(`SELECT pago FROM quotas WHERE id = 'quota-psd2-1'`);
+    expect(Number(pago.rows[0]!.pago)).toBe(0);
+
+    const allocs = await client.execute(`SELECT COUNT(*) AS n FROM allocations`);
+    expect(Number(allocs.rows[0]!.n)).toBe(0);
+
+    currentUser = { id: admin.userId!, email: "admin-psd2@test" };
+    const listed = await app.request("/f2/bank-connections");
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      connections: Array<{
+        sessionId?: string;
+        authState?: string;
+        csvFallback: boolean;
+        lastError: string | null;
+      }>;
+    };
+    expect(body.connections[0]!.sessionId).toBeUndefined();
+    expect(body.connections[0]!.authState).toBeUndefined();
+    expect(body.connections[0]!.csvFallback).toBe(false);
+    expect(body.connections[0]!.lastError).toBeNull();
+  });
+
+  test("reauth real e aviso proactivo coexistem; destination nunca é IBAN", async () => {
+    const admin = await seedActor({
+      userId: "user-admin-reauth-psd2",
+      roleCode: "Admin",
+      name: "Admin Reauth PSD2",
+      email: "admin-reauth-psd2@test",
+    });
+    const membershipId = String(
+      (await client.execute(`SELECT id FROM memberships WHERE person_id = ?`, [admin.id])).rows[0]!.id,
+    );
+    const iban = "PT50001800034978380602065";
+    deps.enableBanking = mockEnableBanking({ iban });
+    deps.now = () => new Date("2026-09-10T12:00:00.000Z");
+
+    const started = await startBankConsent(deps, {
+      tenantId: TENANT,
+      authorizedByMembershipId: membershipId,
+      accountIban: iban,
+    });
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    await completeBankConsent(deps, { code: "ok-code", state });
+
+    await upsertBankConnection(deps, {
+      tenantId: TENANT,
+      consentStatus: BANK_CONSENT_STATUS.authorized,
+      consentValidUntil: "2026-09-20T00:00:00.000Z",
+    });
+    const notice = await sweepBankReauthNotices(deps, { tenantId: TENANT });
+    expect(notice.noticed.some((n) => n.noticed)).toBe(true);
+    await processOutbox(deps);
+
+    const reauth = await startBankReauthorization(deps, {
+      tenantId: TENANT,
+      authorizedByMembershipId: membershipId,
+    });
+    expect(reauth.reauthorize).toBe(true);
+    const [pending] = await listBankConnections(deps, TENANT);
+    expect(pending!.reauthorizationRequired).toBe(1);
+    expect(pending!.sessionId).toBe("sess-condo-1");
+
+    const reauthState = new URL(reauth.authorizationUrl).searchParams.get("state");
+    const after = await completeBankConsent(deps, { code: "ok-code-2", state: reauthState });
+    expect(after.consentStatus).toBe(BANK_CONSENT_STATUS.authorized);
+    expect(after.reauthorizationRequired).toBe(0);
+
+    const deliveries = await client.execute(
+      `SELECT destination, status FROM notification_deliveries WHERE tenant_id = ? AND template = 'bank_reauth_required'`,
+      [TENANT],
+    );
+    expect(deliveries.rows.length).toBe(1);
+    expect(String(deliveries.rows[0]!.destination)).toBe("admin-reauth-psd2@test");
+    expect(String(deliveries.rows[0]!.destination)).not.toBe(iban);
+    expect(String(deliveries.rows[0]!.destination).startsWith("PT")).toBe(false);
+  });
+
+  test("falha do provider fica em last_error sanitizado e cai para CSV", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    await seedConfirmedOwner("A", "Maria Silva");
+    await client.execute({
+      sql: `INSERT INTO quotas (id, fracao_id, tipo, mes, ano, valor, pago) VALUES (?, ?, 'condominio', 9, 2026, 50, 0)`,
+      args: ["quota-psd2-err", fracao.id],
+    });
+    deps.enableBanking = mockEnableBanking({
+      failList: new Error(
+        "Enable Banking API 401: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ4In0.signature",
+      ),
+    });
+    const started = await startBankConsent(deps, { tenantId: TENANT });
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    await completeBankConsent(deps, { code: "ok-code", state });
+
+    const failed = await syncBankConnection(deps, { tenantId: TENANT });
+    expect(failed.skipped).toBe(true);
+    expect(failed.fallback).toBe("csv");
+    expect(String(failed.lastError)).not.toContain("eyJ");
+    expect(String(failed.lastError)).not.toContain("Bearer ");
+
+    const [row] = await listBankConnections(deps, TENANT);
+    expect(row!.lastError).toBeTruthy();
+    expect(String(row!.lastError)).not.toContain("eyJ");
+    expect(row!.reauthorizationRequired).toBe(1);
+
+    const csv = [
+      "Conta condomínio",
+      "Seq;Data Operação;Data Valor;Mês;Ano;Tipo;Descritivo;Montante;Saldo",
+      "csv-psd2;01-09-2026;01-09-2026;9;2026;Entrada;TRF CRED SEPA+ DE MARIA SILVA;50,00;1000,00",
+    ].join("\n");
+    const ingested = await ingestCandidatesFromCsv(deps, { tenantId: TENANT, csvText: csv });
+    expect(ingested.created).toBe(1);
+    const pago = await client.execute(`SELECT pago FROM quotas WHERE id = 'quota-psd2-err'`);
+    expect(Number(pago.rows[0]!.pago)).toBe(0);
+  });
+
+  test("job de sync é idempotente via outbox e isola tenants", async () => {
+    await seedFracaoWithObligations();
+    await seedConfirmedOwner("A", "Maria Silva");
+    deps.enableBanking = mockEnableBanking();
+    const started = await startBankConsent(deps, { tenantId: TENANT });
+    const state = new URL(started.authorizationUrl).searchParams.get("state");
+    await completeBankConsent(deps, { code: "ok-code", state });
+
+    const first = await enqueueBankSyncJob(deps, { tenantId: TENANT });
+    const second = await enqueueBankSyncJob(deps, { tenantId: TENANT });
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.job.id).toBe(first.job.id);
+
+    await processOutbox(deps);
+    const credits = await client.execute(
+      `SELECT COUNT(*) AS n FROM payments WHERE tenant_id = ? AND candidate_source = ?`,
+      [TENANT, CANDIDATE_SOURCES.enableBanking],
+    );
+    expect(Number(credits.rows[0]!.n)).toBe(1);
+
+    await client.execute(`UPDATE outbox_jobs SET status = 'pending', processed_at = NULL WHERE id = ?`, [
+      first.job.id,
+    ]);
+    await processOutbox(deps);
+    const creditsAgain = await client.execute(
+      `SELECT COUNT(*) AS n FROM payments WHERE tenant_id = ? AND candidate_source = ?`,
+      [TENANT, CANDIDATE_SOURCES.enableBanking],
+    );
+    expect(Number(creditsAgain.rows[0]!.n)).toBe(1);
+
+    const otherTenant = "tenant-f2-other";
+    const otherDeps = { ...deps, getTenantId: () => otherTenant };
+    otherDeps.enableBanking = mockEnableBanking();
+    const otherStart = await startBankConsent(otherDeps, { tenantId: otherTenant });
+    const otherState = new URL(otherStart.authorizationUrl).searchParams.get("state");
+    await completeBankConsent(otherDeps, { code: "ok-other", state: otherState });
+    await syncBankConnection(otherDeps, { tenantId: otherTenant });
+
+    const aOnly = await client.execute(
+      `SELECT COUNT(*) AS n FROM f2_bank_movements WHERE tenant_id = ?`,
+      [TENANT],
+    );
+    const bOnly = await client.execute(
+      `SELECT COUNT(*) AS n FROM f2_bank_movements WHERE tenant_id = ?`,
+      [otherTenant],
+    );
+    expect(Number(aOnly.rows[0]!.n)).toBeGreaterThan(0);
+    expect(Number(bOnly.rows[0]!.n)).toBeGreaterThan(0);
+    const leaked = await client.execute(
+      `SELECT COUNT(*) AS n FROM f2_bank_movements WHERE tenant_id = ? AND id IN (SELECT id FROM f2_bank_movements WHERE tenant_id = ?)`,
+      [TENANT, otherTenant],
+    );
+    expect(Number(leaked.rows[0]!.n)).toBe(0);
+
+    const listedA = await listBankConnections(deps, TENANT);
+    const listedB = await listBankConnections(otherDeps, otherTenant);
+    expect(listedA.every((r) => r.tenantId === TENANT)).toBe(true);
+    expect(listedB.every((r) => r.tenantId === otherTenant)).toBe(true);
+  });
+
+  test("HTTP authorize/sync e callback exercitam o caminho feliz", async () => {
+    await seedFracaoWithObligations();
+    await seedConfirmedOwner("A", "Maria Silva");
+    const admin = await seedActor({
+      userId: "user-admin-http-psd2",
+      roleCode: "Admin",
+      name: "Admin HTTP",
+      email: "admin-http-psd2@test",
+    });
+    currentUser = { id: admin.userId!, email: "admin-http-psd2@test" };
+    deps.enableBanking = mockEnableBanking();
+
+    const authRes = await app.request("/f2/bank-connections/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ aspsp: "Mock ASPSP" }),
+    });
+    expect(authRes.status).toBe(201);
+    const authBody = (await authRes.json()) as { authorizationUrl: string };
+    const state = new URL(authBody.authorizationUrl).searchParams.get("state");
+
+    const cb = await app.request(`/f2/bank/callback?code=ok-code&state=${encodeURIComponent(state!)}`);
+    expect(cb.status).toBe(302);
+    expect(cb.headers.get("location")).toContain("/f2/banking?bank_connected=1");
+
+    const syncRes = await app.request("/f2/bank-connections/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(syncRes.status).toBe(200);
+    const syncBody = (await syncRes.json()) as { created: number; skipped: boolean };
+    expect(syncBody.skipped).toBe(false);
+    expect(syncBody.created).toBeGreaterThan(0);
+  });
+});
+
 describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
   const managerRoutes: Array<{ path: string; method: string; body?: Record<string, unknown> }> = [
     { path: "/f2/payments/candidates", method: "POST", body: { movements: [{ amountCents: 100 }] } },
@@ -1314,10 +1652,15 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
       body: { accountIban: "PT50001800034978380602065" },
     },
     { path: "/f2/bank-connections", method: "GET" },
+    { path: "/f2/bank-connections/authorize", method: "POST", body: {} },
+    { path: "/f2/bank-connections/reauthorize", method: "POST", body: {} },
+    { path: "/f2/bank-connections/revoke", method: "POST", body: {} },
+    { path: "/f2/bank-connections/sync", method: "POST", body: {} },
     { path: "/f2/jobs/reauth-notices", method: "POST", body: {} },
     { path: "/f2/jobs/monthly-notices", method: "POST", body: {} },
     { path: "/f2/jobs/receipt-sweep", method: "POST", body: {} },
     { path: "/f2/jobs/calendar-sweep", method: "POST", body: {} },
+    { path: "/f2/jobs/bank-sync", method: "POST", body: {} },
   ];
 
   test("Owner e Fiscalizacao recebem 403", async () => {

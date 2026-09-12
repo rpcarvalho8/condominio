@@ -118,10 +118,15 @@ const MANAGER_ROUTES: Array<{ path: string; method: string; body?: Record<string
     body: { accountIban: "PT50001800034978380602065" },
   },
   { path: "/f2/bank-connections", method: "GET" },
+  { path: "/f2/bank-connections/authorize", method: "POST", body: {} },
+  { path: "/f2/bank-connections/reauthorize", method: "POST", body: {} },
+  { path: "/f2/bank-connections/revoke", method: "POST", body: {} },
+  { path: "/f2/bank-connections/sync", method: "POST", body: {} },
   { path: "/f2/jobs/reauth-notices", method: "POST", body: {} },
   { path: "/f2/jobs/monthly-notices", method: "POST", body: {} },
   { path: "/f2/jobs/receipt-sweep", method: "POST", body: {} },
   { path: "/f2/jobs/calendar-sweep", method: "POST", body: {} },
+  { path: "/f2/jobs/bank-sync", method: "POST", body: {} },
 ];
 
 async function seedFracaoWithObligations(tenantId: string, year = 2026) {

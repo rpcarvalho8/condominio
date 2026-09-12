@@ -20,6 +20,7 @@ import AtasPage from "./pages/atas";
 import ReunioesPage from "./pages/reunioes";
 import PedidosPage from "./pages/pedidos";
 import EmailsPage from "./pages/emails";
+import F2BankingPage from "./pages/f2-banking";
 
 export default function App() {
   return (
@@ -60,6 +61,7 @@ export default function App() {
               <Route path="/reunioes" component={ReunioesPage} />
               <Route path="/pedidos" component={PedidosPage} />
               <Route path="/emails" component={EmailsPage} />
+              <Route path="/f2/banking" component={F2BankingPage} />
             </Switch>
           </Layout>
         </ProtectedRoute>

@@ -20,8 +20,10 @@ export const OUTBOX_JOB_TYPES = {
   issueReceipt: "f2.issue_receipt",
   /** F2 — sweep de recibos em falta. */
   sweepReceipts: "f2.sweep_receipts",
-  /** F2 — aviso proactivo de reautorização bancária (não é sync PSD2). */
+  /** F2 — aviso proactivo de reautorização bancária (coexiste com reauth PSD2 real). */
   bankReauthNotice: "notify.bank_reauth",
+  /** F2 — sync Enable Banking → movimentos + Payments candidatos. */
+  bankSync: "f2.bank_sync",
 } as const;
 
 export type OutboxJob = {

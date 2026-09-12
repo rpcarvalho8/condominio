@@ -138,6 +138,11 @@ const DDL = [
     last_error TEXT,
     last_reauth_notice_at INTEGER,
     revoked_at INTEGER,
+    session_id TEXT,
+    account_uid TEXT,
+    consent_scopes TEXT,
+    accounts_json TEXT,
+    auth_state TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
@@ -190,6 +195,11 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS financial_documents_notice_period_uq
     ON financial_documents (tenant_id, fracao_id, period_label)
     WHERE doc_type = 'PaymentNotice' AND fracao_id IS NOT NULL AND period_label IS NOT NULL`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN session_id TEXT`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN account_uid TEXT`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN consent_scopes TEXT`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN accounts_json TEXT`,
+  `ALTER TABLE condo_bank_connections ADD COLUMN auth_state TEXT`,
 ];
 
 async function execSafe(client: SqlExecutor, stmt: string): Promise<void> {

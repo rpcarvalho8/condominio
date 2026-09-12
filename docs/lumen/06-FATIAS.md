@@ -178,7 +178,7 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 **GO:** só depois do Domain Kernel (F0) congelado e do vertical slice F1 a passar.
 
-**Estado de código:** ver [F2-IMPLEMENTACAO.md](F2-IMPLEMENTACAO.md) — Finance Kernel + critério F2 + testes adversariais do kernel (`test:f2-adversarial`). Enable Banking PSD2 só depois (ordem §8). Dual-write Fonte fica fora deste slice.
+**Estado de código:** ver [F2-IMPLEMENTACAO.md](F2-IMPLEMENTACAO.md) — Finance Kernel + critério F2 + testes adversariais + Enable Banking PSD2 (consentimento ASPSP, sync → candidatos, reauth real + aviso proactivo, fallback CSV). Dual-write Fonte (`Quota.pago`) fica fora deste slice.
 
 ---
 

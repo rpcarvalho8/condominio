@@ -1,7 +1,6 @@
 /**
  * BankConnection — ciclo de vida na conta do condomínio (ADR-014).
- * Este slice fecha o critério F2 com aviso proactivo de reautorização.
- * Sync Enable Banking / PSD2 fica para depois dos testes adversariais do kernel.
+ * Aviso proactivo de reautorização + campos de sessão PSD2 (sync em f2-bank-sync).
  */
 import { and, eq } from "drizzle-orm";
 import { condoBankConnections, memberships, persons } from "../../database/schema";
@@ -49,6 +48,26 @@ function consentNeedsReauth(validUntil: Date | null, now: Date): boolean {
   if (!validUntil) return false;
   const leadMs = BANK_REAUTH_LEAD_DAYS * 24 * 60 * 60 * 1000;
   return validUntil.getTime() - now.getTime() <= leadMs;
+}
+
+export function consentHasExpired(validUntil: Date | null, now: Date): boolean {
+  if (!validUntil) return false;
+  return validUntil.getTime() < now.getTime();
+}
+
+export function isBankCsvFallback(row: {
+  consentStatus: string;
+  reauthorizationRequired: number | boolean | null;
+  revokedAt?: Date | null;
+  sessionId?: string | null;
+  accountUid?: string | null;
+}): boolean {
+  if (row.revokedAt) return true;
+  if (row.consentStatus === BANK_CONSENT_STATUS.revoked) return true;
+  if (row.consentStatus === BANK_CONSENT_STATUS.expired) return true;
+  if (row.reauthorizationRequired === 1 || row.reauthorizationRequired === true) return true;
+  if (row.consentStatus === BANK_CONSENT_STATUS.reauthorizationRequired) return true;
+  return !row.sessionId || !row.accountUid;
 }
 
 function noticeKey(tenantId: string, connectionId: string, validUntil: Date | null): string {
@@ -144,42 +163,68 @@ export async function upsertBankConnection(
     authorizedByMembershipId?: string | null;
     lastSyncAt?: Date | null;
     lastError?: string | null;
+    sessionId?: string | null;
+    accountUid?: string | null;
+    consentScopes?: string | null;
+    accountsJson?: string | null;
+    authState?: string | null;
     actor?: Actor;
   },
 ) {
   const now = kernelNow(deps);
-  const consentStatus = asConsent(input.consentStatus);
-  const consentValidUntil = parseUntil(input.consentValidUntil);
-  const needs = consentNeedsReauth(consentValidUntil, now);
+  const existing = await deps.db
+    .select()
+    .from(condoBankConnections)
+    .where(eq(condoBankConnections.tenantId, input.tenantId))
+    .limit(1);
+  const consentStatus = asConsent(input.consentStatus ?? existing[0]?.consentStatus);
+  const until =
+    input.consentValidUntil !== undefined
+      ? parseUntil(input.consentValidUntil)
+      : (existing[0]?.consentValidUntil ?? null);
+  const needs = consentNeedsReauth(until, now);
+  const expired = consentHasExpired(until, now);
   const status =
     consentStatus === BANK_CONSENT_STATUS.revoked
       ? BANK_CONSENT_STATUS.revoked
-      : needs
-        ? BANK_CONSENT_STATUS.reauthorizationRequired
-        : consentStatus;
+      : expired
+        ? BANK_CONSENT_STATUS.expired
+        : needs
+          ? BANK_CONSENT_STATUS.reauthorizationRequired
+          : consentStatus;
 
   const authorizedBy = input.authorizedByMembershipId?.trim() || null;
   if (authorizedBy) {
     await assertAuthorizedMembership(deps, input.tenantId, authorizedBy);
   }
 
-  const existing = await deps.db
-    .select()
-    .from(condoBankConnections)
-    .where(eq(condoBankConnections.tenantId, input.tenantId))
-    .limit(1);
-
   const values = {
-    provider: input.provider ?? "enable_banking",
-    aspsp: input.aspsp ?? null,
-    accountIban: input.accountIban ?? null,
+    provider: input.provider ?? existing[0]?.provider ?? "enable_banking",
+    aspsp: input.aspsp !== undefined ? input.aspsp : (existing[0]?.aspsp ?? null),
+    accountIban:
+      input.accountIban !== undefined ? input.accountIban : (existing[0]?.accountIban ?? null),
     consentStatus: status,
-    consentValidUntil,
-    reauthorizationRequired: needs && consentStatus !== BANK_CONSENT_STATUS.revoked ? 1 : 0,
+    consentValidUntil: until,
+    reauthorizationRequired:
+      consentStatus === BANK_CONSENT_STATUS.revoked
+        ? 0
+        : consentStatus === BANK_CONSENT_STATUS.reauthorizationRequired || needs || expired
+          ? 1
+          : 0,
     authorizedByMembershipId: authorizedBy ?? existing[0]?.authorizedByMembershipId ?? null,
-    lastSyncAt: input.lastSyncAt ?? existing[0]?.lastSyncAt ?? null,
-    lastError: input.lastError ?? null,
-    revokedAt: consentStatus === BANK_CONSENT_STATUS.revoked ? now : null,
+    lastSyncAt: input.lastSyncAt !== undefined ? input.lastSyncAt : (existing[0]?.lastSyncAt ?? null),
+    lastError: input.lastError !== undefined ? input.lastError : (existing[0]?.lastError ?? null),
+    revokedAt:
+      consentStatus === BANK_CONSENT_STATUS.revoked
+        ? (existing[0]?.revokedAt ?? now)
+        : null,
+    sessionId: input.sessionId !== undefined ? input.sessionId : (existing[0]?.sessionId ?? null),
+    accountUid: input.accountUid !== undefined ? input.accountUid : (existing[0]?.accountUid ?? null),
+    consentScopes:
+      input.consentScopes !== undefined ? input.consentScopes : (existing[0]?.consentScopes ?? null),
+    accountsJson:
+      input.accountsJson !== undefined ? input.accountsJson : (existing[0]?.accountsJson ?? null),
+    authState: input.authState !== undefined ? input.authState : (existing[0]?.authState ?? null),
     updatedAt: now,
   };
 
@@ -227,6 +272,55 @@ export async function listBankConnections(deps: KernelDeps, tenantId: string) {
     .select()
     .from(condoBankConnections)
     .where(eq(condoBankConnections.tenantId, tenantId));
+}
+
+export type PublicBankConnection = {
+  id: string;
+  tenantId: string;
+  provider: string;
+  aspsp: string | null;
+  accountIban: string | null;
+  consentStatus: string;
+  consentValidUntil: Date | null;
+  consentScopes: string[];
+  reauthorizationRequired: boolean;
+  authorizedByMembershipId: string | null;
+  lastSyncAt: Date | null;
+  lastError: string | null;
+  lastReauthNoticeAt: Date | null;
+  revokedAt: Date | null;
+  csvFallback: boolean;
+  hasSession: boolean;
+};
+
+export function toPublicBankConnection(
+  row: typeof condoBankConnections.$inferSelect,
+): PublicBankConnection {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    provider: row.provider,
+    aspsp: row.aspsp,
+    accountIban: row.accountIban,
+    consentStatus: row.consentStatus,
+    consentValidUntil: row.consentValidUntil,
+    consentScopes: (() => {
+      try {
+        const parsed = row.consentScopes ? (JSON.parse(row.consentScopes) as unknown) : [];
+        return Array.isArray(parsed) ? parsed.map(String) : [];
+      } catch {
+        return [];
+      }
+    })(),
+    reauthorizationRequired: Boolean(row.reauthorizationRequired),
+    authorizedByMembershipId: row.authorizedByMembershipId,
+    lastSyncAt: row.lastSyncAt,
+    lastError: row.lastError,
+    lastReauthNoticeAt: row.lastReauthNoticeAt,
+    revokedAt: row.revokedAt,
+    csvFallback: isBankCsvFallback(row),
+    hasSession: Boolean(row.sessionId && row.accountUid),
+  };
 }
 
 async function issueReauthNotice(
@@ -285,7 +379,7 @@ async function issueReauthNotice(
         consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
         leadDays: BANK_REAUTH_LEAD_DAYS,
       },
-      reason: "aviso proactivo de reautorização (critério F2; sync PSD2 posterior)",
+      reason: "aviso proactivo de reautorização (coexiste com reauth PSD2 real)",
       source: "f2",
     });
 

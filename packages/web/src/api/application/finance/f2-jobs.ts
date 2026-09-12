@@ -14,6 +14,7 @@ import { OUTBOX_JOB_TYPES } from "../../domain/outbox";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
 import { sweepBankReauthNotices } from "./f2-bank-connection";
+import { enqueueAuthorizedBankSyncJobs } from "./f2-bank-sync";
 import { issuePaymentNotice, issueReceiptForPayment } from "./f2-finance";
 
 type Actor = {
@@ -209,18 +210,22 @@ export async function enqueueMonthlyNoticeJob(
 }
 
 /**
- * Calendário F2: reauth + avisos dia 1 + sweep de recibos.
+ * Calendário F2: reauth proactivo + sync PSD2 (se sessão válida) + avisos dia 1 + recibos.
  */
 export async function runF2CalendarSweep(
   deps: KernelDeps,
   input: { tenantId: string; actor?: Actor; forceNotices?: boolean },
 ) {
   const reauth = await sweepBankReauthNotices(deps, input);
+  const bankSync = await enqueueAuthorizedBankSyncJobs(deps, {
+    tenantId: input.tenantId,
+    correlationId: input.actor?.requestId ?? null,
+  });
   const notices = await generateMonthlyPaymentNotices(deps, {
     tenantId: input.tenantId,
     actor: input.actor,
     force: input.forceNotices,
   });
   const receipts = await sweepReceiptsForAllocatedPayments(deps, input);
-  return { reauth, notices, receipts, at: kernelNow(deps).toISOString() };
+  return { reauth, bankSync, notices, receipts, at: kernelNow(deps).toISOString() };
 }
