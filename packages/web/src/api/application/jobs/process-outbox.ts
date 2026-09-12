@@ -11,6 +11,10 @@ import {
   looksLikeEmail,
   resolveFinanceManagerEmails,
 } from "../finance/f2-bank-connection";
+import {
+  isInvitationNotifyJob,
+  redactInvitationOutboxPayload,
+} from "../invitation/invitation-secrets";
 
 export type OutboxHandler = (job: OutboxJob, deps: KernelDeps) => Promise<void>;
 
@@ -259,7 +263,10 @@ export async function processOutbox(
     }
     try {
       await handler(job, deps);
-      await repo.markCompleted(job.id, now);
+      const redacted = isInvitationNotifyJob(job.jobType)
+        ? JSON.stringify(redactInvitationOutboxPayload(job.payload))
+        : undefined;
+      await repo.markCompleted(job.id, now, redacted ? { payloadJson: redacted } : undefined);
       completed++;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

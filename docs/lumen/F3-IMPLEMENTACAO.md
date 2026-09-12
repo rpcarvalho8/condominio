@@ -58,15 +58,17 @@ cd packages/web && bun run test:f1 && bun run test:f2 && bun run test:f3
 
 Gestor (Membership Admin/PlatformAdmin):
 
-- `POST /api/f3/invitations` `{ fracaoId, contacto, canal?, personName?, roleCode? }`
-- `POST /api/f3/invitations/lote` `{ items[] }` **ou** `{ contactDraftIds[] }`
+- `POST /api/f3/invitations` `{ fracaoId, contacto, canal?, personName?, roleCode?, expiresInMs? }` — devolve `token` **uma única vez** (plaintext nunca persistido; one-time)
+- `POST /api/f3/invitations/lote` `{ items[] }` **ou** `{ contactDraftIds[] }` — resposta `{ created[], errors[] }` (sem sucesso parcial silencioso)
 - `GET  /api/f3/invitations?loteId=`
-- `POST /api/f3/invitations/:id/revoke`
+- `POST /api/f3/invitations/:id/revoke` — condicional a `pending` (409 se já aceite)
 - `GET  /api/f3/activation`
 
 Público (token opaco; sem Membership):
 
 - `GET  /api/f3/public/invitations/:token`
-- `POST /api/f3/public/invitations/:token/verify/request`
+- `POST /api/f3/public/invitations/:token/verify/request` — **não** devolve `code` / `verificationToken` (só outbox)
 - `POST /api/f3/public/invitations/:token/verify/confirm` `{ code }` ou `{ verificationToken }`
-- `POST /api/f3/public/invitations/:token/accept` — exige contacto já verificado
+- `POST /api/f3/public/invitations/:token/accept` — `userId` só da sessão; exige contacto já verificado
+
+Rate limit mínimo (IP + token) em verify/request, verify/confirm e accept.

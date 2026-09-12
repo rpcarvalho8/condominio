@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { DomainError } from "./errors";
 import { isKernelRoleCode, type KernelRoleCode } from "./roles";
 
@@ -20,6 +20,8 @@ export type InvitationChannel = (typeof INVITATION_CHANNELS)[keyof typeof INVITA
 
 /** Default lifetime — few days (02-DOMINIO / 04-PORTAS). */
 export const INVITATION_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Hard cap on manager-supplied expiresInMs (30 days). */
+export const INVITATION_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const VERIFICATION_CODE_TTL_MS = 15 * 60 * 1000;
 export const MAX_VERIFICATION_ATTEMPTS = 5;
 export const MAX_VERIFICATION_REQUESTS = 5;
@@ -82,6 +84,27 @@ export function generateOpaqueToken(): string {
 
 export function hashOpaqueSecret(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+/**
+ * Compare a stored SHA-256 hex against plaintext without leaking length/timing
+ * of the candidate via `===` short-circuit.
+ */
+export function opaqueHashEquals(
+  storedHash: string | null | undefined,
+  plaintext: string | null | undefined,
+): boolean {
+  const computed = hashOpaqueSecret((plaintext ?? "").trim());
+  const stored = typeof storedHash === "string" ? storedHash : "";
+  const a = Buffer.from(stored.padEnd(computed.length, "0").slice(0, computed.length));
+  const b = Buffer.from(computed);
+  const match = a.length === b.length && timingSafeEqual(a, b);
+  return Boolean(stored) && Boolean(plaintext?.trim()) && stored.length === computed.length && match;
+}
+
+export function clampInvitationTtl(expiresInMs?: number | null): number {
+  const requested = expiresInMs && expiresInMs > 0 ? expiresInMs : INVITATION_DEFAULT_TTL_MS;
+  return Math.min(requested, INVITATION_MAX_TTL_MS);
 }
 
 export function generateVerificationCode(): string {

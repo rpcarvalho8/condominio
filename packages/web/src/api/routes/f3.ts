@@ -9,6 +9,10 @@ import {
   createInvitationLote,
 } from "../application/invitation/create-invitation";
 import { listInvitations } from "../application/invitation/list-invitations";
+import {
+  assertF3PublicRateLimit,
+  clientIpFromHeaders,
+} from "../application/invitation/public-rate-limit";
 import { revokeInvitation } from "../application/invitation/revoke-invitation";
 import {
   confirmContactVerification,
@@ -43,7 +47,8 @@ function httpError(
       return { message: err.message, status };
     }
   }
-  console.error("[f3]", err);
+  // Never log request bodies / contactos / tokens.
+  console.error("[f3]", err instanceof Error ? err.name : "unknown_error");
   return { message: "Erro interno", status: 500 };
 }
 
@@ -59,6 +64,17 @@ function actorFrom(c: {
     source: "http" as const,
     requestId: requestIdFrom(c),
   };
+}
+
+function enforcePublicRateLimit(
+  c: { req: { header: (name: string) => string | undefined; param: (name: string) => string } },
+  action: string,
+): void {
+  assertF3PublicRateLimit({
+    ip: clientIpFromHeaders((name) => c.req.header(name)),
+    token: c.req.param("token"),
+    action,
+  });
 }
 
 /** F3 — Invitation + verificação de contacto. Sem QR físico (ADR-001). */
@@ -78,14 +94,12 @@ export function createF3Routes(deps: KernelDeps) {
     })
     .post("/public/invitations/:token/verify/request", async (c) => {
       try {
+        enforcePublicRateLimit(c, "verify-request");
         const result = await requestContactVerification(deps, {
           token: c.req.param("token"),
           requestId: requestIdFrom(c),
         });
-        return c.json({
-          invitation: result.invitation,
-          verificationToken: result.verificationToken || undefined,
-        });
+        return c.json({ invitation: result.invitation });
       } catch (err) {
         const mapped = httpError(err);
         return c.json({ message: mapped.message }, mapped.status);
@@ -93,6 +107,7 @@ export function createF3Routes(deps: KernelDeps) {
     })
     .post("/public/invitations/:token/verify/confirm", async (c) => {
       try {
+        enforcePublicRateLimit(c, "verify-confirm");
         const body = (await c.req.json().catch(() => ({}))) as {
           code?: string;
           verificationToken?: string;
@@ -111,15 +126,15 @@ export function createF3Routes(deps: KernelDeps) {
     })
     .post("/public/invitations/:token/accept", async (c) => {
       try {
+        enforcePublicRateLimit(c, "accept");
         const body = (await c.req.json().catch(() => ({}))) as {
           name?: string;
           email?: string;
-          userId?: string;
         };
         const sessionUser = c.get("user") as { id?: string; email?: string; name?: string } | null;
         const result = await acceptInvitation(deps, {
           token: c.req.param("token"),
-          userId: sessionUser?.id ?? body.userId ?? null,
+          userId: sessionUser?.id ?? null,
           name: body.name ?? sessionUser?.name ?? null,
           email: body.email ?? sessionUser?.email ?? null,
           requestId: requestIdFrom(c),
@@ -170,6 +185,7 @@ export function createF3Routes(deps: KernelDeps) {
           expiresInMs: body.expiresInMs,
           actor: actorFrom(c),
         });
+        // `token` is returned once (never stored in plaintext). Treat as one-time.
         return c.json(result, 201);
       } catch (err) {
         const mapped = httpError(err);

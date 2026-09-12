@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+  clampInvitationTtl,
   generateOpaqueToken,
   generateVerificationCode,
   hashOpaqueSecret,
   INVITATION_CHANNELS,
+  INVITATION_DEFAULT_TTL_MS,
+  INVITATION_MAX_TTL_MS,
   maskContact,
   OPAQUE_TOKEN_BYTES,
+  opaqueHashEquals,
 } from "./invitation";
 
 describe("Invitation token / contacto", () => {
@@ -33,5 +37,21 @@ describe("Invitation token / contacto", () => {
   test("código de verificação tem 6 dígitos", () => {
     const code = generateVerificationCode();
     expect(code).toMatch(/^\d{6}$/);
+  });
+
+  test("opaqueHashEquals usa comparação de comprimento constante", () => {
+    const code = "123456";
+    const hash = hashOpaqueSecret(code);
+    expect(opaqueHashEquals(hash, code)).toBe(true);
+    expect(opaqueHashEquals(hash, "000000")).toBe(false);
+    expect(opaqueHashEquals(null, code)).toBe(false);
+    expect(opaqueHashEquals(hash, "")).toBe(false);
+    expect(opaqueHashEquals(hash, "1234567")).toBe(false);
+  });
+
+  test("expiresInMs do gestor é limitado a 30 dias", () => {
+    expect(clampInvitationTtl(undefined)).toBe(INVITATION_DEFAULT_TTL_MS);
+    expect(clampInvitationTtl(1_000)).toBe(1_000);
+    expect(clampInvitationTtl(INVITATION_MAX_TTL_MS + 86_400_000)).toBe(INVITATION_MAX_TTL_MS);
   });
 });

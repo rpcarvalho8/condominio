@@ -5,13 +5,14 @@ import { DOMAIN_EVENT_TYPES } from "../../domain/domain-event";
 import { DomainError } from "../../domain/errors";
 import {
   assertInvitationTokenOpaque,
+  clampInvitationTtl,
   defaultInvitationRole,
   generateOpaqueToken,
   hashOpaqueSecret,
   INVITATION_CHANNELS,
-  INVITATION_DEFAULT_TTL_MS,
   isInvitationChannel,
   looksLikeEmail,
+  maskContact,
   normalizeContact,
   toPublicInvitation,
   type InvitationPublicView,
@@ -105,7 +106,7 @@ export async function createInvitation(
   const token = generateOpaqueToken();
   const id = crypto.randomUUID();
   assertInvitationTokenOpaque(token, id);
-  const ttl = input.expiresInMs && input.expiresInMs > 0 ? input.expiresInMs : INVITATION_DEFAULT_TTL_MS;
+  const ttl = clampInvitationTtl(input.expiresInMs);
 
   const invitation = await repo.insert({
     id,
@@ -179,6 +180,14 @@ export async function createInvitation(
   return { invitation: publicView, token };
 }
 
+export type LoteInvitationError = {
+  index: number;
+  fracaoId: string;
+  contactoMasked: string;
+  code: string;
+  message: string;
+};
+
 export async function createInvitationLote(
   deps: KernelDeps,
   input: {
@@ -186,21 +195,43 @@ export async function createInvitationLote(
     items: CreateInvitationItem[];
     actor: InvitationActor;
   },
-): Promise<{ loteId: string; invitations: CreatedInvitation[] }> {
+): Promise<{
+  loteId: string;
+  invitations: CreatedInvitation[];
+  created: CreatedInvitation[];
+  errors: LoteInvitationError[];
+}> {
   if (!input.items.length) {
     throw new DomainError("lote_empty", "Lote sem convites", 400);
   }
   const loteId = crypto.randomUUID();
   const created: CreatedInvitation[] = [];
-  for (const item of input.items) {
-    created.push(
-      await createInvitation(deps, {
-        ...item,
-        tenantId: input.tenantId,
-        loteId,
-        actor: input.actor,
-      }),
-    );
+  const errors: LoteInvitationError[] = [];
+  for (const [index, item] of input.items.entries()) {
+    try {
+      created.push(
+        await createInvitation(deps, {
+          ...item,
+          tenantId: input.tenantId,
+          loteId,
+          actor: input.actor,
+        }),
+      );
+    } catch (err) {
+      if (!(err instanceof DomainError)) throw err;
+      const canal = (item.canal ?? INVITATION_CHANNELS.email).trim();
+      const contacto = item.contacto ? normalizeContact(canal, item.contacto) : "";
+      errors.push({
+        index,
+        fracaoId: item.fracaoId,
+        contactoMasked: contacto ? maskContact(canal, contacto) : "",
+        code: err.code,
+        message: err.message,
+      });
+    }
   }
-  return { loteId, invitations: created };
+  if (created.length === 0 && errors.length > 0) {
+    throw new DomainError(errors[0]!.code, errors[0]!.message, 400);
+  }
+  return { loteId, invitations: created, created, errors };
 }

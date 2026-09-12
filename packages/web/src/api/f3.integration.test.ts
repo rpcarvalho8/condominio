@@ -19,6 +19,8 @@ import {
 } from "./application/constitution/f1-constitution";
 import { acceptInvitation } from "./application/invitation/accept-invitation";
 import { createInvitation, createInvitationLote } from "./application/invitation/create-invitation";
+import { readContactVerificationFromOutbox, resetInvitationSecretHarness } from "./application/invitation/invitation-secrets";
+import { F3_PUBLIC_RATE_MAX, resetF3PublicRateLimit } from "./application/invitation/public-rate-limit";
 import { listInvitations } from "./application/invitation/list-invitations";
 import { revokeInvitation } from "./application/invitation/revoke-invitation";
 import {
@@ -30,7 +32,7 @@ import { processOutbox } from "./application/jobs/process-outbox";
 import { INGEST_DOCUMENT_KINDS } from "./domain/constitution";
 import { AUDIT_TYPES } from "./domain/audit";
 import { DomainError } from "./domain/errors";
-import { hashOpaqueSecret, INVITATION_STATUS } from "./domain/invitation";
+import { hashOpaqueSecret, INVITATION_MAX_TTL_MS, INVITATION_STATUS } from "./domain/invitation";
 import { OUTBOX_JOB_TYPES } from "./domain/outbox";
 import { applyDomainKernelSchema } from "./infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "./infra/f1-schema";
@@ -133,6 +135,8 @@ beforeEach(async () => {
   currentUser = null;
   tenantIdOverride = TENANT_A;
   deps.now = undefined;
+  resetInvitationSecretHarness();
+  resetF3PublicRateLimit();
   for (const table of [
     "invitations",
     "memberships",
@@ -192,6 +196,8 @@ describe("F3 Invitation — núcleo", () => {
     expect(inviteJobs).toHaveLength(1);
     expect(inviteJobs[0]!.status).toBe("completed");
     expect(inviteJobs[0]!.idempotencyKey).toBe(`notify:invitation:${created.invitation.id}:created`);
+    const createdPayload = JSON.parse(inviteJobs[0]!.payloadJson) as { token?: string };
+    expect(createdPayload.token).toBe("[REDACTED]");
 
     const again = await enqueueOutboxJob(deps, {
       tenantId: TENANT_A,
@@ -216,6 +222,7 @@ describe("F3 Invitation — núcleo", () => {
       actor: { personId: null, userId: null, requestId: "lote-1" },
     });
     expect(lote.invitations).toHaveLength(2);
+    expect(lote.errors).toHaveLength(0);
     expect(lote.invitations[0]!.invitation.loteId).toBe(lote.loteId);
     expect(lote.invitations[1]!.invitation.loteId).toBe(lote.loteId);
 
@@ -268,15 +275,21 @@ describe("F3 Invitation — núcleo", () => {
     ).rejects.toMatchObject({ code: "contact_not_verified" });
 
     const issued = await requestContactVerification(deps, { token: created.token });
-    expect(issued.verificationToken.length).toBeGreaterThan(20);
+    expect("verificationToken" in issued).toBe(false);
+    expect("code" in issued).toBe(false);
+
+    const secrets = await readContactVerificationFromOutbox(deps, created.invitation.id);
+    expect(secrets.code).toMatch(/^\d{6}$/);
+    expect(secrets.verificationToken.length).toBeGreaterThan(20);
 
     const jobs = await deps.db
       .select()
       .from(schema.outboxJobs)
       .where(eq(schema.outboxJobs.jobType, OUTBOX_JOB_TYPES.notifyInvitationVerify));
     expect(jobs.length).toBeGreaterThanOrEqual(1);
-    const payload = JSON.parse(jobs[0]!.payloadJson) as { code: string };
-    expect(payload.code).toMatch(/^\d{6}$/);
+    const payload = JSON.parse(jobs[0]!.payloadJson) as { code?: string; verificationToken?: string };
+    expect(payload.code).toBe("[REDACTED]");
+    expect(payload.verificationToken).toBe("[REDACTED]");
 
     await expect(
       confirmContactVerification(deps, { token: created.token, code: "000000" }),
@@ -284,7 +297,7 @@ describe("F3 Invitation — núcleo", () => {
 
     const confirmed = await confirmContactVerification(deps, {
       token: created.token,
-      code: payload.code,
+      code: secrets.code,
     });
     expect(confirmed.contactVerified).toBe(true);
 
@@ -318,10 +331,11 @@ describe("F3 Invitation — núcleo", () => {
       contacto: "ana@condo.test",
       actor: { personId: null, userId: null },
     });
-    const issued = await requestContactVerification(deps, { token: created.token });
+    await requestContactVerification(deps, { token: created.token });
+    const anaSecrets = await readContactVerificationFromOutbox(deps, created.invitation.id);
     await confirmContactVerification(deps, {
       token: created.token,
-      verificationToken: issued.verificationToken,
+      verificationToken: anaSecrets.verificationToken,
     });
     await acceptInvitation(deps, {
       token: created.token,
@@ -396,6 +410,102 @@ describe("F3 Invitation — núcleo", () => {
     expect(confirmed.contacts).toHaveLength(1);
     const invitations = await createInvitationRepo(deps.db).listByTenant(TENANT_A);
     expect(invitations).toHaveLength(0);
+  });
+
+  test("double-accept race: só uma Membership e o segundo falha 409", async () => {
+    const [fracao] = await seedFracoes(TENANT_A, ["A"]);
+    const created = await createInvitation(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      contacto: "race@condo.test",
+      personName: "Race",
+      actor: { personId: null, userId: null, requestId: "race-1" },
+    });
+    await requestContactVerification(deps, { token: created.token });
+    const secrets = await readContactVerificationFromOutbox(deps, created.invitation.id);
+    await confirmContactVerification(deps, { token: created.token, code: secrets.code });
+
+    const results = await Promise.allSettled([
+      acceptInvitation(deps, { token: created.token, userId: "user-race-a", name: "Race A" }),
+      acceptInvitation(deps, { token: created.token, userId: "user-race-b", name: "Race B" }),
+    ]);
+    const ok = results.filter((r) => r.status === "fulfilled");
+    const failed = results.filter((r) => r.status === "rejected");
+    expect(ok).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    const reason = (failed[0] as PromiseRejectedResult).reason as DomainError;
+    expect(reason).toBeInstanceOf(DomainError);
+    expect(reason.httpStatus).toBe(409);
+
+    const memberships = await deps.db
+      .select()
+      .from(schema.memberships)
+      .where(eq(schema.memberships.fracaoId, fracao.id));
+    expect(memberships).toHaveLength(1);
+
+    const stored = await createInvitationRepo(deps.db).findById(created.invitation.id);
+    expect(stored?.status).toBe(INVITATION_STATUS.accepted);
+    expect(
+      await createInvitationRepo(deps.db).markAccepted({
+        id: created.invitation.id,
+        usedAt: new Date(),
+        acceptedPersonId: "x",
+        acceptedMembershipId: "y",
+      }),
+    ).toBeNull();
+  });
+
+  test("lote devolve created[] e errors[] sem sucesso parcial silencioso", async () => {
+    const [fracao] = await seedFracoes(TENANT_A, ["A"]);
+    const lote = await createInvitationLote(deps, {
+      tenantId: TENANT_A,
+      items: [
+        { fracaoId: fracao.id, contacto: "ok@condo.test", personName: "Ok" },
+        { fracaoId: fracao.id, contacto: "nao-e-email", personName: "Bad" },
+      ],
+      actor: { personId: null, userId: null, requestId: "lote-partial" },
+    });
+    expect(lote.created).toHaveLength(1);
+    expect(lote.errors).toHaveLength(1);
+    expect(lote.errors[0]!.code).toBe("invalid_contact");
+    expect(lote.errors[0]!.contactoMasked).not.toContain("nao-e-email");
+    expect(await createInvitationRepo(deps.db).listByTenant(TENANT_A)).toHaveLength(1);
+  });
+
+  test("revogar após aceite falha 409 (TOCTOU-safe)", async () => {
+    const [fracao] = await seedFracoes(TENANT_A, ["A"]);
+    const created = await createInvitation(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      contacto: "rev@condo.test",
+      actor: { personId: null, userId: null },
+    });
+    await requestContactVerification(deps, { token: created.token });
+    const secrets = await readContactVerificationFromOutbox(deps, created.invitation.id);
+    await confirmContactVerification(deps, { token: created.token, code: secrets.code });
+    await acceptInvitation(deps, { token: created.token, userId: "user-rev", name: "Rev" });
+    await expect(
+      revokeInvitation(deps, {
+        invitationId: created.invitation.id,
+        tenantId: TENANT_A,
+        actor: { personId: null, userId: null },
+      }),
+    ).rejects.toMatchObject({ code: "invitation_used", httpStatus: 409 });
+  });
+
+  test("expiresInMs do gestor é limitado", async () => {
+    const [fracao] = await seedFracoes(TENANT_A, ["A"]);
+    const before = Date.now();
+    const created = await createInvitation(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      contacto: "ttl@condo.test",
+      expiresInMs: INVITATION_MAX_TTL_MS + 10 * 24 * 60 * 60 * 1000,
+      actor: { personId: null, userId: null },
+    });
+    const ttl = created.invitation.expiresAt.getTime() - before;
+    expect(ttl).toBeLessThanOrEqual(INVITATION_MAX_TTL_MS + 5_000);
+    expect(ttl).toBeGreaterThan(INVITATION_MAX_TTL_MS - 60_000);
   });
 });
 
@@ -521,12 +631,19 @@ describe("F3 Invitation — AuthZ HTTP", () => {
       method: "POST",
     });
     expect(reqVerify.status).toBe(200);
-    const verifyBody = (await reqVerify.json()) as { verificationToken: string };
+    const verifyBody = (await reqVerify.json()) as {
+      invitation: { id: string };
+      verificationToken?: string;
+      code?: string;
+    };
+    expect(verifyBody.verificationToken).toBeUndefined();
+    expect(verifyBody.code).toBeUndefined();
+    const httpSecrets = await readContactVerificationFromOutbox(deps, created.invitation.id);
 
     const confirm = await app.request(`/f3/public/invitations/${created.token}/verify/confirm`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ verificationToken: verifyBody.verificationToken }),
+      body: JSON.stringify({ verificationToken: httpSecrets.verificationToken }),
     });
     expect(confirm.status).toBe(200);
 
@@ -595,5 +712,68 @@ describe("F3 Invitation — AuthZ HTTP", () => {
     };
     expect(lote.loteId).toBeTruthy();
     expect(lote.invitations[0]!.invitation.fracaoId).toBe(fracao.id);
+  });
+
+  test("accept público ignora body.userId — só sessionUser.id", async () => {
+    const [fracao] = await seedFracoes(TENANT_A, ["A"]);
+    await seedActor({
+      userId: "user-admin-uid",
+      roleCode: "Admin",
+      name: "Admin",
+      email: "admin-uid@condo.test",
+    });
+    currentUser = { id: "user-admin-uid" };
+    const createdRes = await app.request("/f3/invitations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fracaoId: fracao.id, contacto: "uid@condo.test", personName: "Uid" }),
+    });
+    const created = (await createdRes.json()) as { token: string; invitation: { id: string } };
+    currentUser = null;
+    await app.request(`/f3/public/invitations/${created.token}/verify/request`, { method: "POST" });
+    const secrets = await readContactVerificationFromOutbox(deps, created.invitation.id);
+    await app.request(`/f3/public/invitations/${created.token}/verify/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: secrets.code }),
+    });
+    const accept = await app.request(`/f3/public/invitations/${created.token}/accept`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Attacker", userId: "attacker-chosen-id" }),
+    });
+    expect(accept.status).toBe(201);
+    const accepted = (await accept.json()) as { personId: string };
+    const person = await createPersonRepo(deps.db).findById(accepted.personId);
+    expect(person?.userId).not.toBe("attacker-chosen-id");
+    expect(person?.userId).toBeNull();
+  });
+
+  test("rate limit IP+token nos endpoints públicos F3", async () => {
+    const [fracao] = await seedFracoes(TENANT_A, ["A"]);
+    const created = await createInvitation(deps, {
+      tenantId: TENANT_A,
+      fracaoId: fracao.id,
+      contacto: "rl@condo.test",
+      actor: { personId: null, userId: null },
+    });
+    let lastStatus = 0;
+    for (let i = 0; i < F3_PUBLIC_RATE_MAX + 1; i++) {
+      const res = await app.request(`/f3/public/invitations/${created.token}/accept`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.10" },
+        body: JSON.stringify({ name: "Rl" }),
+      });
+      lastStatus = res.status;
+    }
+    expect(lastStatus).toBe(429);
+    const body = (await (
+      await app.request(`/f3/public/invitations/${created.token}/accept`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.10" },
+        body: "{}",
+      })
+    ).json()) as { message: string };
+    expect(body.message).toMatch(/Demasiados pedidos/);
   });
 });

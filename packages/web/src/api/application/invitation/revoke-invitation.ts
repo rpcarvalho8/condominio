@@ -51,6 +51,10 @@ export async function revokeInvitation(
     revokedByPersonId: input.actor.personId,
   });
   if (!revoked) {
+    const raced = await repo.findById(current.id);
+    if (raced && deriveInvitationStatus(raced, now) === INVITATION_STATUS.accepted) {
+      throw new DomainError("invitation_used", "Não é possível revogar um convite já aceite", 409);
+    }
     throw new DomainError("invitation_not_found", "Convite não encontrado", 404);
   }
 

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import { invitations } from "../../database/schema";
 import {
   INVITATION_STATUS,
@@ -122,7 +122,13 @@ export function createInvitationRepo(db: KernelDb) {
           revokedAt: input.revokedAt,
           revokedByPersonId: input.revokedByPersonId ?? null,
         })
-        .where(eq(invitations.id, input.id))
+        .where(
+          and(
+            eq(invitations.id, input.id),
+            eq(invitations.status, INVITATION_STATUS.pending),
+            isNull(invitations.usedAt),
+          ),
+        )
         .returning();
       return row ? mapInvitation(row) : null;
     },
@@ -178,7 +184,14 @@ export function createInvitationRepo(db: KernelDb) {
           acceptedPersonId: input.acceptedPersonId,
           acceptedMembershipId: input.acceptedMembershipId,
         })
-        .where(eq(invitations.id, input.id))
+        .where(
+          and(
+            eq(invitations.id, input.id),
+            eq(invitations.status, INVITATION_STATUS.pending),
+            isNull(invitations.usedAt),
+            isNotNull(invitations.contactVerifiedAt),
+          ),
+        )
         .returning();
       return row ? mapInvitation(row) : null;
     },

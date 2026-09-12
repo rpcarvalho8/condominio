@@ -7,6 +7,7 @@ import {
   hashOpaqueSecret,
   MAX_VERIFICATION_ATTEMPTS,
   MAX_VERIFICATION_REQUESTS,
+  opaqueHashEquals,
   toPublicInvitation,
   VERIFICATION_CODE_TTL_MS,
   type InvitationPublicView,
@@ -17,6 +18,7 @@ import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createInvitationRepo } from "../../infra/repos/invitation-repo";
 import { enqueueOutboxJob } from "../events/emit";
 import { processOutbox } from "../jobs/process-outbox";
+import { rememberIssuedContactVerification } from "./invitation-secrets";
 
 async function loadByToken(deps: KernelDeps, token: string) {
   if (!token?.trim()) {
@@ -42,7 +44,7 @@ export async function previewInvitationByToken(
 export async function requestContactVerification(
   deps: KernelDeps,
   input: { token: string; requestId?: string | null },
-): Promise<{ invitation: InvitationPublicView; verificationToken: string }> {
+): Promise<{ invitation: InvitationPublicView }> {
   const invitation = await loadByToken(deps, input.token);
   const now = kernelNow(deps);
   assertUsableInvitation(invitation, now);
@@ -50,7 +52,6 @@ export async function requestContactVerification(
   if (invitation.contactVerifiedAt) {
     return {
       invitation: toPublicInvitation(invitation, now),
-      verificationToken: "",
     };
   }
   if (invitation.verificationRequests >= MAX_VERIFICATION_REQUESTS) {
@@ -63,6 +64,7 @@ export async function requestContactVerification(
 
   const code = generateVerificationCode();
   const verificationToken = generateOpaqueToken();
+  rememberIssuedContactVerification(invitation.id, { code, verificationToken });
   const repo = createInvitationRepo(deps.db);
   const updated = await repo.markVerificationIssued({
     id: invitation.id,
@@ -90,7 +92,6 @@ export async function requestContactVerification(
 
   return {
     invitation: toPublicInvitation(updated ?? invitation, now),
-    verificationToken,
   };
 }
 
@@ -124,12 +125,8 @@ export async function confirmContactVerification(
     throw new DomainError("verification_expired", "Código/link de verificação expirado", 410);
   }
 
-  const codeOk =
-    Boolean(input.code?.trim()) &&
-    invitation.verificationCodeHash === hashOpaqueSecret(input.code!.trim());
-  const linkOk =
-    Boolean(input.verificationToken?.trim()) &&
-    invitation.verificationTokenHash === hashOpaqueSecret(input.verificationToken!.trim());
+  const codeOk = opaqueHashEquals(invitation.verificationCodeHash, input.code);
+  const linkOk = opaqueHashEquals(invitation.verificationTokenHash, input.verificationToken);
 
   if (!codeOk && !linkOk) {
     await createInvitationRepo(deps.db).incrementVerificationAttempts(
