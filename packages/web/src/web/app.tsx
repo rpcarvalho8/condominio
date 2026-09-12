@@ -21,12 +21,15 @@ import ReunioesPage from "./pages/reunioes";
 import PedidosPage from "./pages/pedidos";
 import EmailsPage from "./pages/emails";
 import F2BankingPage from "./pages/f2-banking";
+import F3AtivacaoPage from "./pages/f3-ativacao";
+import ConvitePage from "./pages/convite";
 
 export default function App() {
   return (
     <Switch>
       {/* Public */}
       <Route path="/login" component={LoginPage} />
+      <Route path="/convite/:token" component={ConvitePage} />
 
       {/* Condómino portal — own layout */}
       <Route path="/portal">
@@ -62,6 +65,7 @@ export default function App() {
               <Route path="/pedidos" component={PedidosPage} />
               <Route path="/emails" component={EmailsPage} />
               <Route path="/f2/banking" component={F2BankingPage} />
+              <Route path="/f3/ativacao" component={F3AtivacaoPage} />
             </Switch>
           </Layout>
         </ProtectedRoute>
