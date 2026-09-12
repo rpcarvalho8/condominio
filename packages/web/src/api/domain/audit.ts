@@ -18,6 +18,10 @@ export type AuditEvent = {
 export const AUDIT_TYPES = {
   membershipCreated: "membership.created",
   membershipRevoked: "membership.revoked",
+  invitationCreated: "invitation.created",
+  invitationRevoked: "invitation.revoked",
+  invitationAccepted: "invitation.accepted",
+  invitationContactVerified: "invitation.contact_verified",
 } as const;
 
 export type AppendAuditEventInput = {
