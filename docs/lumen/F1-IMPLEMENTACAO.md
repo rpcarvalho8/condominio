@@ -1,6 +1,6 @@
 # F1 — Estado de implementação
 
-**Branch:** `cursor/f1-minio-local-dev`  
+**Branch:** `produto` (MinIO local via #21; tip pós-merge)  
 **Base documental:** `docs/lumen/06-FATIAS.md` (F1 — Ingestão + Constituição)
 
 F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` via #19. O driver S3-compatible (env, fail-closed) entrou via #20. **Este slice é só validação técnica local com MinIO.** Não declara staging/prod ready. Não expande o produto.
