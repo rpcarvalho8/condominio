@@ -68,6 +68,16 @@ AUTUMN_SECRET_KEY=
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
 
+# Object storage (F1) — default local. Staging/prod: ver docs/lumen/F1-IMPLEMENTACAO.md
+# OBJECT_STORAGE_DRIVER=local
+# OBJECT_STORAGE_DRIVER=s3
+# S3_ENDPOINT=
+# S3_BUCKET=
+# S3_REGION=auto
+# S3_ACCESS_KEY_ID=
+# S3_SECRET_ACCESS_KEY=
+# S3_KEY_PREFIX=
+
 # ── Enable Banking ──────────────────────────────────────────────
 ENABLE_BANKING_CLIENT_ID="<application_id do portal>"
 ENABLE_BANKING_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"

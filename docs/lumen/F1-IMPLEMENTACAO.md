@@ -1,7 +1,9 @@
 # F1 — Estado de implementação
 
-**Branch:** `cursor/f1-ocr-pdf-foto-ui-admin`  
+**Branch:** `cursor/f1-s3-prod-wiring`  
 **Base documental:** `docs/lumen/06-FATIAS.md` (F1 — Ingestão + Constituição)
+
+F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` via #19. **Este slice é só ops:** ligar o driver S3-compatible em staging/prod por env, fail-closed sem credenciais, sem mudar o contrato.
 
 ## Critério do plano
 
@@ -18,7 +20,8 @@
 | Extracção texto com padrões ‰ | ✅ | Heurística |
 | Extrator OCR/LLM de PDF/foto | ✅ | Mesmo contrato `StructuredExtraction`; stub determinístico em CI; `F1_OCR_ENDPOINT` opcional |
 | HUMAN REVIEW se extracção fraca | ✅ | Nunca auto-confirma; nunca envia convites (ADR-017) |
-| Object storage adapter | ✅ | Port `put/get/exists`; local default; S3-compatible **path** via env, sem credenciais em CI |
+| Object storage adapter | ✅ | Port `put/get/exists` inalterado; local default; S3-compatible **wired** via env |
+| S3 staging/prod | ✅ | `OBJECT_STORAGE_DRIVER=s3` + `S3_*`; Bun `S3Client`; fail-closed sem credenciais |
 | Confirmação linha a linha de frações | ✅ | Σ permilagens = 1000‰ |
 | Contactos (draft + confirmação) | ✅ | Sem convites |
 | Comprovativo IBAN | ✅ | `retention_class = personal_document` |
@@ -28,15 +31,76 @@
 
 ## Ainda fora / não é deste slice
 
-- Ligar produção a S3 (só o adapter; default continua local `data/content`)
 - Provider OCR pago em CI (opcional via `F1_OCR_ENDPOINT` + `F1_OCR_API_KEY`)
 - Convites (F3) — confirmação de contactos **não** envia (ADR-017)
 - Auto-confirmação a partir de OCR — **proibido**
+- Migração massiva de blobs locais já existentes (`data/content` → bucket)
+- UI nova, Enable Banking novo, F2/F3 feature work
+
+## Ops staging / produção — S3
+
+CI e dev **permanecem** em `OBJECT_STORAGE_DRIVER=local` (omisso = local). Não forçar S3 no CI.
+
+### Variáveis
+
+| Var | Obrigatória com driver `s3` | Notas |
+|---|---|---|
+| `OBJECT_STORAGE_DRIVER` | sim (`s3` ou `s3-compatible`) | Default `local`. Sem isto, `S3_*` são ignoradas. |
+| `S3_ENDPOINT` | sim | URL S3-compatible (R2, MinIO, AWS, Spaces) |
+| `S3_BUCKET` | sim | Bucket já criado; este slice não provisiona infra |
+| `S3_REGION` | não | Default `auto`. AWS: `eu-west-1` etc. R2: `auto` |
+| `S3_ACCESS_KEY_ID` | sim | Também aceita `AWS_ACCESS_KEY_ID` |
+| `S3_SECRET_ACCESS_KEY` | sim | Também aceita `AWS_SECRET_ACCESS_KEY` |
+| `S3_KEY_PREFIX` | não | Prefixo de object key (`lumen-staging`). Alias: `S3_PREFIX` |
+| `S3_FORCE_PATH_STYLE` | não | Default path-style (S3-compatible). `0` → virtual-hosted |
+| `S3_VIRTUAL_HOSTED_STYLE` | não | `1` para AWS virtual-hosted; prevalece sobre `S3_FORCE_PATH_STYLE` |
+| `OBJECT_STORAGE_LIVE_S3` | não | `1` para smoke real no `test:f1`. **Nunca** no CI |
+
+Exemplo (Cloudflare R2 / MinIO):
+
+```env
+OBJECT_STORAGE_DRIVER=s3
+S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+S3_BUCKET=lumen-staging
+S3_REGION=auto
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_KEY_PREFIX=lumen-staging
+S3_FORCE_PATH_STYLE=1
+```
+
+AWS S3 (virtual-hosted):
+
+```env
+OBJECT_STORAGE_DRIVER=s3
+S3_ENDPOINT=https://s3.eu-west-1.amazonaws.com
+S3_BUCKET=lumen-prod
+S3_REGION=eu-west-1
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_VIRTUAL_HOSTED_STYLE=1
+```
+
+### Comportamento
+
+- Contrato `put/get/exists` **não muda**. A key continua a ser sha256 hex (`/^[a-f0-9]{64}$/`).
+- Object key no bucket: `{prefix?}{tenantId}/{sha256}.bin`.
+- Sem `S3_ENDPOINT` + `S3_BUCKET` + keys → `object_storage_unconfigured` (500) no **uso**, não no boot. Dev: `OBJECT_STORAGE_DRIVER=local`.
+- Bucket inexistente (`NoSuchBucket`) → `object_storage_s3_error` (502), **não** `exists=false`.
+- Não copia blobs já gravados em `data/content`. Ligar S3 **antes** de ingestão real nesse ambiente. Hashes locais antigos 404 se o driver passar a `s3`.
+- Segredos só em env/secret store; nunca no repo.
 
 ## Como testar
 
 ```bash
 cd packages/web && bun run test:f1 && bun run test:f2 && bun run test:f3
+```
+
+CI: stub/local. Smoke contra bucket real (opt-in):
+
+```bash
+OBJECT_STORAGE_LIVE_S3=1 OBJECT_STORAGE_DRIVER=s3 S3_ENDPOINT=... S3_BUCKET=... \
+  S3_ACCESS_KEY_ID=... S3_SECRET_ACCESS_KEY=... bun run test:f1
 ```
 
 ## API (resumo)
@@ -58,7 +122,7 @@ cd packages/web && bun run test:f1 && bun run test:f2 && bun run test:f3
 
 ## Adaptadores
 
-| Port | Default (dev/CI) | Opcional |
+| Port | Default (dev/CI) | Staging / prod |
 |---|---|---|
-| Object storage | `LocalObjectStorage` (`CONTENT_BLOB_ROOT` / `data/content`) | `OBJECT_STORAGE_DRIVER=s3` + `S3_*` (fail-closed sem credenciais; **não** migra produção) |
+| Object storage | `LocalObjectStorage` (`CONTENT_BLOB_ROOT` / `data/content`) | `OBJECT_STORAGE_DRIVER=s3` + `S3_*` (fail-closed sem credenciais; sem migração massiva) |
 | OCR/LLM | stub determinístico (texto embutido no PDF/foto) | `F1_OCR_ENDPOINT` (+ `F1_OCR_API_KEY`) — documentado, não exigido no CI |
