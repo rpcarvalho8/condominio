@@ -12,10 +12,13 @@ import * as XLSX from "xlsx";
 import * as schema from "./database/schema";
 import {
   approveBudgetAndCreateObligations,
+  confirmContactLines,
   confirmFracaoLines,
   createAnnualBudget,
+  editExtractLine,
   extractDocumentLines,
   listConstitutionFracoes,
+  listIngestDocuments,
   registerIngestDocument,
 } from "./application/constitution/f1-constitution";
 import { F1_MAX_UPLOAD_BYTES } from "./application/constitution/f1-upload-guard";
@@ -43,6 +46,19 @@ let f1App: Hono;
 let currentUser: KernelAuthUser | null = null;
 const TENANT = "tenant-f1";
 const ADMIN_USER_ID = "user-f1-admin";
+const OWNER_USER_ID = "user-f1-owner";
+
+function fakePdf(text: string): Buffer {
+  return Buffer.from(`%PDF-1.4\nBT (${text}) Tj ET\n${text}\n%%EOF\n`, "utf8");
+}
+
+function fakeJpeg(text: string): Buffer {
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]),
+    Buffer.from(`\n${text}\n`, "utf8"),
+    Buffer.from([0xff, 0xd9]),
+  ]);
+}
 
 function buildF1App() {
   return new Hono<{ Variables: KernelVariables }>()
@@ -94,6 +110,20 @@ beforeAll(async () => {
     roleCode: "Admin",
     createdAt: new Date(),
   });
+  const owner = await personRepo.insert({
+    id: crypto.randomUUID(),
+    userId: OWNER_USER_ID,
+    name: "Owner F1",
+    email: "owner-f1@example.test",
+    createdAt: new Date(),
+  });
+  await membershipRepo.insert({
+    id: crypto.randomUUID(),
+    personId: owner.id,
+    tenantId: TENANT,
+    roleCode: "Owner",
+    createdAt: new Date(),
+  });
   f1App = buildF1App();
 });
 
@@ -105,6 +135,8 @@ beforeEach(async () => {
     "constitution_fracoes",
     "extract_lines",
     "ingest_documents",
+    "owner_contact_drafts",
+    "condo_iban_proofs",
     "content_uploads",
     "outbox_jobs",
     "notification_deliveries",
@@ -397,6 +429,94 @@ describe("F1 constituição", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid_hash", httpStatus: 400 });
   });
+
+  test("upload PDF → extract-from-file (OCR stub) → pending_review com excerto", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "regulamento.pdf",
+      bytes: fakePdf("Fração A — 600‰\nFração B — 400‰"),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(extracted.lines).toHaveLength(2);
+    expect(extracted.lines.every((l) => l.status === "pending_review")).toBe(true);
+    expect(extracted.lines.every((l) => l.sourceExcerpt.trim().length > 0)).toBe(true);
+    expect(extracted.document.status).toBe("pending_review");
+  });
+
+  test("upload foto JPEG → extract-from-file → confirmar frações", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "mapa.jpg",
+      bytes: fakeJpeg("Fração A — 700‰\nFração B — 300‰"),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    const confirmed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+      confirmations: extracted.lines.map((l) => ({ lineId: l.id })),
+    });
+    expect(confirmed.permilagemSum).toBe(1000);
+  });
+
+  test("OCR fraco marca HUMAN REVIEW e não confirma", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "borrado.pdf",
+      bytes: fakePdf("lorem ipsum scan noise without permilage marks"),
+    });
+    await expect(
+      extractDocumentFromStoredContent(deps, {
+        tenantId: TENANT,
+        documentId: document.id,
+      }),
+    ).rejects.toMatchObject({ code: "human_review" });
+    const listed = await listIngestDocuments(deps, { tenantId: TENANT });
+    const row = listed.find((d) => d.id === document.id)!;
+    expect(row.status).toBe("failed");
+    expect(String(row.error ?? "").toUpperCase()).toContain("HUMAN REVIEW");
+  });
+
+  test("editar linha + confirmar contactos não dispara convites", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.contactos,
+      filename: "contactos.csv",
+      bytes: Buffer.from("fracao,nome,email\nA,Ana Silva,ana@old.test\n", "utf8"),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    const line = extracted.lines[0]!;
+    const edited = await editExtractLine(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+      lineId: line.id,
+      payload: {
+        fracaoCodigo: "A",
+        personName: "Ana Silva",
+        email: "ana@new.test",
+      },
+    });
+    expect(JSON.parse(edited.line.editedPayloadJson!)).toMatchObject({ email: "ana@new.test" });
+    const confirmed = await confirmContactLines(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+      confirmations: [{ lineId: line.id }],
+    });
+    expect(confirmed.contacts).toHaveLength(1);
+    expect(confirmed.contacts[0]!.email).toBe("ana@new.test");
+    expect(confirmed.contacts[0]!.status).toBe("confirmed");
+  });
 });
 
 describe("F1 HTTP upload guards", () => {
@@ -419,11 +539,24 @@ describe("F1 HTTP upload guards", () => {
     currentUser = { id: ADMIN_USER_ID, email: "admin-f1@example.test", name: "Admin F1" };
     const form = new FormData();
     form.set("kind", INGEST_DOCUMENT_KINDS.regulamento);
-    form.set("file", new File(["%PDF-1.4 fake"], "regulamento.pdf", { type: "application/pdf" }));
+    form.set("file", new File(["MZ fake exe"], "payload.exe", { type: "application/octet-stream" }));
     const res = await f1App.request("/f1/documents/upload", { method: "POST", body: form });
     expect(res.status).toBe(400);
     const json = (await res.json()) as { message: string };
-    expect(json.message.toLowerCase()).toMatch(/tipo|csv|excel/);
+    expect(json.message.toLowerCase()).toMatch(/tipo|csv|excel|pdf/);
+  });
+
+  test("PDF dentro do limite → 201", async () => {
+    currentUser = { id: ADMIN_USER_ID, email: "admin-f1@example.test", name: "Admin F1" };
+    const form = new FormData();
+    form.set("kind", INGEST_DOCUMENT_KINDS.regulamento);
+    const bytes = fakePdf("Fração A — 1000‰");
+    form.set("file", new File([bytes], "regulamento.pdf", { type: "application/pdf" }));
+    const res = await f1App.request("/f1/documents/upload", { method: "POST", body: form });
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as { document: { filename: string; contentHash: string } };
+    expect(json.document.filename).toBe("regulamento.pdf");
+    expect(json.document.contentHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
   test("CSV dentro do limite → 201", async () => {
@@ -439,5 +572,45 @@ describe("F1 HTTP upload guards", () => {
     const json = (await res.json()) as { document: { filename: string; contentHash: string } };
     expect(json.document.filename).toBe("fracoes.csv");
     expect(json.document.contentHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test("Owner → 403 fail-closed; sem sessão → 401", async () => {
+    currentUser = { id: OWNER_USER_ID, email: "owner-f1@example.test", name: "Owner F1" };
+    const denied = await f1App.request("/f1/documents");
+    expect(denied.status).toBe(403);
+
+    currentUser = null;
+    const unauth = await f1App.request("/f1/documents");
+    expect(unauth.status).toBe(401);
+  });
+
+  test("Admin lista documentos e extrai PDF via HTTP", async () => {
+    currentUser = { id: ADMIN_USER_ID, email: "admin-f1@example.test", name: "Admin F1" };
+    const form = new FormData();
+    form.set("kind", INGEST_DOCUMENT_KINDS.regulamento);
+    form.set(
+      "file",
+      new File([fakePdf("Fração A — 1000‰")], "mapa.pdf", { type: "application/pdf" }),
+    );
+    const uploaded = await f1App.request("/f1/documents/upload", { method: "POST", body: form });
+    expect(uploaded.status).toBe(201);
+    const body = (await uploaded.json()) as { document: { id: string } };
+
+    const extracted = await f1App.request(`/f1/documents/${body.document.id}/extract-from-file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(extracted.status).toBe(201);
+    const extractedBody = (await extracted.json()) as {
+      lines: Array<{ status: string; sourceExcerpt: string }>;
+    };
+    expect(extractedBody.lines.every((l) => l.status === "pending_review")).toBe(true);
+    expect(extractedBody.lines.every((l) => l.sourceExcerpt.length > 0)).toBe(true);
+
+    const listed = await f1App.request("/f1/documents");
+    expect(listed.status).toBe(200);
+    const listBody = (await listed.json()) as { documents: Array<{ id: string }> };
+    expect(listBody.documents.some((d) => d.id === body.document.id)).toBe(true);
   });
 });

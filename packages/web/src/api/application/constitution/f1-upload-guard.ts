@@ -1,9 +1,20 @@
 import { DomainError } from "../../domain/errors";
 
-/** Hard cap for this F1 slice (CSV / Excel / texto). */
+/** Hard cap for F1 ingest (CSV / Excel / texto / PDF / foto). */
 export const F1_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
-export const F1_ALLOWED_EXTENSIONS = [".csv", ".xlsx", ".xls", ".txt"] as const;
+export const F1_ALLOWED_EXTENSIONS = [
+  ".csv",
+  ".xlsx",
+  ".xls",
+  ".txt",
+  ".pdf",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".gif",
+] as const;
 
 export const F1_ALLOWED_MIME_TYPES = new Set([
   "text/csv",
@@ -12,6 +23,12 @@ export const F1_ALLOWED_MIME_TYPES = new Set([
   "application/csv",
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/pdf",
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "image/gif",
 ]);
 
 function maxUploadMessage(): string {
@@ -65,7 +82,7 @@ export function assertF1UploadFile(input: {
   if (!isAllowedF1UploadType(input.filename, input.mimeType)) {
     throw new DomainError(
       "unsupported_type",
-      "Tipo não suportado neste slice — use CSV, Excel (.xlsx/.xls) ou texto (.txt)",
+      "Tipo não suportado — use CSV, Excel (.xlsx/.xls), texto (.txt), PDF ou imagem (JPEG/PNG/WebP/GIF)",
       400,
     );
   }

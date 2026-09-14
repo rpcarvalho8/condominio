@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import {
   annualBudgetLines,
   annualBudgets,
@@ -238,6 +238,17 @@ export async function extractDocumentLines(
   };
 }
 
+export async function listIngestDocuments(
+  deps: KernelDeps,
+  input: { tenantId: string },
+) {
+  return deps.db
+    .select()
+    .from(ingestDocuments)
+    .where(eq(ingestDocuments.tenantId, input.tenantId))
+    .orderBy(desc(ingestDocuments.createdAt));
+}
+
 export async function listExtractLines(
   deps: KernelDeps,
   input: { tenantId: string; documentId: string },
@@ -258,6 +269,51 @@ export async function listExtractLines(
     .orderBy(asc(extractLines.lineNo));
 
   return { document: doc, lines };
+}
+
+export async function editExtractLine(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    documentId: string;
+    lineId: string;
+    payload: Record<string, unknown>;
+    actor?: Actor;
+  },
+) {
+  const { document, lines } = await listExtractLines(deps, input);
+  const line = lines.find((l) => l.id === input.lineId);
+  if (!line) throw new DomainError("line_not_found", `Linha ${input.lineId} não encontrada`, 404);
+  if (line.status !== EXTRACT_LINE_STATUS.pendingReview) {
+    throw new DomainError("line_not_editable", "Só linhas em revisão podem ser editadas", 400);
+  }
+
+  let normalized: Record<string, unknown>;
+  if (line.kind === EXTRACT_LINE_KINDS.fracao) {
+    normalized = asFracaoPayload(input.payload) as unknown as Record<string, unknown>;
+  } else if (line.kind === EXTRACT_LINE_KINDS.contacto) {
+    normalized = asContactPayload(input.payload) as unknown as Record<string, unknown>;
+  } else {
+    normalized = input.payload;
+  }
+
+  const [updated] = await deps.db
+    .update(extractLines)
+    .set({ editedPayloadJson: JSON.stringify(normalized) })
+    .where(eq(extractLines.id, line.id))
+    .returning();
+
+  await writeAudit(deps, {
+    tenantId: input.tenantId,
+    type: "ingest.line_edited",
+    entityType: "extract_line",
+    entityId: line.id,
+    actor: input.actor,
+    after: { documentId: document.id, kind: line.kind, payload: normalized },
+    reason: "Edição humana antes da confirmação — sem auto-envio",
+  });
+
+  return { document, line: updated! };
 }
 
 export async function confirmFracaoLines(

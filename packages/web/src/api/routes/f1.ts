@@ -4,9 +4,11 @@ import {
   confirmContactLines,
   confirmFracaoLines,
   createAnnualBudget,
+  editExtractLine,
   extractDocumentLines,
   listConstitutionFracoes,
   listExtractLines,
+  listIngestDocuments,
   registerIbanProof,
   registerIngestDocument,
 } from "../application/constitution/f1-constitution";
@@ -166,11 +168,41 @@ export function createF1Routes(deps: KernelDeps) {
         return c.json({ message: mapped.message }, mapped.status);
       }
     })
+    .get("/documents", async (c) => {
+      try {
+        const documents = await listIngestDocuments(deps, { tenantId: c.get("tenantId")! });
+        return c.json({ documents });
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
     .get("/documents/:id/lines", async (c) => {
       try {
         const result = await listExtractLines(deps, {
           tenantId: c.get("tenantId")!,
           documentId: c.req.param("id"),
+        });
+        return c.json(result);
+      } catch (err) {
+        const mapped = httpError(err);
+        return c.json({ message: mapped.message }, mapped.status);
+      }
+    })
+    .post("/documents/:id/lines/:lineId", async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as {
+          payload?: Record<string, unknown>;
+        };
+        if (!body.payload || typeof body.payload !== "object") {
+          return c.json({ message: "payload é obrigatório" }, 400);
+        }
+        const result = await editExtractLine(deps, {
+          tenantId: c.get("tenantId")!,
+          documentId: c.req.param("id"),
+          lineId: c.req.param("lineId"),
+          payload: body.payload,
+          actor: actorFrom(c),
         });
         return c.json(result);
       } catch (err) {

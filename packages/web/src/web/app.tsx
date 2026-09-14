@@ -20,6 +20,7 @@ import AtasPage from "./pages/atas";
 import ReunioesPage from "./pages/reunioes";
 import PedidosPage from "./pages/pedidos";
 import EmailsPage from "./pages/emails";
+import F1IngestaoPage from "./pages/f1-ingestao";
 import F2BankingPage from "./pages/f2-banking";
 import F3AtivacaoPage from "./pages/f3-ativacao";
 import F3PortalPage from "./pages/f3-portal";
@@ -68,6 +69,7 @@ export default function App() {
               <Route path="/reunioes" component={ReunioesPage} />
               <Route path="/pedidos" component={PedidosPage} />
               <Route path="/emails" component={EmailsPage} />
+              <Route path="/f1" component={F1IngestaoPage} />
               <Route path="/f2/banking" component={F2BankingPage} />
               <Route path="/f3/ativacao" component={F3AtivacaoPage} />
             </Switch>
