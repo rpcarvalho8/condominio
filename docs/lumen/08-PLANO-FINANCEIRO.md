@@ -39,6 +39,20 @@
 
 Tokens são linha de custo a monitorizar, não o driver do runway nem o risco nº1.
 
+### Medição da entrega e contribuição
+
+Registar por condomínio e ciclo: € efectivamente pagos, receita líquida atribuível ao serviço, horas de onboarding, minutos de operação/suporte, número e tempo das excepções, erros, retrabalho, operações concluídas, utilização do resultado e renovação paga. Identificar separadamente comprador autorizado e utilizador.
+
+- Receita líquida: excluir IVA cobrado, descontos e reembolsos.
+- Custo de entrega: trabalho humano, fornecedores e restantes custos directamente atribuíveis ao ciclo.
+- Contribuição do ciclo: receita líquida menos custo de entrega.
+- Onboarding e aquisição: custos iniciais separados; não os amortizar por uma duração de cliente ainda não observada.
+- Tempo do founder: mostrar custo de caixa e custo económico de remunerar/substituir esse trabalho; trabalho não remunerado não é margem.
+- Minutos humanos: separar empresa, cliente e profissionais externos. Mostrar dispersão e causas de excepção, não apenas a média.
+- Renovação: intenção declarada não equivale a novo ciclo pago e utilizado.
+
+Os valores continuam TBD até existirem registos reais. Um primeiro pagamento valida uma transacção, não retenção nem economia sustentável.
+
 ## 3. Receita unitária (piloto)
 
 | Plano | Preço lista | No piloto | Contribuição bruta / mês |

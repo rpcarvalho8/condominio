@@ -25,7 +25,7 @@ flowchart TB
     BUILDING --> GOV["GOVERNAÇÃO<br/>Assembleias · Deliberações · Votos"]
     BUILDING --> DOCS["DOCUMENTOS<br/>Regulamentos · Contratos · Atas"]
 
-    FINANCE --> LEDGER["Ledger<br/>append-only · hash-chain<br/>(evidência de não adulteração)"]
+    FINANCE --> LEDGER["Ledger<br/>append-only · hash-chain<br/>(deteção de adulteração; não imutabilidade absoluta)"]
     FINANCE --> POLICY_FIN["SettlementPolicy<br/>versionada, legal_basis"]
 
     GOV --> RULE["ResolutionRule<br/>quórum/maioria por tipo de deliberação"]

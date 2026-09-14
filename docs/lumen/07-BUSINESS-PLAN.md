@@ -128,7 +128,9 @@ Foco: canais directos que a empresa controla — funil deliberativo acima.
 
 ### Lead magnet — Relatório de Reconciliação Financeira
 
-Usando o motor de reconciliação já validado em produção num condomínio, oferece-se a qualquer condomínio interessado um relatório objetivo a partir do extrato bancário: movimentos reconciliados, não identificados, pagamentos potencialmente mal imputados, obrigações sem correspondência, itens a confirmar por humano. Nunca afirma "está a pagar a mais" nem aponta fraude de forma definitiva.
+A documentação reporta validação operacional do motor de reconciliação na Fonte; isso não demonstra, por si só, entrega multi-tenant ou valor comercial. O relatório só pode concluir sobre imputações e obrigações quando, além do extrato bancário, existirem dados de referência autorizados e rastreáveis: obrigações com origem válida, posição inicial e evidência de pagamentos. Com apenas um extrato, o âmbito limita-se à análise dos movimentos e às questões que precisam de confirmação.
+
+Antes de aceitar dados reais, confirmar a autoridade do representante, a finalidade do tratamento e os gates aplicáveis. O diagnóstico assistido não substitui o cutover nem torna o LUMEN a fonte financeira autoritativa. Nunca afirma "está a pagar a mais", recuperação de dívida ou fraude definitiva sem evidência suficiente.
 
 | Modo | Quando | Como |
 |------|--------|------|
