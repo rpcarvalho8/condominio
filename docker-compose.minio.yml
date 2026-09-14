@@ -28,6 +28,8 @@ services:
 
   createbucket:
     image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    # Share MinIO's netns so bucket init does not depend on bridge/iptables DNS.
+    network_mode: "service:minio"
     depends_on:
       minio:
         condition: service_healthy
@@ -39,7 +41,7 @@ services:
     command:
       - |
         set -eu
-        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc alias set local http://127.0.0.1:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing "local/$${MINIO_BUCKET}"
         mc ls "local/$${MINIO_BUCKET}" >/dev/null
         echo "bucket ready: $${MINIO_BUCKET}"

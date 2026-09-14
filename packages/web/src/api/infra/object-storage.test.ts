@@ -108,8 +108,22 @@ describe("object-storage port", () => {
   });
 
   test("S3 adapter without credentials fails closed on use, not on construct", async () => {
-    snapshotEnv(["OBJECT_STORAGE_DRIVER"]);
+    snapshotEnv([
+      "OBJECT_STORAGE_DRIVER",
+      "S3_ENDPOINT",
+      "S3_BUCKET",
+      "S3_ACCESS_KEY_ID",
+      "S3_SECRET_ACCESS_KEY",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+    ]);
     process.env.OBJECT_STORAGE_DRIVER = "s3";
+    delete process.env.S3_ENDPOINT;
+    delete process.env.S3_BUCKET;
+    delete process.env.S3_ACCESS_KEY_ID;
+    delete process.env.S3_SECRET_ACCESS_KEY;
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
     const storage = createObjectStorageFromEnv();
     expect(storage.driver).toBe("s3");
     expect((storage as S3CompatibleObjectStorage).isConfigured()).toBe(false);
