@@ -1,9 +1,9 @@
 # F1 — Estado de implementação
 
-**Branch:** `cursor/f1-s3-prod-wiring`  
+**Branch:** `cursor/f1-minio-local-dev`  
 **Base documental:** `docs/lumen/06-FATIAS.md` (F1 — Ingestão + Constituição)
 
-F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` via #19. **Este slice é só ops:** ligar o driver S3-compatible em staging/prod por env, fail-closed sem credenciais, sem mudar o contrato.
+F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` via #19. O driver S3-compatible (env, fail-closed) entrou via #20. **Este slice é só validação técnica local com MinIO.** Não declara staging/prod ready. Não expande o produto.
 
 ## Critério do plano
 
@@ -102,6 +102,43 @@ CI: stub/local. Smoke contra bucket real (opt-in):
 OBJECT_STORAGE_LIVE_S3=1 OBJECT_STORAGE_DRIVER=s3 S3_ENDPOINT=... S3_BUCKET=... \
   S3_ACCESS_KEY_ID=... S3_SECRET_ACCESS_KEY=... bun run test:f1
 ```
+
+## Validação local MinIO
+
+**MinIO = só dev/local.** Este cutover valida o adapter S3-compatible (`OBJECT_STORAGE_DRIVER=s3` + `S3_*`, path-style) contra um endpoint local. **Não é staging/prod ready.** Não valida flags R2/AWS de produção. Não hardcoda MinIO no domínio.
+
+### Como correr
+
+```bash
+docker compose -f docker-compose.minio.yml up -d
+./scripts/dev-minio-smoke.sh
+```
+
+O smoke: compose up → espera healthy → `createbucket` **idempotente** (`mc mb --ignore-existing`) → `OBJECT_STORAGE_LIVE_S3=1` + env MinIO → evidência **put → exists → get** (bytes iguais). Driver permanece `s3`. Endpoint inválido / credenciais ausentes **não** fazem fallback silencioso para `LocalObjectStorage`.
+
+Env (bloco comentado em `.env.template` — “Local MinIO (dev only)”):
+
+```env
+OBJECT_STORAGE_DRIVER=s3
+S3_ENDPOINT=http://127.0.0.1:9000
+S3_BUCKET=lumen-dev
+S3_REGION=us-east-1
+S3_ACCESS_KEY_ID=minioadmin
+S3_SECRET_ACCESS_KEY=minioadmin
+S3_KEY_PREFIX=lumen-dev
+S3_FORCE_PATH_STYLE=1
+```
+
+### Histórico `data/content` — fora deste cutover
+
+Blobs históricos em `data/content` **não são migrados**. Sem dual-read, sem dual-write, sem copy. Uma migração futura é uma **decisão explícita**, não parte deste slice.
+
+### Limitações conhecidas
+
+- Port continua `put/get/exists` (sem delete/list)
+- CI permanece `OBJECT_STORAGE_DRIVER=local` (omisso)
+- R2/AWS staging/prod **não** estão validados aqui
+- **Não production-ready** — só integração técnica local
 
 ## API (resumo)
 

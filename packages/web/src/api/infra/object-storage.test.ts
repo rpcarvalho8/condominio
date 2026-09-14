@@ -108,8 +108,22 @@ describe("object-storage port", () => {
   });
 
   test("S3 adapter without credentials fails closed on use, not on construct", async () => {
-    snapshotEnv(["OBJECT_STORAGE_DRIVER"]);
+    snapshotEnv([
+      "OBJECT_STORAGE_DRIVER",
+      "S3_ENDPOINT",
+      "S3_BUCKET",
+      "S3_ACCESS_KEY_ID",
+      "S3_SECRET_ACCESS_KEY",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+    ]);
     process.env.OBJECT_STORAGE_DRIVER = "s3";
+    delete process.env.S3_ENDPOINT;
+    delete process.env.S3_BUCKET;
+    delete process.env.S3_ACCESS_KEY_ID;
+    delete process.env.S3_SECRET_ACCESS_KEY;
+    delete process.env.AWS_ACCESS_KEY_ID;
+    delete process.env.AWS_SECRET_ACCESS_KEY;
     const storage = createObjectStorageFromEnv();
     expect(storage.driver).toBe("s3");
     expect((storage as S3CompatibleObjectStorage).isConfigured()).toBe(false);
@@ -193,6 +207,41 @@ describe("object-storage port", () => {
   test("S3 object key stays under prefix and rejects traversal hashes", () => {
     expect(s3ObjectKey("tenant-a", "a".repeat(64), "prod")).toBe(`prod/tenant-a/${"a".repeat(64)}.bin`);
     expect(() => s3ObjectKey("t", "../secret")).toThrow(DomainError);
+  });
+
+  test("S3 driver stays s3 with invalid endpoint and fails closed (no local fallback)", async () => {
+    snapshotEnv([
+      "OBJECT_STORAGE_DRIVER",
+      "S3_ENDPOINT",
+      "S3_BUCKET",
+      "S3_REGION",
+      "S3_ACCESS_KEY_ID",
+      "S3_SECRET_ACCESS_KEY",
+      "S3_KEY_PREFIX",
+      "S3_FORCE_PATH_STYLE",
+      "S3_VIRTUAL_HOSTED_STYLE",
+    ]);
+    process.env.OBJECT_STORAGE_DRIVER = "s3";
+    process.env.S3_ENDPOINT = "http://127.0.0.1:1";
+    process.env.S3_BUCKET = "lumen-dev";
+    process.env.S3_REGION = "us-east-1";
+    process.env.S3_ACCESS_KEY_ID = "id";
+    process.env.S3_SECRET_ACCESS_KEY = "secret";
+    process.env.S3_KEY_PREFIX = "lumen-dev";
+    process.env.S3_FORCE_PATH_STYLE = "1";
+    delete process.env.S3_VIRTUAL_HOSTED_STYLE;
+    const storage = createObjectStorageFromEnv();
+    expect(storage.driver).toBe("s3");
+    expect(storage).toBeInstanceOf(S3CompatibleObjectStorage);
+    expect(storage).not.toBeInstanceOf(LocalObjectStorage);
+    try {
+      await storage.put({ tenantId: "t", bytes: Buffer.from("no-silent-local-fallback") });
+      throw new Error("expected fail-closed put on invalid S3 endpoint");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("object_storage_s3_error");
+    }
+    expect(storage.driver).toBe("s3");
   });
 
   test("S3 NoSuchBucket fails closed instead of exists=false", async () => {

@@ -1,0 +1,50 @@
+# Local MinIO (dev only). Not for staging/prod.
+# Usage: docker compose -f docker-compose.minio.yml up -d
+#        ./scripts/dev-minio-smoke.sh
+#
+# Dummy credentials match .env.template “Local MinIO (dev only)”.
+# Domain code stays provider-agnostic (OBJECT_STORAGE_DRIVER=s3 + S3_*).
+
+name: lumen-minio-dev
+
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  createbucket:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    # Share MinIO's netns so bucket init does not depend on bridge/iptables DNS.
+    network_mode: "service:minio"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-lumen-dev}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://127.0.0.1:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+        mc ls "local/$${MINIO_BUCKET}" >/dev/null
+        echo "bucket ready: $${MINIO_BUCKET}"
+
+volumes:
+  minio-data:
