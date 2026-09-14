@@ -53,8 +53,8 @@ export function contentBlobPath(
 }
 
 /**
- * Guarda bytes content-addressed em disco (F1 — critério “admin sobe ficheiro”).
- * Object storage cloud fica para depois; local cumpre o critério de ingestão.
+ * Guarda bytes content-addressed em disco (default de desenvolvimento).
+ * Cloud (S3-compatible) entra pelo port `object-storage.ts` — não é obrigatório em CI.
  */
 export async function storeContentBlob(input: {
   tenantId: string;
@@ -86,4 +86,13 @@ export function readContentBlob(input: {
     throw new DomainError("blob_missing", "Conteúdo do ficheiro não encontrado em disco", 404);
   }
   return fs.readFileSync(absolutePath);
+}
+
+export function contentBlobExists(input: {
+  tenantId: string;
+  contentHash: string;
+  root?: string;
+}): boolean {
+  const absolutePath = contentBlobPath(input.tenantId, input.contentHash, input.root);
+  return fs.existsSync(absolutePath);
 }

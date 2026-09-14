@@ -21,18 +21,21 @@ describe("F1 upload size + type guard", () => {
     expect(() => assertF1UploadContentLength(undefined)).not.toThrow();
   });
 
-  test("allowlist accepts csv/xlsx/xls/txt by extension or MIME", () => {
+  test("allowlist accepts csv/xlsx/xls/txt/pdf/foto by extension or MIME", () => {
     expect(isAllowedF1UploadType("fracoes.csv", "application/octet-stream")).toBe(true);
     expect(isAllowedF1UploadType("mapa.XLSX", "")).toBe(true);
     expect(isAllowedF1UploadType("legacy.xls")).toBe(true);
     expect(isAllowedF1UploadType("notas.txt", "text/plain")).toBe(true);
     expect(isAllowedF1UploadType("sem-extensao", "text/csv")).toBe(true);
     expect(isAllowedF1UploadType("sem-extensao", "application/vnd.ms-excel")).toBe(true);
+    expect(isAllowedF1UploadType("regulamento.pdf", "application/pdf")).toBe(true);
+    expect(isAllowedF1UploadType("foto.png", "image/png")).toBe(true);
+    expect(isAllowedF1UploadType("scan.JPEG", "image/jpeg")).toBe(true);
+    expect(isAllowedF1UploadType("scan.webp", "image/webp")).toBe(true);
+    expect(isAllowedF1UploadType("scan.gif", "image/gif")).toBe(true);
   });
 
-  test("allowlist rejects pdf/foto/binários", () => {
-    expect(isAllowedF1UploadType("regulamento.pdf", "application/pdf")).toBe(false);
-    expect(isAllowedF1UploadType("foto.png", "image/png")).toBe(false);
+  test("allowlist rejects executáveis e binários opacos", () => {
     expect(isAllowedF1UploadType("payload.exe", "application/octet-stream")).toBe(false);
     expect(isAllowedF1UploadType("notes.bin")).toBe(false);
   });
@@ -54,11 +57,15 @@ describe("F1 upload size + type guard", () => {
     }
 
     try {
-      assertF1UploadFile({ filename: "x.pdf", mimeType: "application/pdf", size: 100 });
+      assertF1UploadFile({ filename: "x.exe", mimeType: "application/octet-stream", size: 100 });
       throw new Error("expected type rejection");
     } catch (err) {
       expect(err).toMatchObject({ code: "unsupported_type", httpStatus: 400 });
     }
+
+    expect(() =>
+      assertF1UploadFile({ filename: "x.pdf", mimeType: "application/pdf", size: 100 }),
+    ).not.toThrow();
 
     try {
       assertF1UploadFile({ filename: "empty.csv", mimeType: "text/csv", size: 0 });

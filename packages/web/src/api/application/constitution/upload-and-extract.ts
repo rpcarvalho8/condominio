@@ -3,15 +3,14 @@ import { ingestDocuments } from "../../database/schema";
 import {
   EXTRACT_LINE_KINDS,
   INGEST_DOCUMENT_KINDS,
-  type StructuredExtraction,
+  INGEST_DOCUMENT_STATUS,
 } from "../../domain/constitution";
 import { DomainError } from "../../domain/errors";
-import { readContentBlob, storeContentBlob } from "../../infra/content-blob-store";
-import type { KernelDeps } from "../../infra/kernel-deps";
+import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
+import { createObjectStorageFromEnv } from "../../infra/object-storage";
 import { registerContentUpload } from "../uploads/register-content-upload";
 import { extractDocumentLines, registerIngestDocument } from "./f1-constitution";
-import { extractStructuredFromTabular } from "./extractors/from-tabular";
-import { extractFracoesFromPlainText } from "./extractors/from-text";
+import { extractStructuredFromBytes } from "./extractors/structured-extractor";
 
 type Actor = {
   personId?: string | null;
@@ -20,9 +19,8 @@ type Actor = {
 };
 
 /**
- * Upload real de ficheiro → content blob + content_uploads + ingest_documents.
- * Cumpre o critério F1 “admin sobe PDF/Excel/foto” no caminho Excel/CSV/texto
- * (foto/OCR e LLM real ficam para adaptador seguinte).
+ * Upload real de ficheiro → object storage + content_uploads + ingest_documents.
+ * CSV/Excel/texto/PDF/foto. Extração é um passo separado (nunca confirma).
  */
 export async function uploadIngestDocumentFile(
   deps: KernelDeps,
@@ -34,13 +32,14 @@ export async function uploadIngestDocumentFile(
     actor?: Actor;
   },
 ) {
-  const stored = await storeContentBlob({
+  const storage = createObjectStorageFromEnv();
+  const stored = await storage.put({
     tenantId: input.tenantId,
     bytes: input.bytes,
   });
   const { upload } = await registerContentUpload(deps, {
     tenantId: input.tenantId,
-    contentHash: stored.contentHash,
+    contentHash: stored.key,
     filename: input.filename,
     byteSize: stored.byteSize,
     correlationId: input.actor?.requestId ?? null,
@@ -50,62 +49,15 @@ export async function uploadIngestDocumentFile(
     kind: input.kind,
     filename: input.filename,
     contentUploadId: upload.id,
-    contentHash: stored.contentHash,
+    contentHash: stored.key,
     actor: input.actor,
   });
-  return { document: doc, upload, contentHash: stored.contentHash };
-}
-
-function buildExtractionFromBytes(input: {
-  bytes: Buffer;
-  filename: string;
-  documentKind: string;
-}): StructuredExtraction {
-  const lower = input.filename.toLowerCase();
-  const isTabular =
-    lower.endsWith(".csv") ||
-    lower.endsWith(".xlsx") ||
-    lower.endsWith(".xls") ||
-    lower.endsWith(".txt");
-
-  if (isTabular && (lower.endsWith(".csv") || lower.endsWith(".xlsx") || lower.endsWith(".xls"))) {
-    const hint =
-      input.documentKind === INGEST_DOCUMENT_KINDS.contactos
-        ? "contacto"
-        : input.documentKind === INGEST_DOCUMENT_KINDS.regulamento
-          ? "fracao"
-          : "auto";
-    return extractStructuredFromTabular({
-      bytes: input.bytes,
-      filename: input.filename,
-      kindHint: hint,
-    });
-  }
-
-  if (lower.endsWith(".txt") || looksLikeUtf8Text(input.bytes)) {
-    return extractFracoesFromPlainText(input.bytes.toString("utf8"));
-  }
-
-  throw new DomainError(
-    "unsupported_extract",
-    "Extração automática neste slice: CSV, Excel ou texto com padrões de permilagem. PDF binário/foto/OCR = adaptador LLM seguinte.",
-    400,
-  );
-}
-
-function looksLikeUtf8Text(bytes: Buffer): boolean {
-  if (bytes.length === 0) return false;
-  const sample = bytes.subarray(0, Math.min(bytes.length, 512));
-  let weird = 0;
-  for (const b of sample) {
-    if (b === 0) return false;
-    if (b < 7 || (b > 13 && b < 32)) weird++;
-  }
-  return weird / sample.length < 0.05;
+  return { document: doc, upload, contentHash: stored.key };
 }
 
 /**
- * Lê bytes do content blob ligado ao documento e corre extractor determinístico.
+ * Lê bytes do object storage ligado ao documento e corre extractor StructuredExtraction.
+ * PDF/foto passam pelo adapter OCR (stub em CI). Falha fraca → HUMAN REVIEW; nunca confirma.
  */
 export async function extractDocumentFromStoredContent(
   deps: KernelDeps,
@@ -127,22 +79,55 @@ export async function extractDocumentFromStoredContent(
     );
   }
 
-  const bytes = readContentBlob({
+  const storage = createObjectStorageFromEnv();
+  const bytes = await storage.get({
     tenantId: input.tenantId,
-    contentHash: doc.contentHash,
-  });
-  const extraction = buildExtractionFromBytes({
-    bytes,
-    filename: doc.filename,
-    documentKind: doc.kind,
+    key: doc.contentHash,
   });
 
-  // Garantir que regulamento só produz frações neste caminho automático
+  let extraction;
+  try {
+    extraction = await extractStructuredFromBytes({
+      bytes,
+      filename: doc.filename,
+      documentKind: doc.kind,
+    });
+  } catch (err) {
+    if (err instanceof DomainError && err.code === "already_extracted") throw err;
+    const message = err instanceof Error ? err.message : "extração falhou";
+    await deps.db
+      .update(ingestDocuments)
+      .set({
+        status: INGEST_DOCUMENT_STATUS.failed,
+        error: message,
+        processedAt: kernelNow(deps),
+      })
+      .where(eq(ingestDocuments.id, doc.id));
+    throw err;
+  }
+
   if (doc.kind === INGEST_DOCUMENT_KINDS.regulamento) {
     extraction.lines = extraction.lines.filter((l) => l.kind === EXTRACT_LINE_KINDS.fracao);
   }
   if (doc.kind === INGEST_DOCUMENT_KINDS.contactos) {
     extraction.lines = extraction.lines.filter((l) => l.kind === EXTRACT_LINE_KINDS.contacto);
+  }
+  if (doc.kind === INGEST_DOCUMENT_KINDS.ibanProof) {
+    extraction.lines = extraction.lines.filter((l) => l.kind === EXTRACT_LINE_KINDS.iban);
+  }
+
+  if (extraction.lines.length === 0) {
+    const message =
+      "HUMAN REVIEW: extracção sem linhas utilizáveis para este tipo de documento. Nada foi confirmado nem enviado (ADR-017).";
+    await deps.db
+      .update(ingestDocuments)
+      .set({
+        status: INGEST_DOCUMENT_STATUS.failed,
+        error: message,
+        processedAt: kernelNow(deps),
+      })
+      .where(eq(ingestDocuments.id, doc.id));
+    throw new DomainError("human_review", message, 400);
   }
 
   return extractDocumentLines(deps, {

@@ -5,9 +5,8 @@ import {
 import { DomainError } from "../../../domain/errors";
 
 /**
- * Extracção heurística de texto (PDF convertido a texto ou .txt).
+ * Extracção heurística de texto (PDF convertido a texto, .txt, ou OCR stub).
  * Procura padrões "código — N‰" / "Fração X: N permilagem".
- * Fotos/OCR real ficam de fora deste slice.
  */
 export function extractFracoesFromPlainText(text: string): StructuredExtraction {
   const lines: StructuredExtraction["lines"] = [];
@@ -37,6 +36,45 @@ export function extractFracoesFromPlainText(text: string): StructuredExtraction 
     throw new DomainError(
       "empty_extraction",
       "Texto sem padrões de fração/permilagem reconhecíveis",
+      400,
+    );
+  }
+  return { lines };
+}
+
+/**
+ * Contactos a partir de texto OCR/plain: "A — Nome — email@x.com" ou CSV-like.
+ */
+export function extractContactosFromPlainText(text: string): StructuredExtraction {
+  const lines: StructuredExtraction["lines"] = [];
+  const seen = new Set<string>();
+  const patterns = [
+    /(?:fra[cç][aã]o\s*)?([A-Za-z0-9\/\-]+)\s*[—\-–:]\s*([^<\n,;]+?)\s*[—\-–,;<]\s*([\w.+-]+@[\w.-]+)/gi,
+    /(?:fra[cç][aã]o\s*)?([A-Za-z0-9\/\-]+)\s*[—\-–:]\s*([^\n,;]+?)\s+([\w.+-]+@[\w.-]+)/gi,
+  ];
+  for (const re of patterns) {
+    for (const match of text.matchAll(re)) {
+      const fracaoCodigo = String(match[1] ?? "").trim();
+      const personName = String(match[2] ?? "").trim();
+      const email = String(match[3] ?? "").trim() || null;
+      if (!fracaoCodigo || !personName) continue;
+      const key = email
+        ? `${fracaoCodigo.toUpperCase()}|${email.toLowerCase()}`
+        : `${fracaoCodigo.toUpperCase()}|${personName.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push({
+        kind: EXTRACT_LINE_KINDS.contacto,
+        payload: { fracaoCodigo, personName, email, phone: null, nif: null },
+        sourceExcerpt: match[0]!.trim(),
+        confidence: 0.55,
+      });
+    }
+  }
+  if (lines.length === 0) {
+    throw new DomainError(
+      "empty_extraction",
+      "Texto sem padrões de contacto reconhecíveis",
       400,
     );
   }
