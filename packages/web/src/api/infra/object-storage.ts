@@ -2,12 +2,14 @@
  * Object storage port (F1) — put/get/exists.
  *
  * Default: local content-addressed blob (`data/content` / CONTENT_BLOB_ROOT).
- * Cloud: S3-compatible adapter is selectable via env, without requiring
- * credentials in CI. Production migration to cloud is out of this slice.
+ * Staging/prod: `OBJECT_STORAGE_DRIVER=s3` + `S3_*` (Bun S3 client, S3-compatible).
+ * Fail-closed without credentials. CI stays on local — never required.
  */
+import { S3Client } from "bun";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors";
 import {
+  assertSha256ContentHash,
   contentBlobExists,
   readContentBlob,
   storeContentBlob,
@@ -33,10 +35,103 @@ export type S3ObjectStorageConfig = {
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
+  /** Optional key prefix, no slashes required (`lumen-staging`). */
+  prefix: string;
+  /** Bun default is path-style (S3-compatible). Set true for AWS virtual-hosted. */
+  virtualHostedStyle: boolean;
+};
+
+/** Injectable S3 transport so CI can stub put/get/exists without a real bucket. */
+export type S3BlobClient = {
+  put(objectKey: string, bytes: Buffer): Promise<void>;
+  get(objectKey: string): Promise<Buffer>;
+  exists(objectKey: string): Promise<boolean>;
 };
 
 function sha256Hex(bytes: Uint8Array | Buffer): string {
   return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
+}
+
+function sanitizeTenantId(tenantId: string): string {
+  const tenant = tenantId.trim();
+  if (!tenant) throw new DomainError("tenant_required", "tenant_id é obrigatório", 403);
+  return tenant.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function normalizePrefix(raw: string): string {
+  return raw.trim().replace(/^\/+|\/+$/g, "");
+}
+
+export function s3ObjectKey(tenantId: string, contentHash: string, prefix = ""): string {
+  const tenant = sanitizeTenantId(tenantId);
+  const hash = assertSha256ContentHash(contentHash);
+  const p = normalizePrefix(prefix);
+  return p ? `${p}/${tenant}/${hash}.bin` : `${tenant}/${hash}.bin`;
+}
+
+function envFlag(raw: string | undefined): boolean | undefined {
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes") return true;
+  if (v === "0" || v === "false" || v === "no") return false;
+  return undefined;
+}
+
+function s3ErrorCode(err: unknown): string {
+  if (!err || typeof err !== "object") return "";
+  const e = err as Record<string, unknown>;
+  return String(e.code ?? e.name ?? e.Code ?? "").toLowerCase();
+}
+
+function s3HttpStatus(err: unknown): number {
+  if (!err || typeof err !== "object") return 0;
+  const e = err as Record<string, unknown>;
+  const meta = e.$metadata;
+  const fromMeta =
+    meta && typeof meta === "object"
+      ? Number((meta as { httpStatusCode?: number }).httpStatusCode ?? 0)
+      : 0;
+  return Number(e.status ?? e.statusCode ?? e.httpStatusCode ?? fromMeta ?? 0);
+}
+
+function isS3NoSuchBucket(err: unknown): boolean {
+  return s3ErrorCode(err).includes("nosuchbucket");
+}
+
+function isS3NoSuchKey(err: unknown): boolean {
+  if (isS3NoSuchBucket(err)) return false;
+  const code = s3ErrorCode(err);
+  if (code.includes("nosuchkey") || code === "notfound" || code === "not_found") return true;
+  return s3HttpStatus(err) === 404;
+}
+
+function wrapS3Error(err: unknown, fallback: string): never {
+  if (err instanceof DomainError) throw err;
+  if (isS3NoSuchKey(err)) {
+    throw new DomainError("blob_missing", "Conteúdo do ficheiro não encontrado", 404);
+  }
+  throw new DomainError("object_storage_s3_error", fallback, 502);
+}
+
+export function createBunS3BlobClient(config: S3ObjectStorageConfig): S3BlobClient {
+  const client = new S3Client({
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: config.secretAccessKey,
+    bucket: config.bucket,
+    endpoint: config.endpoint,
+    region: config.region,
+    virtualHostedStyle: config.virtualHostedStyle,
+  });
+  return {
+    async put(objectKey, bytes) {
+      await client.write(objectKey, bytes, { type: "application/octet-stream" });
+    },
+    async get(objectKey) {
+      return Buffer.from(await client.file(objectKey).arrayBuffer());
+    },
+    async exists(objectKey) {
+      return client.exists(objectKey);
+    },
+  };
 }
 
 export class LocalObjectStorage implements ObjectStoragePort {
@@ -103,13 +198,18 @@ export class MemoryObjectStorage implements ObjectStoragePort {
 }
 
 /**
- * S3-compatible path. Fail-closed when credentials are missing.
- * This slice does not migrate production onto cloud storage.
+ * S3-compatible driver. Fail-closed when credentials are missing.
+ * Object keys stay content-addressed (`[prefix/]{tenant}/{sha256}.bin`).
+ * Does not copy existing local `data/content` blobs.
  */
 export class S3CompatibleObjectStorage implements ObjectStoragePort {
   readonly driver = "s3" as const;
+  private cachedClient: S3BlobClient | undefined;
 
-  constructor(private readonly config: S3ObjectStorageConfig | null) {}
+  constructor(
+    private readonly config: S3ObjectStorageConfig | null,
+    private readonly injectedClient?: S3BlobClient,
+  ) {}
 
   isConfigured(): boolean {
     return this.config != null;
@@ -125,31 +225,49 @@ export class S3CompatibleObjectStorage implements ObjectStoragePort {
     }
   }
 
-  async put(_input: { tenantId: string; bytes: Uint8Array | Buffer }): Promise<ObjectStoragePutResult> {
+  private client(): S3BlobClient {
     this.assertReady();
-    throw new DomainError(
-      "object_storage_not_wired",
-      "Adapter S3-compatible está seleccionado mas a migração de produção para cloud fica fora deste slice. Use OBJECT_STORAGE_DRIVER=local.",
-      501,
-    );
+    if (!this.cachedClient) {
+      this.cachedClient = this.injectedClient ?? createBunS3BlobClient(this.config);
+    }
+    return this.cachedClient;
   }
 
-  async get(_input: { tenantId: string; key: string }): Promise<Buffer> {
+  async put(input: { tenantId: string; bytes: Uint8Array | Buffer }): Promise<ObjectStoragePutResult> {
     this.assertReady();
-    throw new DomainError(
-      "object_storage_not_wired",
-      "Adapter S3-compatible está seleccionado mas a migração de produção para cloud fica fora deste slice. Use OBJECT_STORAGE_DRIVER=local.",
-      501,
-    );
+    const tenantId = input.tenantId.trim();
+    if (!tenantId) throw new DomainError("tenant_required", "tenant_id é obrigatório", 403);
+    const buf = Buffer.from(input.bytes);
+    if (buf.length === 0) throw new DomainError("empty_file", "Ficheiro vazio", 400);
+    const key = sha256Hex(buf);
+    const objectKey = s3ObjectKey(tenantId, key, this.config.prefix);
+    try {
+      await this.client().put(objectKey, buf);
+    } catch (err) {
+      wrapS3Error(err, "Falha a gravar objecto no S3");
+    }
+    return { key, byteSize: buf.length };
   }
 
-  async exists(_input: { tenantId: string; key: string }): Promise<boolean> {
+  async get(input: { tenantId: string; key: string }): Promise<Buffer> {
     this.assertReady();
-    throw new DomainError(
-      "object_storage_not_wired",
-      "Adapter S3-compatible está seleccionado mas a migração de produção para cloud fica fora deste slice. Use OBJECT_STORAGE_DRIVER=local.",
-      501,
-    );
+    const objectKey = s3ObjectKey(input.tenantId, input.key, this.config.prefix);
+    try {
+      return await this.client().get(objectKey);
+    } catch (err) {
+      wrapS3Error(err, "Falha a ler objecto no S3");
+    }
+  }
+
+  async exists(input: { tenantId: string; key: string }): Promise<boolean> {
+    this.assertReady();
+    const objectKey = s3ObjectKey(input.tenantId, input.key, this.config.prefix);
+    try {
+      return await this.client().exists(objectKey);
+    } catch (err) {
+      if (isS3NoSuchKey(err)) return false;
+      wrapS3Error(err, "Falha a verificar objecto no S3");
+    }
   }
 }
 
@@ -164,7 +282,20 @@ export function readS3ObjectStorageConfigFromEnv(): S3ObjectStorageConfig | null
   ).trim();
   const region = String(process.env.S3_REGION ?? process.env.AWS_REGION ?? "auto").trim() || "auto";
   if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) return null;
-  return { endpoint, bucket, region, accessKeyId, secretAccessKey };
+
+  const virtualFromFlag = envFlag(process.env.S3_VIRTUAL_HOSTED_STYLE);
+  const forcePath = envFlag(process.env.S3_FORCE_PATH_STYLE);
+  const virtualHostedStyle = virtualFromFlag ?? (forcePath === undefined ? false : !forcePath);
+
+  return {
+    endpoint,
+    bucket,
+    region,
+    accessKeyId,
+    secretAccessKey,
+    prefix: normalizePrefix(process.env.S3_KEY_PREFIX ?? process.env.S3_PREFIX ?? ""),
+    virtualHostedStyle,
+  };
 }
 
 export function objectStorageDriverFromEnv(): ObjectStorageDriver {
