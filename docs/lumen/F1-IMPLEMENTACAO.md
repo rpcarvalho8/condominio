@@ -85,6 +85,7 @@ S3_VIRTUAL_HOSTED_STYLE=1
 
 - Contrato `put/get/exists` **não muda**. A key continua a ser sha256 hex (`/^[a-f0-9]{64}$/`).
 - Object key no bucket: `{prefix?}{tenantId}/{sha256}.bin`.
+- `tenant_id` no path é **canónico e injetivo** (Astra A2): `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` sem `..`. Recusado na **criação** do tenant (`provisionTenant`); local/S3 **não** substituem caracteres por `_` (isso colidia `a/b` com `a_b`). Namespace = identidade do id válido. Sem dados reais de produção LUMEN — correcção directa, sem migração de blobs.
 - Sem `S3_ENDPOINT` + `S3_BUCKET` + keys → `object_storage_unconfigured` (500) no **uso**, não no boot. Dev: `OBJECT_STORAGE_DRIVER=local`.
 - Bucket inexistente (`NoSuchBucket`) → `object_storage_s3_error` (502), **não** `exists=false`.
 - Não copia blobs já gravados em `data/content`. Ligar S3 **antes** de ingestão real nesse ambiente. Hashes locais antigos 404 se o driver passar a `s3`.

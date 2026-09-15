@@ -1,4 +1,5 @@
 import { DomainError } from "../../domain/errors";
+import { parseCanonicalTenantId } from "../../domain/tenant-id";
 import {
   BACKUP_STATUS,
   KERNEL_SCHEMA_VERSION,
@@ -38,10 +39,7 @@ export async function provisionTenant(
   deps: ProvisionTenantDeps,
   input: ProvisionTenantInput,
 ): Promise<ProvisionTenantResult> {
-  const tenantId = String(input.tenantId ?? "").trim();
-  if (!tenantId) {
-    throw new DomainError("tenant_id_required", "tenant_id é obrigatório", 400);
-  }
+  const tenantId = parseCanonicalTenantId(input.tenantId);
 
   const repo = createTenantDirectoryRepo(deps.platformDb);
   const existing = await repo.findById(tenantId);

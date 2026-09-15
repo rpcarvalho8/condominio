@@ -1,6 +1,10 @@
 /**
  * TenantDirectory — registo de plataforma (ADR-016).
  * Fora de qualquer BD de tenant.
+ *
+ * `tenant_id` is canonical (`parseCanonicalTenantId` in `tenant-id.ts`):
+ * `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` without `..`. Rejected at creation so
+ * local/S3 storage namespaces stay injective (identity, no `_` rewrite).
  */
 
 export const TENANT_STATUS = {

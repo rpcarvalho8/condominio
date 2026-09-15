@@ -97,6 +97,44 @@ describe("content-blob-store hash + path safety", () => {
     expect(again.toString("utf8")).toBe("hello-f1");
   });
 
+  test("distinct valid tenants isolate blobs; a/b is rejected not rewritten to a_b", async () => {
+    const tmp = makeTmp();
+    tmps.push(tmp);
+    const blobRoot = path.join(tmp, "blobs");
+    const stored = await storeContentBlob({
+      tenantId: "a_b",
+      bytes: Buffer.from("secret-a-underscore-b"),
+      root: blobRoot,
+    });
+    expect(stored.absolutePath.includes(`${path.sep}a_b${path.sep}`)).toBe(true);
+    expect(fs.existsSync(path.join(blobRoot, "a_b", `${stored.contentHash}.bin`))).toBe(true);
+
+    try {
+      await storeContentBlob({
+        tenantId: "a/b",
+        bytes: Buffer.from("must-not-land-in-a_b"),
+        root: blobRoot,
+      });
+      throw new Error("expected invalid tenant_id");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("invalid_tenant_id");
+    }
+    expect(fs.existsSync(path.join(blobRoot, "a_b", `${stored.contentHash}.bin`))).toBe(true);
+    expect(fs.readdirSync(blobRoot)).toEqual(["a_b"]);
+
+    const other = await storeContentBlob({
+      tenantId: "a-b",
+      bytes: Buffer.from("secret-a-dash-b"),
+      root: blobRoot,
+    });
+    expect(other.contentHash).not.toBe(stored.contentHash);
+    expect(fs.existsSync(path.join(blobRoot, "a-b", `${other.contentHash}.bin`))).toBe(true);
+    expect(readContentBlob({ tenantId: "a_b", contentHash: stored.contentHash, root: blobRoot }).toString()).toBe(
+      "secret-a-underscore-b",
+    );
+  });
+
   test("CONTENT_BLOB_ROOT is read at call time (not module-load const)", async () => {
     const tmp = makeTmp();
     tmps.push(tmp);

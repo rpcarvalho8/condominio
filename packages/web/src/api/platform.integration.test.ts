@@ -240,6 +240,19 @@ describe("HTTP /platform + /kernel fail closed com directory", () => {
     expect(body.entry.tenantId).toBe("condo-http");
   });
 
+  test("POST /platform/tenants recusa tenantId que colidiria após sanitização", async () => {
+    await seedPlatformAdmin();
+    const res = await app.request("/platform/tenants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: "a/b" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(String(body.message)).toContain("tenant_id inválido");
+    expect(fs.readdirSync(TENANTS_DIR).filter((f) => f.endsWith(".db"))).toEqual(["tenant-auth.db"]);
+  });
+
   test("user.role legado sem Membership → 403 em /platform", async () => {
     currentUser = { id: "legacy", role: "admin" };
     const res = await app.request("/platform/tenants");

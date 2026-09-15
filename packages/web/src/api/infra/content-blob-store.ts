@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DomainError } from "../domain/errors";
+import { storageNamespaceForTenant } from "../domain/tenant-id";
 
 export const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 
@@ -18,8 +19,7 @@ function resolveBlobRoot(root?: string): string {
 }
 
 function tenantDir(root: string, tenantId: string): string {
-  const safe = tenantId.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return path.join(root, safe);
+  return path.join(root, storageNamespaceForTenant(tenantId));
 }
 
 function assertInsideRoot(absolutePath: string, root: string): string {
@@ -61,8 +61,7 @@ export async function storeContentBlob(input: {
   bytes: Uint8Array | Buffer;
   root?: string;
 }): Promise<{ contentHash: string; byteSize: number; absolutePath: string }> {
-  const tenantId = input.tenantId.trim();
-  if (!tenantId) throw new DomainError("tenant_required", "tenant_id é obrigatório", 403);
+  const tenantId = storageNamespaceForTenant(input.tenantId);
   const buf = Buffer.from(input.bytes);
   if (buf.length === 0) {
     throw new DomainError("empty_file", "Ficheiro vazio", 400);
