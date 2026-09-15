@@ -209,6 +209,33 @@ describe("object-storage port", () => {
     expect(() => s3ObjectKey("t", "../secret")).toThrow(DomainError);
   });
 
+  test("distinct valid tenants get distinct S3 namespaces; a/b is rejected not rewritten", async () => {
+    expect(s3ObjectKey("a_b", "a".repeat(64))).toBe(`a_b/${"a".repeat(64)}.bin`);
+    expect(s3ObjectKey("a-b", "a".repeat(64))).toBe(`a-b/${"a".repeat(64)}.bin`);
+    expect(s3ObjectKey("a_b", "a".repeat(64))).not.toBe(s3ObjectKey("a-b", "a".repeat(64)));
+    try {
+      s3ObjectKey("a/b", "a".repeat(64));
+      throw new Error("expected invalid tenant_id");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("invalid_tenant_id");
+    }
+
+    const s3 = memoryS3();
+    const storage = new S3CompatibleObjectStorage(stubConfig(), s3);
+    const bytes = Buffer.from("ns-injective");
+    const put = await storage.put({ tenantId: "a_b", bytes });
+    expect([...s3.store.keys()]).toEqual([`a_b/${put.key}.bin`]);
+    expect(await storage.exists({ tenantId: "a-b", key: put.key })).toBe(false);
+    try {
+      await storage.put({ tenantId: "a/b", bytes });
+      throw new Error("expected invalid tenant put");
+    } catch (err) {
+      expect((err as DomainError).code).toBe("invalid_tenant_id");
+    }
+    expect(s3.store.size).toBe(1);
+  });
+
   test("S3 driver stays s3 with invalid endpoint and fails closed (no local fallback)", async () => {
     snapshotEnv([
       "OBJECT_STORAGE_DRIVER",

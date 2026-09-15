@@ -8,6 +8,7 @@
 import { S3Client } from "bun";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors";
+import { storageNamespaceForTenant } from "../domain/tenant-id";
 import {
   assertSha256ContentHash,
   contentBlobExists,
@@ -52,18 +53,12 @@ function sha256Hex(bytes: Uint8Array | Buffer): string {
   return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
 }
 
-function sanitizeTenantId(tenantId: string): string {
-  const tenant = tenantId.trim();
-  if (!tenant) throw new DomainError("tenant_required", "tenant_id é obrigatório", 403);
-  return tenant.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-
 function normalizePrefix(raw: string): string {
   return raw.trim().replace(/^\/+|\/+$/g, "");
 }
 
 export function s3ObjectKey(tenantId: string, contentHash: string, prefix = ""): string {
-  const tenant = sanitizeTenantId(tenantId);
+  const tenant = storageNamespaceForTenant(tenantId);
   const hash = assertSha256ContentHash(contentHash);
   const p = normalizePrefix(prefix);
   return p ? `${p}/${tenant}/${hash}.bin` : `${tenant}/${hash}.bin`;
@@ -171,12 +166,11 @@ export class MemoryObjectStorage implements ObjectStoragePort {
   private readonly blobs = new Map<string, Buffer>();
 
   private mapKey(tenantId: string, key: string): string {
-    return `${tenantId.trim()}:${key.trim().toLowerCase()}`;
+    return `${storageNamespaceForTenant(tenantId)}:${key.trim().toLowerCase()}`;
   }
 
   async put(input: { tenantId: string; bytes: Uint8Array | Buffer }): Promise<ObjectStoragePutResult> {
-    const tenantId = input.tenantId.trim();
-    if (!tenantId) throw new DomainError("tenant_required", "tenant_id é obrigatório", 403);
+    const tenantId = storageNamespaceForTenant(input.tenantId);
     const buf = Buffer.from(input.bytes);
     if (buf.length === 0) throw new DomainError("empty_file", "Ficheiro vazio", 400);
     const key = sha256Hex(buf);
@@ -235,8 +229,7 @@ export class S3CompatibleObjectStorage implements ObjectStoragePort {
 
   async put(input: { tenantId: string; bytes: Uint8Array | Buffer }): Promise<ObjectStoragePutResult> {
     this.assertReady();
-    const tenantId = input.tenantId.trim();
-    if (!tenantId) throw new DomainError("tenant_required", "tenant_id é obrigatório", 403);
+    const tenantId = storageNamespaceForTenant(input.tenantId);
     const buf = Buffer.from(input.bytes);
     if (buf.length === 0) throw new DomainError("empty_file", "Ficheiro vazio", 400);
     const key = sha256Hex(buf);

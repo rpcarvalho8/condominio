@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createClient, type Client } from "@libsql/client";
+import { storageNamespaceForTenant } from "../domain/tenant-id";
 import { applyDomainKernelSchema } from "./kernel-schema";
 import { applyF1ConstitutionSchema } from "./f1-schema";
 import { applyF2FinanceSchema } from "./f2-schema";
@@ -14,10 +15,6 @@ export type TenantDbProvisioner = {
   /** Create (or open) the physical DB for a tenant. Must be safe to call twice. */
   provision(tenantId: string): Promise<ProvisionedDatabase>;
 };
-
-function sanitizeTenantId(tenantId: string): string {
-  return tenantId.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
 
 /**
  * Local file provisioner — proves 1 DB per tenant without Turso credentials.
@@ -36,7 +33,7 @@ export function createLocalFileTenantProvisioner(options?: {
   return {
     async provision(tenantId: string): Promise<ProvisionedDatabase> {
       fs.mkdirSync(rootDir, { recursive: true });
-      const filePath = path.join(rootDir, `${sanitizeTenantId(tenantId)}.db`);
+      const filePath = path.join(rootDir, `${storageNamespaceForTenant(tenantId)}.db`);
       const dbRef = `file:${filePath}`;
       const client = createClient({ url: dbRef });
       if (applyKernel) {
