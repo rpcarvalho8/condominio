@@ -35,7 +35,7 @@ import {
 import { reconstructFracaoBalance } from "./application/finance/f2-ledger-balance";
 import { processOutbox } from "./application/jobs/process-outbox";
 import { BUDGET_LINE_KINDS, INGEST_DOCUMENT_KINDS } from "./domain/constitution";
-import { AUDIT_TYPES } from "./domain/audit";
+import { AUDIT_TYPES, systemAuditActor } from "./domain/audit";
 import { LEDGER_ENTRY_TYPES, PAYMENT_METHODS } from "./domain/finance";
 import { applyDomainKernelSchema } from "./infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "./infra/f1-schema";
@@ -54,6 +54,7 @@ const BLOB_ROOT = path.join(import.meta.dir, "..", "..", ".tmp-test-f3-portal-co
 process.env.CONTENT_BLOB_ROOT = BLOB_ROOT;
 const TENANT_A = "tenant-f3-portal-a";
 const TENANT_B = "tenant-f3-portal-b";
+const F3_FIXTURE_ACTOR = systemAuditActor("f3-fixture");
 
 /** 1×1 PNG — foto mínima para o critério ticket+foto. */
 const TINY_PNG = Buffer.from(
@@ -288,8 +289,9 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       fracaoId: fracao.id,
       amountCents: 20_000,
       paymentMethod: PAYMENT_METHODS.bankTransfer,
+      actor: F3_FIXTURE_ACTOR,
     });
-    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
+    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payment.id, actor: F3_FIXTURE_ACTOR });
     await processOutbox(deps);
 
     await client.execute(
@@ -400,11 +402,13 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       periodLabel: "2026-09",
+      actor: F3_FIXTURE_ACTOR,
     });
     const second = await issueAccountStatement(deps, {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       periodLabel: "2026-09",
+      actor: F3_FIXTURE_ACTOR,
     });
     expect(second.id).toBe(first.id);
 
@@ -445,15 +449,25 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       amountCents: mine.reduce((s, o) => s + o.openAmountCents, 0),
       periodLabel: "2026-09",
       obligationIds: mine.map((o) => o.id),
+      actor: F3_FIXTURE_ACTOR,
     });
     const payment = await registerPayment(deps, {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       amountCents: 15_000,
       paymentMethod: PAYMENT_METHODS.bankTransfer,
+      actor: F3_FIXTURE_ACTOR,
     });
-    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
-    const receipt = await issueReceiptForPayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
+    await allocatePayment(deps, {
+      tenantId: TENANT_A,
+      paymentId: payment.id,
+      actor: F3_FIXTURE_ACTOR,
+    });
+    const receipt = await issueReceiptForPayment(deps, {
+      tenantId: TENANT_A,
+      paymentId: payment.id,
+      actor: F3_FIXTURE_ACTOR,
+    });
 
     await acceptOwnerForFracao({
       tenantId: TENANT_A,
@@ -556,6 +570,7 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       amountCents: obsB.reduce((s, o) => s + o.openAmountCents, 0),
       periodLabel: "2026-09",
       obligationIds: obsB.map((o) => o.id),
+      actor: F3_FIXTURE_ACTOR,
     });
     const obsX = seededB.obligations.filter((o) => o.fracaoId === fracaoOtherTenant.id && o.openAmountCents > 0);
     const noticeX = await issuePaymentNotice(deps, {
@@ -564,6 +579,7 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       amountCents: obsX.reduce((s, o) => s + o.openAmountCents, 0),
       periodLabel: "2026-09",
       obligationIds: obsX.map((o) => o.id),
+      actor: F3_FIXTURE_ACTOR,
     });
 
     currentUser = { id: "user-owner-a", email: "owner-a@condo.test" };

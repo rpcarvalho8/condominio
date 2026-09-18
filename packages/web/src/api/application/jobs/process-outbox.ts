@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { portalAdminContacts } from "../../database/schema";
 import { DOMAIN_EVENT_TYPES } from "../../domain/domain-event";
 import { OUTBOX_JOB_TYPES, type OutboxJob } from "../../domain/outbox";
+import { systemAuditActor } from "../../domain/audit";
 import { ADMIN_CONTACT_STATUSES } from "../../domain/ticket";
 import type { KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
@@ -161,7 +162,7 @@ async function handleIssueReceipt(job: OutboxJob, deps: KernelDeps): Promise<voi
   await issueReceiptForPayment(deps, {
     tenantId: job.tenantId,
     paymentId,
-    actor: { requestId: job.correlationId },
+    actor: systemAuditActor(job.correlationId),
   });
 }
 
@@ -169,7 +170,7 @@ async function handleMonthlyPaymentNotices(job: OutboxJob, deps: KernelDeps): Pr
   const { generateMonthlyPaymentNotices } = await import("../finance/f2-jobs");
   await generateMonthlyPaymentNotices(deps, {
     tenantId: job.tenantId,
-    actor: { requestId: job.correlationId },
+    actor: systemAuditActor(job.correlationId),
     force: true,
   });
 }
@@ -178,7 +179,7 @@ async function handleSweepReceipts(job: OutboxJob, deps: KernelDeps): Promise<vo
   const { sweepReceiptsForAllocatedPayments } = await import("../finance/f2-jobs");
   await sweepReceiptsForAllocatedPayments(deps, {
     tenantId: job.tenantId,
-    actor: { requestId: job.correlationId },
+    actor: systemAuditActor(job.correlationId),
   });
 }
 
@@ -312,7 +313,7 @@ async function handleBankSync(job: OutboxJob, deps: KernelDeps): Promise<void> {
     connectionId: typeof job.payload.connectionId === "string" ? job.payload.connectionId : null,
     dateFrom: typeof job.payload.dateFrom === "string" ? job.payload.dateFrom : null,
     dateTo: typeof job.payload.dateTo === "string" ? job.payload.dateTo : null,
-    actor: { requestId: job.correlationId },
+    actor: systemAuditActor(job.correlationId),
   });
 }
 

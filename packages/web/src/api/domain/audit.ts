@@ -15,6 +15,49 @@ export type AuditEvent = {
   createdAt: Date;
 };
 
+/** Who acted — Person of an active Membership (human) or a documented system job. */
+export type AuditActor = {
+  personId?: string | null;
+  userId?: string | null;
+  requestId?: string | null;
+  source?: string | null;
+};
+
+/** Human F2 HTTP / use-case mutations. */
+export const AUDIT_SOURCE_F2 = "f2";
+/**
+ * Outbox / calendar / ASPSP callback — null actor_person_id is allowed.
+ * Never use this on a human HTTP mutation to skip Membership.
+ */
+export const AUDIT_SOURCE_F2_JOB = "f2.job";
+
+export const AUDIT_SOURCES = {
+  f2: AUDIT_SOURCE_F2,
+  f2Job: AUDIT_SOURCE_F2_JOB,
+} as const;
+
+export function isSystemAuditSource(source: string | null | undefined): boolean {
+  return source === AUDIT_SOURCE_F2_JOB;
+}
+
+export function systemAuditActor(requestId?: string | null): AuditActor {
+  return {
+    personId: null,
+    userId: null,
+    requestId: requestId ?? null,
+    source: AUDIT_SOURCE_F2_JOB,
+  };
+}
+
+export function auditActorFields(actor?: AuditActor | null) {
+  return {
+    actorPersonId: actor?.personId ?? null,
+    actorUserId: actor?.userId ?? null,
+    requestId: actor?.requestId ?? null,
+    source: actor?.source?.trim() || AUDIT_SOURCE_F2,
+  };
+}
+
 export const AUDIT_TYPES = {
   membershipCreated: "membership.created",
   membershipRevoked: "membership.revoked",

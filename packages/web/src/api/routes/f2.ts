@@ -101,6 +101,7 @@ function actorFrom(c: {
     personId: person?.id ?? null,
     userId: user?.id ?? null,
     requestId: requestIdFrom(c),
+    source: "f2",
   };
 }
 

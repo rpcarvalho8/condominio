@@ -26,19 +26,17 @@ import {
   PAYMENT_METHODS,
   VERIFICATION_METHOD,
 } from "../../domain/finance";
+import { auditActorFields, type AuditActor } from "../../domain/audit";
 import { DomainError } from "../../domain/errors";
 import { MEMBERSHIP_STATUS } from "../../domain/membership";
 import { canVerifyCash } from "../../domain/roles";
 import { kernelNow, type KernelDb, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
+import { resolveF2AuditActor } from "./f2-audit-actor";
 import { reconstructFracaoBalance } from "./f2-ledger-balance";
 
-type Actor = {
-  personId?: string | null;
-  userId?: string | null;
-  requestId?: string | null;
-};
+type Actor = AuditActor;
 
 const LEDGER_WRITE_RETRIES = 8;
 
@@ -350,6 +348,7 @@ async function writeAudit(
     entityType: string;
     entityId: string;
     actor?: Actor;
+    before?: Record<string, unknown> | null;
     after?: Record<string, unknown> | null;
     reason?: string | null;
   },
@@ -359,12 +358,10 @@ async function writeAudit(
     type: input.type,
     entityType: input.entityType,
     entityId: input.entityId,
-    actorPersonId: input.actor?.personId ?? null,
-    actorUserId: input.actor?.userId ?? null,
-    requestId: input.actor?.requestId ?? null,
+    ...auditActorFields(input.actor),
+    before: input.before ?? null,
     after: input.after ?? null,
     reason: input.reason ?? null,
-    source: "f2",
   });
 }
 
@@ -561,9 +558,11 @@ export async function registerPayment(
     if (!fracao) throw new DomainError("fracao_not_found", "Fração não encontrada", 404);
   }
 
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
+
   await assertChainWritable(deps, input.tenantId);
-  await ensureGenesisLedgerEntry(deps, { tenantId: input.tenantId, actor: input.actor });
-  await ensureDefaultSettlementPolicy(deps, { tenantId: input.tenantId, actor: input.actor });
+  await ensureGenesisLedgerEntry(deps, { tenantId: input.tenantId, actor });
+  await ensureDefaultSettlementPolicy(deps, { tenantId: input.tenantId, actor });
 
   const now = kernelNow(deps);
   const isCash = input.paymentMethod === PAYMENT_METHODS.cash;
@@ -587,7 +586,7 @@ export async function registerPayment(
         paymentMethod: input.paymentMethod,
         allocationStatus,
         cashStatus: isCash ? CASH_STATUS.registered : null,
-        registeredByPersonId: input.actor?.personId ?? null,
+        registeredByPersonId: actor.personId,
         evidenceUploadId: input.evidenceUploadId ?? null,
         bankMovementId: input.bankMovementId ?? null,
         candidateSource: input.candidateSource ?? null,
@@ -639,7 +638,7 @@ export async function registerPayment(
     type: "payment.registered",
     entityType: "payment",
     entityId: row.id,
-    actor: input.actor,
+    actor,
     after: {
       amountCents: row.amountCents,
       paymentMethod: row.paymentMethod,
@@ -654,7 +653,7 @@ export async function registerPayment(
     aggregateType: "payment",
     aggregateId: row.id,
     payload: { amountCents: row.amountCents, paymentMethod: row.paymentMethod },
-    correlationId: input.actor?.requestId ?? null,
+    correlationId: actor.requestId,
   });
 
   return row;
@@ -692,6 +691,8 @@ export async function verifyCashPayment(
     );
   }
 
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
+
   const methods = Object.values(VERIFICATION_METHOD) as string[];
   if (!methods.includes(input.verificationMethod)) {
     throw new DomainError("invalid_verification", "verificationMethod inválido", 400);
@@ -702,7 +703,7 @@ export async function verifyCashPayment(
     await assertSecondPersonVerifier(deps, {
       tenantId: input.tenantId,
       paymentRegisteredBy: payment.registeredByPersonId,
-      actor: input.actor,
+      actor,
     });
   } else if (input.verificationMethod === VERIFICATION_METHOD.bankDeposit) {
     const movementId = input.bankMovementId ?? payment.bankMovementId;
@@ -728,7 +729,7 @@ export async function verifyCashPayment(
     .set({
       cashStatus: CASH_STATUS.verified,
       verificationMethod: input.verificationMethod,
-      verifiedByPersonId: input.actor?.personId ?? null,
+      verifiedByPersonId: actor.personId,
       bankMovementId: linkedMovementId,
       updatedAt: now,
     })
@@ -740,7 +741,11 @@ export async function verifyCashPayment(
     type: "payment.cash_verified",
     entityType: "payment",
     entityId: payment.id,
-    actor: input.actor,
+    actor,
+    before: {
+      cashStatus: payment.cashStatus,
+      verificationMethod: payment.verificationMethod,
+    },
     after: {
       cashStatus: CASH_STATUS.verified,
       verificationMethod: input.verificationMethod,
@@ -774,6 +779,8 @@ export async function depositCashPayment(
     );
   }
 
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
+
   const movementId = input.bankMovementId ?? payment.bankMovementId;
   if (!movementId) {
     throw new DomainError(
@@ -806,7 +813,8 @@ export async function depositCashPayment(
     type: "payment.cash_deposited",
     entityType: "payment",
     entityId: payment.id,
-    actor: input.actor,
+    actor,
+    before: { cashStatus: payment.cashStatus },
     after: { cashStatus: CASH_STATUS.deposited },
   });
 
@@ -922,8 +930,11 @@ export async function allocatePayment(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   return withTenantMutex(input.tenantId, () =>
-    withTenantLedgerLockRetry(deps, (locked) => allocatePaymentLocked(locked, input)),
+    withTenantLedgerLockRetry(deps, (locked) =>
+      allocatePaymentLocked(locked, { ...input, actor }),
+    ),
   );
 }
 
@@ -1111,6 +1122,7 @@ async function allocatePaymentLocked(
     entityType: "payment",
     entityId: payment.id,
     actor: input.actor,
+    before: { allocationStatus: payment.allocationStatus },
     after: {
       allocations: created.length,
       allocationStatus: status,
@@ -1155,8 +1167,11 @@ export async function reverseAllocation(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   return withTenantMutex(input.tenantId, () =>
-    withTenantLedgerLockRetry(deps, (locked) => reverseAllocationLocked(locked, input)),
+    withTenantLedgerLockRetry(deps, (locked) =>
+      reverseAllocationLocked(locked, { ...input, actor }),
+    ),
   );
 }
 
@@ -1292,6 +1307,11 @@ async function reverseAllocationLocked(
     entityType: "allocation",
     entityId: original.id,
     actor: input.actor,
+    before: {
+      allocationId: original.id,
+      amountCents: original.amountCents,
+      obligationId: original.obligationId,
+    },
     after: {
       reversalId,
       ledgerEntryId: ledger.id,
@@ -1326,6 +1346,7 @@ export async function validateLedgerChain(
   deps: KernelDeps,
   input: { tenantId: string; actor?: Actor },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const rows = await deps.db
     .select()
     .from(ledgerEntries)
@@ -1340,10 +1361,10 @@ export async function validateLedgerChain(
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
     if (row.sequence !== i) {
-      return markBroken(deps, input.tenantId, row.sequence, "sequence_gap", input.actor);
+      return markBroken(deps, input.tenantId, row.sequence, "sequence_gap", actor);
     }
     if (row.previousHash !== previousHash) {
-      return markBroken(deps, input.tenantId, row.sequence, "previous_hash_mismatch", input.actor);
+      return markBroken(deps, input.tenantId, row.sequence, "previous_hash_mismatch", actor);
     }
     const payload = JSON.parse(row.payloadJson);
     const hashPayload = {
@@ -1358,7 +1379,7 @@ export async function validateLedgerChain(
     };
     const expected = sha256Hex(canonicalJson(hashPayload));
     if (expected !== row.entryHash) {
-      return markBroken(deps, input.tenantId, row.sequence, "entry_hash_mismatch", input.actor);
+      return markBroken(deps, input.tenantId, row.sequence, "entry_hash_mismatch", actor);
     }
     previousHash = row.entryHash;
   }
@@ -1432,6 +1453,7 @@ export async function openAccountingPeriod(
   if (input.month < 1 || input.month > 12) {
     throw new DomainError("invalid_month", "Mês inválido", 400);
   }
+  await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const [existing] = await deps.db
     .select()
     .from(accountingPeriods)
@@ -1464,6 +1486,7 @@ export async function closeAccountingPeriod(
   deps: KernelDeps,
   input: { tenantId: string; year: number; month: number; actor?: Actor },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const [period] = await deps.db
     .select()
     .from(accountingPeriods)
@@ -1484,7 +1507,7 @@ export async function closeAccountingPeriod(
     .set({
       status: "closed",
       closedAt: now,
-      closedByPersonId: input.actor?.personId ?? null,
+      closedByPersonId: actor.personId,
     })
     .where(eq(accountingPeriods.id, period.id))
     .returning();
@@ -1494,8 +1517,9 @@ export async function closeAccountingPeriod(
     type: "accounting_period.closed",
     entityType: "accounting_period",
     entityId: period.id,
-    actor: input.actor,
-    after: { year: input.year, month: input.month },
+    actor,
+    before: { status: period.status },
+    after: { year: input.year, month: input.month, status: "closed" },
   });
 
   return { period: updated!, idempotent: false };
@@ -1512,6 +1536,7 @@ export async function issuePaymentNotice(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   if (!input.obligationIds.length) {
     throw new DomainError("empty_notice", "PaymentNotice exige obligations em generated_from", 400);
   }
@@ -1584,7 +1609,7 @@ export async function issuePaymentNotice(
     type: "financial_document.issued",
     entityType: "financial_document",
     entityId: doc!.id,
-    actor: input.actor,
+    actor,
     after: { docType: FINANCIAL_DOC_TYPES.paymentNotice, amountCents: input.amountCents },
   });
 
@@ -1595,6 +1620,7 @@ export async function issueReceiptForPayment(
   deps: KernelDeps,
   input: { tenantId: string; paymentId: string; actor?: Actor },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const [payment] = await deps.db
     .select()
     .from(payments)
@@ -1655,7 +1681,7 @@ export async function issueReceiptForPayment(
       type: "financial_document.issued",
       entityType: "financial_document",
       entityId: doc!.id,
-      actor: input.actor,
+      actor,
       after: { docType: FINANCIAL_DOC_TYPES.receipt, paymentId: payment.id },
     });
 
@@ -1683,6 +1709,7 @@ export async function issueAccountStatement(
   deps: KernelDeps,
   input: { tenantId: string; fracaoId: string; periodLabel?: string | null; actor?: Actor },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const balance = await reconstructFracaoBalance(deps, {
     tenantId: input.tenantId,
     fracaoId: input.fracaoId,
@@ -1745,7 +1772,7 @@ export async function issueAccountStatement(
       type: "financial_document.issued",
       entityType: "financial_document",
       entityId: doc!.id,
-      actor: input.actor,
+      actor,
       after: { docType: FINANCIAL_DOC_TYPES.accountStatement, amountCents: balance.openCents },
     });
 

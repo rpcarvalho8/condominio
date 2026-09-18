@@ -11,17 +11,14 @@ import {
 } from "../../database/schema";
 import { ALLOCATION_STATUS, FINANCIAL_DOC_TYPES } from "../../domain/finance";
 import { OUTBOX_JOB_TYPES } from "../../domain/outbox";
+import type { AuditActor } from "../../domain/audit";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
 import { sweepBankReauthNotices } from "./f2-bank-connection";
 import { enqueueAuthorizedBankSyncJobs } from "./f2-bank-sync";
 import { issuePaymentNotice, issueReceiptForPayment } from "./f2-finance";
 
-type Actor = {
-  personId?: string | null;
-  userId?: string | null;
-  requestId?: string | null;
-};
+type Actor = AuditActor;
 
 export function periodLabelFrom(now: Date): string {
   const y = now.getUTCFullYear();

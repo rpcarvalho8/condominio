@@ -618,11 +618,12 @@ describe("F2 adversarial — concorrência allocate + ingest", () => {
       const depsA: KernelDeps = { db: drizzle(clientA, { schema }), getTenantId: () => TENANT_A };
       const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT_A };
 
+      const actor = { personId: admin.person.id, userId: admin.person.userId };
       const settled = await Promise.allSettled([
-        allocatePayment(depsA, { tenantId: TENANT_A, paymentId: p1.body.id }),
-        allocatePayment(depsB, { tenantId: TENANT_A, paymentId: p2.body.id }),
-        ingestCandidateMovement(depsA, { tenantId: TENANT_A, movement }),
-        ingestCandidateMovement(depsB, { tenantId: TENANT_A, movement }),
+        allocatePayment(depsA, { tenantId: TENANT_A, paymentId: p1.body.id, actor }),
+        allocatePayment(depsB, { tenantId: TENANT_A, paymentId: p2.body.id, actor }),
+        ingestCandidateMovement(depsA, { tenantId: TENANT_A, movement, actor }),
+        ingestCandidateMovement(depsB, { tenantId: TENANT_A, movement, actor }),
       ]);
       expect(settled.filter((s) => s.status === "fulfilled").length).toBeGreaterThanOrEqual(2);
     } finally {
