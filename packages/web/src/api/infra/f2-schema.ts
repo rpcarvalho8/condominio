@@ -200,8 +200,9 @@ const DDL = [
     ON financial_documents (tenant_id, fracao_id, period_label)
     WHERE doc_type = 'AccountStatement' AND fracao_id IS NOT NULL AND period_label IS NOT NULL`,
   `ALTER TABLE allocations ADD COLUMN reverses_allocation_id TEXT`,
+  `DROP INDEX IF EXISTS allocations_reverses_allocation_uq`,
   `CREATE UNIQUE INDEX IF NOT EXISTS allocations_reverses_allocation_uq
-    ON allocations (reverses_allocation_id)
+    ON allocations (tenant_id, reverses_allocation_id)
     WHERE reverses_allocation_id IS NOT NULL`,
   `ALTER TABLE condo_bank_connections ADD COLUMN session_id TEXT`,
   `ALTER TABLE condo_bank_connections ADD COLUMN account_uid TEXT`,

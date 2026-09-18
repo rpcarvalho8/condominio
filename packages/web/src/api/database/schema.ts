@@ -966,6 +966,9 @@ export const payments = sqliteTable(
     tenantStatusIdx: index("payments_tenant_status_idx").on(t.tenantId, t.allocationStatus),
     tenantFracaoIdx: index("payments_tenant_fracao_idx").on(t.tenantId, t.fracaoId),
     tenantCashIdx: index("payments_tenant_cash_idx").on(t.tenantId, t.cashStatus),
+    tenantBankMovementUq: uniqueIndex("payments_tenant_bank_movement_uq")
+      .on(t.tenantId, t.bankMovementId)
+      .where(sql`${t.bankMovementId} is not null`),
     tenantExternalRefUq: uniqueIndex("payments_tenant_external_ref_uq")
       .on(t.tenantId, t.externalRef)
       .where(sql`${t.externalRef} is not null`),
@@ -997,7 +1000,7 @@ export const allocations = sqliteTable(
     obligationIdx: index("allocations_obligation_idx").on(t.obligationId),
     tenantIdx: index("allocations_tenant_idx").on(t.tenantId),
     reversesUq: uniqueIndex("allocations_reverses_allocation_uq")
-      .on(t.reversesAllocationId)
+      .on(t.tenantId, t.reversesAllocationId)
       .where(sql`${t.reversesAllocationId} is not null`),
   }),
 );

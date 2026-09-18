@@ -64,19 +64,21 @@ async function withTenantMutex<T>(tenantId: string, fn: () => Promise<T>): Promi
   }
 }
 
-function isUniqueConstraintError(err: unknown): boolean {
+/** True only for UNIQUE / PRIMARY KEY conflicts — not FK, CHECK, or NOT NULL. */
+export function isUniqueConstraintError(err: unknown): boolean {
   let current: unknown = err;
   for (let i = 0; i < 4 && current; i++) {
     const anyErr = current as { message?: string; code?: string; cause?: unknown };
     const msg = String(anyErr?.message ?? current).toLowerCase();
     const code = String(anyErr?.code ?? "").toLowerCase();
-    if (
-      code.includes("constraint") ||
+    const unique =
       code.includes("unique") ||
-      msg.includes("unique") ||
-      msg.includes("constraint failed") ||
-      msg.includes("already exists")
-    ) {
+      msg.includes("unique");
+    const primaryKey =
+      code.includes("primarykey") ||
+      code.includes("primary_key") ||
+      msg.includes("primary key");
+    if (unique || primaryKey) {
       return true;
     }
     current = anyErr?.cause;
@@ -623,6 +625,11 @@ export async function registerPayment(
         const reused = reuseExistingPaymentOrConflict(existing, input.amountCents);
         if (reused) return reused;
       }
+      throw new DomainError(
+        "conflict",
+        "Conflito de unicidade no pagamento sem Payment reutilizável",
+        409,
+      );
     }
     throw err;
   }
@@ -1611,7 +1618,9 @@ export async function issueReceiptForPayment(
   const allocs = await deps.db
     .select()
     .from(allocations)
-    .where(eq(allocations.paymentId, payment.id));
+    .where(
+      and(eq(allocations.paymentId, payment.id), eq(allocations.tenantId, input.tenantId)),
+    );
   const liveAllocs = liveAllocationsForReceipt(allocs);
   const netAllocated = liveAllocs.reduce((s, a) => s + a.amountCents, 0);
   if (netAllocated <= 0) {
@@ -1793,8 +1802,9 @@ export async function listPayments(
     .select()
     .from(allocations)
     .where(eq(allocations.tenantId, input.tenantId));
+  const liveAllocRows = liveAllocationsForReceipt(allocRows);
   const byPayment = new Map<string, { allocationCount: number; allocatedCents: number }>();
-  for (const a of allocRows) {
+  for (const a of liveAllocRows) {
     const prev = byPayment.get(a.paymentId) ?? { allocationCount: 0, allocatedCents: 0 };
     prev.allocationCount += 1;
     prev.allocatedCents += a.amountCents;
