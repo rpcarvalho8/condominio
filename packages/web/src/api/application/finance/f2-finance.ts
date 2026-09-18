@@ -64,12 +64,53 @@ async function withTenantMutex<T>(tenantId: string, fn: () => Promise<T>): Promi
   }
 }
 
-function isUniqueConstraintError(err: unknown): boolean {
-  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
-  return (
-    msg.includes("unique") ||
-    msg.includes("constraint failed") ||
-    msg.includes("already exists")
+/** True only for UNIQUE / PRIMARY KEY conflicts — not FK, CHECK, or NOT NULL. */
+export function isUniqueConstraintError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let i = 0; i < 4 && current; i++) {
+    const anyErr = current as { message?: string; code?: string; cause?: unknown };
+    const msg = String(anyErr?.message ?? current).toLowerCase();
+    const code = String(anyErr?.code ?? "").toLowerCase();
+    const unique =
+      code.includes("unique") ||
+      msg.includes("unique");
+    const primaryKey =
+      code.includes("primarykey") ||
+      code.includes("primary_key") ||
+      msg.includes("primary key");
+    if (unique || primaryKey) {
+      return true;
+    }
+    current = anyErr?.cause;
+  }
+  return false;
+}
+
+/** UNIQUE reuse is idempotent only when amountCents matches; otherwise fail closed. */
+function reuseExistingPaymentOrConflict(
+  existing: typeof payments.$inferSelect | undefined,
+  amountCents: number,
+): typeof payments.$inferSelect | undefined {
+  if (!existing) return undefined;
+  if (existing.amountCents !== amountCents) {
+    throw new DomainError(
+      "payment_amount_mismatch",
+      "Pagamento existente para a mesma chave tem amountCents diferente",
+      409,
+    );
+  }
+  return existing;
+}
+
+/** Original allocations still in force: exclude reversal rows and anything they reverse. */
+function liveAllocationsForReceipt<
+  T extends { id: string; amountCents: number; reversesAllocationId: string | null },
+>(allocs: T[]): T[] {
+  const reversedIds = new Set(
+    allocs.map((a) => a.reversesAllocationId).filter((id): id is string => Boolean(id)),
+  );
+  return allocs.filter(
+    (a) => a.amountCents > 0 && !a.reversesAllocationId && !reversedIds.has(a.id),
   );
 }
 
@@ -531,40 +572,79 @@ export async function registerPayment(
     (input.fracaoId && input.candidateSource
       ? ALLOCATION_STATUS.identificado
       : ALLOCATION_STATUS.naoAlocadoPendente);
-  const [row] = await deps.db
-    .insert(payments)
-    .values({
-      id: crypto.randomUUID(),
-      tenantId: input.tenantId,
-      fracaoId: input.fracaoId ?? null,
-      amountCents: input.amountCents,
-      receivedAt: input.receivedAt ?? now,
-      payerReference: input.payerReference ?? null,
-      paymentMethod: input.paymentMethod,
-      allocationStatus,
-      cashStatus: isCash ? CASH_STATUS.registered : null,
-      registeredByPersonId: input.actor?.personId ?? null,
-      evidenceUploadId: input.evidenceUploadId ?? null,
-      bankMovementId: input.bankMovementId ?? null,
-      candidateSource: input.candidateSource ?? null,
-      candidateConfidence: input.candidateConfidence ?? null,
-      externalRef: input.externalRef ?? null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
+
+  let row: typeof payments.$inferSelect;
+  try {
+    const inserted = await deps.db
+      .insert(payments)
+      .values({
+        id: crypto.randomUUID(),
+        tenantId: input.tenantId,
+        fracaoId: input.fracaoId ?? null,
+        amountCents: input.amountCents,
+        receivedAt: input.receivedAt ?? now,
+        payerReference: input.payerReference ?? null,
+        paymentMethod: input.paymentMethod,
+        allocationStatus,
+        cashStatus: isCash ? CASH_STATUS.registered : null,
+        registeredByPersonId: input.actor?.personId ?? null,
+        evidenceUploadId: input.evidenceUploadId ?? null,
+        bankMovementId: input.bankMovementId ?? null,
+        candidateSource: input.candidateSource ?? null,
+        candidateConfidence: input.candidateConfidence ?? null,
+        externalRef: input.externalRef ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    row = inserted[0]!;
+  } catch (err) {
+    if (isUniqueConstraintError(err)) {
+      if (input.bankMovementId) {
+        const [existing] = await deps.db
+          .select()
+          .from(payments)
+          .where(
+            and(
+              eq(payments.tenantId, input.tenantId),
+              eq(payments.bankMovementId, input.bankMovementId),
+            ),
+          )
+          .limit(1);
+        const reused = reuseExistingPaymentOrConflict(existing, input.amountCents);
+        if (reused) return reused;
+      }
+      if (input.externalRef) {
+        const [existing] = await deps.db
+          .select()
+          .from(payments)
+          .where(
+            and(eq(payments.tenantId, input.tenantId), eq(payments.externalRef, input.externalRef)),
+          )
+          .limit(1);
+        const reused = reuseExistingPaymentOrConflict(existing, input.amountCents);
+        if (reused) return reused;
+      }
+      throw new DomainError(
+        "conflict",
+        "Conflito de unicidade no pagamento sem Payment reutilizável",
+        409,
+      );
+    }
+    throw err;
+  }
 
   await writeAudit(deps, {
     tenantId: input.tenantId,
     type: "payment.registered",
     entityType: "payment",
-    entityId: row!.id,
+    entityId: row.id,
     actor: input.actor,
     after: {
-      amountCents: row!.amountCents,
-      paymentMethod: row!.paymentMethod,
-      cashStatus: row!.cashStatus,
-      allocationStatus: row!.allocationStatus,
+      amountCents: row.amountCents,
+      paymentMethod: row.paymentMethod,
+      cashStatus: row.cashStatus,
+      allocationStatus: row.allocationStatus,
     },
   });
 
@@ -572,12 +652,12 @@ export async function registerPayment(
     tenantId: input.tenantId,
     type: "PaymentRegistered",
     aggregateType: "payment",
-    aggregateId: row!.id,
-    payload: { amountCents: row!.amountCents, paymentMethod: row!.paymentMethod },
+    aggregateId: row.id,
+    payload: { amountCents: row.amountCents, paymentMethod: row.paymentMethod },
     correlationId: input.actor?.requestId ?? null,
   });
 
-  return row!;
+  return row;
 }
 
 /**
@@ -756,6 +836,79 @@ function paymentAllocatable(payment: typeof payments.$inferSelect): boolean {
   return true;
 }
 
+function allocationStatusForNet(
+  payment: {
+    amountCents: number;
+    fracaoId: string | null;
+    candidateSource: string | null;
+  },
+  netAllocated: number,
+): string {
+  if (netAllocated <= 0) {
+    return payment.fracaoId && payment.candidateSource
+      ? ALLOCATION_STATUS.identificado
+      : ALLOCATION_STATUS.naoAlocadoPendente;
+  }
+  if (netAllocated >= payment.amountCents) return ALLOCATION_STATUS.totalmenteAlocado;
+  return ALLOCATION_STATUS.parcialmenteAlocado;
+}
+
+async function appendHashedLedgerEntry(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    entryType: string;
+    payload: Record<string, unknown>;
+    allocationId?: string | null;
+    paymentId?: string | null;
+    obligationId?: string | null;
+    amountCents: number;
+    direction: string;
+    now: Date;
+  },
+) {
+  const [tip] = await deps.db
+    .select()
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.tenantId, input.tenantId))
+    .orderBy(desc(ledgerEntries.sequence))
+    .limit(1);
+  const sequence = (tip?.sequence ?? 0) + 1;
+  const previousHash = tip?.entryHash ?? LEDGER_GENESIS_PREVIOUS_HASH;
+  const entryId = crypto.randomUUID();
+  const hashPayload = {
+    algorithm_version: LEDGER_ALGORITHM_VERSION,
+    created_at: iso(input.now),
+    entry_id: entryId,
+    entry_type: input.entryType,
+    payload: input.payload,
+    previous_hash: previousHash,
+    sequence,
+    tenant_id: input.tenantId,
+  };
+  const entryHash = sha256Hex(canonicalJson(hashPayload));
+  const [ledger] = await deps.db
+    .insert(ledgerEntries)
+    .values({
+      id: entryId,
+      tenantId: input.tenantId,
+      sequence,
+      entryType: input.entryType,
+      createdAt: input.now,
+      payloadJson: canonicalJson(input.payload),
+      previousHash,
+      entryHash,
+      algorithmVersion: LEDGER_ALGORITHM_VERSION,
+      allocationId: input.allocationId ?? null,
+      paymentId: input.paymentId ?? null,
+      obligationId: input.obligationId ?? null,
+      amountCents: input.amountCents,
+      direction: input.direction,
+    })
+    .returning();
+  return ledger!;
+}
+
 /**
  * Aloca Payment a Obligations abertas via SettlementPolicy.
  * Cada Allocation gera LedgerEntry na hash-chain sob BEGIN IMMEDIATE (ADR-029).
@@ -879,16 +1032,6 @@ async function allocatePaymentLocked(
 
     const allocationId = crypto.randomUUID();
     const now = kernelNow(deps);
-
-    const [tip] = await deps.db
-      .select()
-      .from(ledgerEntries)
-      .where(eq(ledgerEntries.tenantId, input.tenantId))
-      .orderBy(desc(ledgerEntries.sequence))
-      .limit(1);
-    const sequence = (tip?.sequence ?? 0) + 1;
-    const previousHash = tip?.entryHash ?? LEDGER_GENESIS_PREVIOUS_HASH;
-    const entryId = crypto.randomUUID();
     const payload = {
       allocation_id: allocationId,
       amount_cents: amount,
@@ -898,37 +1041,17 @@ async function allocatePaymentLocked(
       payment_id: payment.id,
       policy_id: policy.id,
     };
-    const hashPayload = {
-      algorithm_version: LEDGER_ALGORITHM_VERSION,
-      created_at: iso(now),
-      entry_id: entryId,
-      entry_type: LEDGER_ENTRY_TYPES.allocation,
+    const ledger = await appendHashedLedgerEntry(deps, {
+      tenantId: input.tenantId,
+      entryType: LEDGER_ENTRY_TYPES.allocation,
       payload,
-      previous_hash: previousHash,
-      sequence,
-      tenant_id: input.tenantId,
-    };
-    const entryHash = sha256Hex(canonicalJson(hashPayload));
-
-    const [ledger] = await deps.db
-      .insert(ledgerEntries)
-      .values({
-        id: entryId,
-        tenantId: input.tenantId,
-        sequence,
-        entryType: LEDGER_ENTRY_TYPES.allocation,
-        createdAt: now,
-        payloadJson: canonicalJson(payload),
-        previousHash,
-        entryHash,
-        algorithmVersion: LEDGER_ALGORITHM_VERSION,
-        allocationId,
-        paymentId: payment.id,
-        obligationId: fresh.id,
-        amountCents: amount,
-        direction: "credit",
-      })
-      .returning();
+      allocationId,
+      paymentId: payment.id,
+      obligationId: fresh.id,
+      amountCents: amount,
+      direction: "credit",
+      now,
+    });
 
     const [alloc] = await deps.db
       .insert(allocations)
@@ -941,7 +1064,7 @@ async function allocatePaymentLocked(
         policyId: policy.id,
         confidence: 1,
         approvedByPersonId: input.actor?.personId ?? null,
-        ledgerEntryId: ledger!.id,
+        ledgerEntryId: ledger.id,
         createdAt: now,
       })
       .returning();
@@ -974,12 +1097,7 @@ async function allocatePaymentLocked(
   }
 
   const totalAllocated = alreadyAllocated + created.reduce((s, a) => s + a.amountCents, 0);
-  const status =
-    totalAllocated <= 0
-      ? ALLOCATION_STATUS.naoAlocadoPendente
-      : totalAllocated >= payment.amountCents
-        ? ALLOCATION_STATUS.totalmenteAlocado
-        : ALLOCATION_STATUS.parcialmenteAlocado;
+  const status = allocationStatusForNet(payment, totalAllocated);
 
   const [updatedPayment] = await deps.db
     .update(payments)
@@ -1019,6 +1137,187 @@ async function allocatePaymentLocked(
   return {
     payment: updatedPayment!,
     allocations: [...already, ...created],
+    idempotent: false,
+  };
+}
+
+/**
+ * Reversão de Allocation: lançamento de ajuste append-only (ADR-003 / ADR-029).
+ * Nunca edita nem apaga a Allocation original nem o LedgerEntry original.
+ */
+export async function reverseAllocation(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    paymentId: string;
+    allocationId: string;
+    reason?: string | null;
+    actor?: Actor;
+  },
+) {
+  return withTenantMutex(input.tenantId, () =>
+    withTenantLedgerLockRetry(deps, (locked) => reverseAllocationLocked(locked, input)),
+  );
+}
+
+async function reverseAllocationLocked(
+  deps: KernelDeps,
+  input: {
+    tenantId: string;
+    paymentId: string;
+    allocationId: string;
+    reason?: string | null;
+    actor?: Actor;
+  },
+) {
+  await assertChainWritable(deps, input.tenantId);
+
+  const [original] = await deps.db
+    .select()
+    .from(allocations)
+    .where(
+      and(
+        eq(allocations.id, input.allocationId),
+        eq(allocations.tenantId, input.tenantId),
+        eq(allocations.paymentId, input.paymentId),
+      ),
+    )
+    .limit(1);
+  if (!original) throw new DomainError("not_found", "Allocation não encontrada", 404);
+  if (original.amountCents <= 0 || original.reversesAllocationId) {
+    throw new DomainError(
+      "not_reversible",
+      "Só se revertem Allocations originais (crédito); um ajuste não se edita",
+      409,
+    );
+  }
+
+  const [already] = await deps.db
+    .select()
+    .from(allocations)
+    .where(
+      and(eq(allocations.tenantId, input.tenantId), eq(allocations.reversesAllocationId, original.id)),
+    )
+    .limit(1);
+  if (already) {
+    const [payment] = await deps.db
+      .select()
+      .from(payments)
+      .where(and(eq(payments.id, input.paymentId), eq(payments.tenantId, input.tenantId)))
+      .limit(1);
+    return { payment: payment!, original, reversal: already, ledgerEntry: null, idempotent: true };
+  }
+
+  const [payment] = await deps.db
+    .select()
+    .from(payments)
+    .where(and(eq(payments.id, input.paymentId), eq(payments.tenantId, input.tenantId)))
+    .limit(1);
+  if (!payment) throw new DomainError("not_found", "Pagamento não encontrado", 404);
+
+  const [fresh] = await deps.db
+    .select()
+    .from(obligations)
+    .where(and(eq(obligations.id, original.obligationId), eq(obligations.tenantId, input.tenantId)))
+    .limit(1);
+  if (!fresh) throw new DomainError("not_found", "Obligation não encontrada", 404);
+
+  await ensureGenesisLedgerEntry(deps, { tenantId: input.tenantId, actor: input.actor });
+
+  const reversalId = crypto.randomUUID();
+  const now = kernelNow(deps);
+  const payload = {
+    allocation_id: reversalId,
+    amount_cents: original.amountCents,
+    currency: "EUR",
+    direction: "debit",
+    obligation_id: original.obligationId,
+    payment_id: payment.id,
+    reason: input.reason?.trim() || "allocation_reversal",
+    reverses_allocation_id: original.id,
+  };
+  const ledger = await appendHashedLedgerEntry(deps, {
+    tenantId: input.tenantId,
+    entryType: LEDGER_ENTRY_TYPES.adjustment,
+    payload,
+    allocationId: reversalId,
+    paymentId: payment.id,
+    obligationId: original.obligationId,
+    amountCents: original.amountCents,
+    direction: "debit",
+    now,
+  });
+
+  const [reversal] = await deps.db
+    .insert(allocations)
+    .values({
+      id: reversalId,
+      tenantId: input.tenantId,
+      paymentId: payment.id,
+      obligationId: original.obligationId,
+      amountCents: -original.amountCents,
+      policyId: original.policyId,
+      confidence: 1,
+      approvedByPersonId: input.actor?.personId ?? null,
+      ledgerEntryId: ledger.id,
+      reversesAllocationId: original.id,
+      createdAt: now,
+    })
+    .returning();
+
+  const restored = Math.min(fresh.amountCents, fresh.openAmountCents + original.amountCents);
+  await deps.db
+    .update(obligations)
+    .set({
+      openAmountCents: restored,
+      status: restored === 0 ? "paid" : "open",
+    })
+    .where(and(eq(obligations.id, fresh.id), eq(obligations.tenantId, input.tenantId)));
+
+  const allAllocs = await deps.db
+    .select()
+    .from(allocations)
+    .where(eq(allocations.paymentId, payment.id));
+  const netAllocated = allAllocs.reduce((s, a) => s + a.amountCents, 0);
+  const status = allocationStatusForNet(payment, netAllocated);
+  const [updatedPayment] = await deps.db
+    .update(payments)
+    .set({ allocationStatus: status, updatedAt: now })
+    .where(eq(payments.id, payment.id))
+    .returning();
+
+  await writeAudit(deps, {
+    tenantId: input.tenantId,
+    type: "payment.allocation_reversed",
+    entityType: "allocation",
+    entityId: original.id,
+    actor: input.actor,
+    after: {
+      reversalId,
+      ledgerEntryId: ledger.id,
+      allocationStatus: status,
+    },
+    reason: input.reason?.trim() || "allocation_reversal",
+  });
+
+  await publishDomainEvent(deps, {
+    tenantId: input.tenantId,
+    type: "AllocationReversed",
+    aggregateType: "payment",
+    aggregateId: payment.id,
+    payload: {
+      originalAllocationId: original.id,
+      reversalId,
+      amountCents: original.amountCents,
+    },
+    correlationId: input.actor?.requestId ?? null,
+  });
+
+  return {
+    payment: updatedPayment!,
+    original,
+    reversal: reversal!,
+    ledgerEntry: ledger,
     idempotent: false,
   };
 }
@@ -1302,17 +1601,6 @@ export async function issueReceiptForPayment(
     .where(and(eq(payments.id, input.paymentId), eq(payments.tenantId, input.tenantId)))
     .limit(1);
   if (!payment) throw new DomainError("not_found", "Pagamento não encontrado", 404);
-  if (payment.allocationStatus === ALLOCATION_STATUS.naoAlocadoPendente) {
-    throw new DomainError("empty_receipt", "Recibo nunca é emitido sem Allocation", 409);
-  }
-
-  const allocs = await deps.db
-    .select()
-    .from(allocations)
-    .where(eq(allocations.paymentId, payment.id));
-  if (allocs.length === 0) {
-    throw new DomainError("empty_receipt", "Recibo nunca é emitido sem Allocation", 409);
-  }
 
   const [existing] = await deps.db
     .select()
@@ -1327,6 +1615,18 @@ export async function issueReceiptForPayment(
     .limit(1);
   if (existing) return existing;
 
+  const allocs = await deps.db
+    .select()
+    .from(allocations)
+    .where(
+      and(eq(allocations.paymentId, payment.id), eq(allocations.tenantId, input.tenantId)),
+    );
+  const liveAllocs = liveAllocationsForReceipt(allocs);
+  const netAllocated = liveAllocs.reduce((s, a) => s + a.amountCents, 0);
+  if (netAllocated <= 0) {
+    throw new DomainError("empty_receipt", "Recibo nunca é emitido sem Allocation", 409);
+  }
+
   const now = kernelNow(deps);
   try {
     const [doc] = await deps.db
@@ -1337,12 +1637,13 @@ export async function issueReceiptForPayment(
         fracaoId: payment.fracaoId,
         docType: FINANCIAL_DOC_TYPES.receipt,
         issuedAt: now,
-        amountCents: payment.amountCents,
+        amountCents: netAllocated,
         status: "issued",
         documentNumber: `RC-${payment.id.slice(0, 8)}`,
         generatedFromJson: canonicalJson({
           paymentId: payment.id,
-          allocationIds: allocs.map((a) => a.id),
+          allocationIds: liveAllocs.map((a) => a.id),
+          allocatedCents: netAllocated,
         }),
         sourcePaymentId: payment.id,
         createdAt: now,
@@ -1485,4 +1786,36 @@ export async function getFinancialDocumentInTenant(
     )
     .limit(1);
   return doc ?? null;
+}
+
+/** Lista Payments do tenant — inclui os sem Allocation (ADR-012, reportáveis). */
+export async function listPayments(
+  deps: KernelDeps,
+  input: { tenantId: string },
+) {
+  const rows = await deps.db
+    .select()
+    .from(payments)
+    .where(eq(payments.tenantId, input.tenantId))
+    .orderBy(desc(payments.createdAt));
+  const allocRows = await deps.db
+    .select()
+    .from(allocations)
+    .where(eq(allocations.tenantId, input.tenantId));
+  const liveAllocRows = liveAllocationsForReceipt(allocRows);
+  const byPayment = new Map<string, { allocationCount: number; allocatedCents: number }>();
+  for (const a of liveAllocRows) {
+    const prev = byPayment.get(a.paymentId) ?? { allocationCount: 0, allocatedCents: 0 };
+    prev.allocationCount += 1;
+    prev.allocatedCents += a.amountCents;
+    byPayment.set(a.paymentId, prev);
+  }
+  return rows.map((p) => {
+    const stats = byPayment.get(p.id) ?? { allocationCount: 0, allocatedCents: 0 };
+    return {
+      ...p,
+      allocationCount: stats.allocationCount,
+      allocatedCents: stats.allocatedCents,
+    };
+  });
 }

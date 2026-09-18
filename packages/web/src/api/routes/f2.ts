@@ -5,8 +5,10 @@ import {
   depositCashPayment,
   issuePaymentNotice,
   issueReceiptForPayment,
+  listPayments,
   openAccountingPeriod,
   registerPayment,
+  reverseAllocation,
   validateLedgerChain,
   verifyCashPayment,
 } from "../application/finance/f2-finance";
@@ -155,6 +157,14 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json(...jsonFromCaught(err));
       }
     })
+    .get("/payments", requireManager, async (c) => {
+      try {
+        const rows = await listPayments(deps, { tenantId: c.get("tenantId")! });
+        return c.json({ payments: rows });
+      } catch (err) {
+        return c.json(...jsonFromCaught(err));
+      }
+    })
     .post("/payments/:id/verify-cash", requireCashVerifier, async (c) => {
       try {
         const body = (await c.req.json().catch(() => ({}))) as {
@@ -197,6 +207,21 @@ export function createF2Routes(deps: KernelDeps) {
         const result = await allocatePayment(deps, {
           tenantId: c.get("tenantId")!,
           paymentId: c.req.param("id"),
+          actor: actorFrom(c),
+        });
+        return c.json(result);
+      } catch (err) {
+        return c.json(...jsonFromCaught(err));
+      }
+    })
+    .post("/payments/:id/allocations/:allocationId/reverse", requireManager, async (c) => {
+      try {
+        const body = (await c.req.json().catch(() => ({}))) as { reason?: string | null };
+        const result = await reverseAllocation(deps, {
+          tenantId: c.get("tenantId")!,
+          paymentId: c.req.param("id"),
+          allocationId: c.req.param("allocationId"),
+          reason: body.reason,
           actor: actorFrom(c),
         });
         return c.json(result);
