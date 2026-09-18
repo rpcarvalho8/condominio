@@ -156,7 +156,13 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json(payment);
       } catch (err) {
         const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(
+          {
+            message: mapped.message,
+            ...(err instanceof DomainError ? { code: err.code } : {}),
+          },
+          mapped.status,
+        );
       }
     })
     .post("/payments/:id/deposit-cash", requireManager, async (c) => {
@@ -173,7 +179,13 @@ export function createF2Routes(deps: KernelDeps) {
         return c.json(payment);
       } catch (err) {
         const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(
+          {
+            message: mapped.message,
+            ...(err instanceof DomainError ? { code: err.code } : {}),
+          },
+          mapped.status,
+        );
       }
     })
     .post("/payments/:id/allocate", requireManager, async (c) => {

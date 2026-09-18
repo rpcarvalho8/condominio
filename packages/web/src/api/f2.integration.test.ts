@@ -689,7 +689,17 @@ describe("F2 HTTP Fiscalizacao vs gestor", () => {
       }),
     });
     expect(created.status).toBe(201);
-    const payment = (await created.json()) as { id: string };
+    const payment = (await created.json()) as {
+      id: string;
+      cashStatus: string;
+      verificationMethod: string | null;
+      registeredByPersonId: string | null;
+      verifiedByPersonId: string | null;
+    };
+    expect(payment.cashStatus).toBe(CASH_STATUS.registered);
+    expect(payment.verificationMethod).toBeNull();
+    expect(payment.registeredByPersonId).toBe(admin.id);
+    expect(payment.verifiedByPersonId).toBeNull();
 
     currentUser = { id: admin.userId! };
     const selfVerify = await app.request(`/f2/payments/${payment.id}/verify-cash`, {
@@ -698,6 +708,9 @@ describe("F2 HTTP Fiscalizacao vs gestor", () => {
       body: JSON.stringify({ verificationMethod: VERIFICATION_METHOD.secondPerson }),
     });
     expect(selfVerify.status).toBe(403);
+    const selfBody = (await selfVerify.json()) as { message: string; code?: string };
+    expect(selfBody.code).toBe("self_verify_forbidden");
+    expect(selfBody.message).toMatch(/ADR-028/);
 
     currentUser = { id: fiscal.userId! };
     const fiscalVerify = await app.request(`/f2/payments/${payment.id}/verify-cash`, {
@@ -706,8 +719,17 @@ describe("F2 HTTP Fiscalizacao vs gestor", () => {
       body: JSON.stringify({ verificationMethod: VERIFICATION_METHOD.secondPerson }),
     });
     expect(fiscalVerify.status).toBe(200);
-    const verified = (await fiscalVerify.json()) as { cashStatus: string };
+    const verified = (await fiscalVerify.json()) as {
+      cashStatus: string;
+      verificationMethod: string | null;
+      registeredByPersonId: string | null;
+      verifiedByPersonId: string | null;
+    };
     expect(verified.cashStatus).toBe(CASH_STATUS.verified);
+    expect(verified.verificationMethod).toBe(VERIFICATION_METHOD.secondPerson);
+    expect(verified.registeredByPersonId).toBe(admin.id);
+    expect(verified.verifiedByPersonId).toBe(fiscal.id);
+    expect(verified.verifiedByPersonId).not.toBe(verified.registeredByPersonId);
 
     const fiscalAlloc = await app.request(`/f2/payments/${payment.id}/allocate`, {
       method: "POST",
@@ -767,6 +789,171 @@ describe("F2 HTTP Fiscalizacao vs gestor", () => {
       body: JSON.stringify({ verificationMethod: VERIFICATION_METHOD.secondPerson }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("F2 Astra A4 — HTTP cash segregation (ADR-028)", () => {
+  test("mesma Membership: second_person recusado; bank_deposit com MovimentoBancario do tenant → deposited", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    const admin = await seedActor({
+      userId: "user-admin-a4",
+      roleCode: "Admin",
+      name: "Admin A4",
+      email: "admin-a4@test",
+    });
+    const fiscal = await seedActor({
+      userId: "user-fiscal-a4",
+      roleCode: "Fiscalizacao",
+      name: "Fiscal A4",
+      email: "fiscal-a4@test",
+    });
+
+    const membershipRepo = createMembershipRepo(deps.db);
+    const adminMemberships = await membershipRepo.findActiveForPersonTenant(admin.id, TENANT);
+    const fiscalMemberships = await membershipRepo.findActiveForPersonTenant(fiscal.id, TENANT);
+    expect(adminMemberships).toHaveLength(1);
+    expect(fiscalMemberships).toHaveLength(1);
+    expect(adminMemberships[0]!.id).not.toBe(fiscalMemberships[0]!.id);
+    expect(admin.id).not.toBe(fiscal.id);
+    expect(adminMemberships[0]!.roleCode).toBe("Admin");
+    expect(fiscalMemberships[0]!.roleCode).toBe("Fiscalizacao");
+
+    currentUser = { id: admin.userId!, email: "admin-a4@test" };
+    const created = await app.request("/f2/payments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        fracaoId: fracao.id,
+        amountCents: 6_000,
+        paymentMethod: PAYMENT_METHODS.cash,
+        evidenceUploadId: "ev-a4-cash",
+      }),
+    });
+    expect(created.status).toBe(201);
+    const payment = (await created.json()) as {
+      id: string;
+      cashStatus: string;
+      verificationMethod: string | null;
+      registeredByPersonId: string | null;
+      verifiedByPersonId: string | null;
+      bankMovementId: string | null;
+    };
+    expect(payment.cashStatus).toBe(CASH_STATUS.registered);
+    expect(payment.verificationMethod).toBeNull();
+    expect(payment.registeredByPersonId).toBe(admin.id);
+    expect(payment.verifiedByPersonId).toBeNull();
+    expect(payment.bankMovementId).toBeNull();
+
+    const selfVerify = await app.request(`/f2/payments/${payment.id}/verify-cash`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ verificationMethod: VERIFICATION_METHOD.secondPerson }),
+    });
+    expect(selfVerify.status).toBe(403);
+    const selfBody = (await selfVerify.json()) as { message: string; code?: string };
+    expect(selfBody.code).toBe("self_verify_forbidden");
+    expect(selfBody.message).toMatch(/não pode verificar/);
+
+    const stillRegistered = await client.execute(
+      `SELECT cash_status, verification_method, verified_by_person_id, bank_movement_id
+       FROM payments WHERE id = ?`,
+      [payment.id],
+    );
+    expect(String(stillRegistered.rows[0]!.cash_status)).toBe(CASH_STATUS.registered);
+    expect(stillRegistered.rows[0]!.verification_method).toBeNull();
+    expect(stillRegistered.rows[0]!.verified_by_person_id).toBeNull();
+    expect(stillRegistered.rows[0]!.bank_movement_id).toBeNull();
+
+    const noMovement = await app.request(`/f2/payments/${payment.id}/verify-cash`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ verificationMethod: VERIFICATION_METHOD.bankDeposit }),
+    });
+    expect(noMovement.status).toBe(400);
+    expect(((await noMovement.json()) as { code?: string }).code).toBe("bank_movement_required");
+
+    const foreign = await recordKernelBankMovement(deps, {
+      tenantId: "other-tenant-a4",
+      amountCents: 6_000,
+    });
+    const foreignVerify = await app.request(`/f2/payments/${payment.id}/verify-cash`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        verificationMethod: VERIFICATION_METHOD.bankDeposit,
+        bankMovementId: foreign.id,
+      }),
+    });
+    expect(foreignVerify.status).toBe(404);
+    expect(((await foreignVerify.json()) as { code?: string }).code).toBe("bank_movement_not_found");
+
+    const movement = await recordKernelBankMovement(deps, {
+      tenantId: TENANT,
+      amountCents: 6_000,
+      description: "depósito cash A4",
+    });
+    expect(movement.tenantId).toBe(TENANT);
+
+    const verified = await app.request(`/f2/payments/${payment.id}/verify-cash`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        verificationMethod: VERIFICATION_METHOD.bankDeposit,
+        bankMovementId: movement.id,
+      }),
+    });
+    expect(verified.status).toBe(200);
+    const verifiedBody = (await verified.json()) as {
+      cashStatus: string;
+      verificationMethod: string | null;
+      registeredByPersonId: string | null;
+      verifiedByPersonId: string | null;
+      bankMovementId: string | null;
+    };
+    expect(verifiedBody.cashStatus).toBe(CASH_STATUS.verified);
+    expect(verifiedBody.verificationMethod).toBe(VERIFICATION_METHOD.bankDeposit);
+    expect(verifiedBody.registeredByPersonId).toBe(admin.id);
+    expect(verifiedBody.verifiedByPersonId).toBe(admin.id);
+    expect(verifiedBody.bankMovementId).toBe(movement.id);
+
+    const deposited = await app.request(`/f2/payments/${payment.id}/deposit-cash`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(deposited.status).toBe(200);
+    const depositedBody = (await deposited.json()) as {
+      cashStatus: string;
+      verificationMethod: string | null;
+      bankMovementId: string | null;
+      depositedAt: unknown;
+    };
+    expect(depositedBody.cashStatus).toBe(CASH_STATUS.deposited);
+    expect(depositedBody.verificationMethod).toBe(VERIFICATION_METHOD.bankDeposit);
+    expect(depositedBody.bankMovementId).toBe(movement.id);
+    expect(depositedBody.depositedAt).toBeTruthy();
+
+    const persisted = await client.execute(
+      `SELECT cash_status, verification_method, registered_by_person_id, verified_by_person_id,
+              bank_movement_id, deposited_at FROM payments WHERE id = ?`,
+      [payment.id],
+    );
+    const row = persisted.rows[0]!;
+    expect(String(row.cash_status)).toBe(CASH_STATUS.deposited);
+    expect(String(row.verification_method)).toBe(VERIFICATION_METHOD.bankDeposit);
+    expect(String(row.registered_by_person_id)).toBe(admin.id);
+    expect(String(row.verified_by_person_id)).toBe(admin.id);
+    expect(String(row.bank_movement_id)).toBe(movement.id);
+    expect(row.deposited_at).toBeTruthy();
+
+    currentUser = { id: fiscal.userId!, email: "fiscal-a4@test" };
+    const fiscalLate = await app.request(`/f2/payments/${payment.id}/verify-cash`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ verificationMethod: VERIFICATION_METHOD.secondPerson }),
+    });
+    expect(fiscalLate.status).toBe(409);
+    expect(((await fiscalLate.json()) as { code?: string }).code).toBe("invalid_cash_state");
   });
 });
 
