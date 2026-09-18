@@ -22,6 +22,7 @@ import {
 import {
   allocatePayment,
   recordKernelBankMovement,
+  registerPayment,
 } from "./application/finance/f2-finance";
 import { reconstructFracaoBalance } from "./application/finance/f2-ledger-balance";
 import {
@@ -56,6 +57,7 @@ import {
 import { processOutbox } from "./application/jobs/process-outbox";
 import { ownerContactDrafts } from "./database/schema";
 import { BUDGET_LINE_KINDS, INGEST_DOCUMENT_KINDS } from "./domain/constitution";
+import { DomainError } from "./domain/errors";
 import {
   ALLOCATION_STATUS,
   BANK_CONSENT_STATUS,
@@ -2868,6 +2870,109 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
     expect(dupRegister.body.id).toBe(paymentId);
   });
 
+  test("UNIQUE no mesmo bank_movement_id ou external_ref com amountCents diferente falha fechado", async () => {
+    const { fracao } = await seedFracaoWithObligations({
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
+    });
+    const admin = await seedActor({
+      userId: "user-admin-a6-unique-amount",
+      roleCode: "Admin",
+      name: "Admin A6 unique amount",
+      email: "admin-a6-unique-amount@test",
+    });
+    const bankMovementId = crypto.randomUUID();
+
+    const first = await f2Json<{ id: string; amountCents: number }>("/f2/payments", {
+      user: admin,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 100_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+        bankMovementId,
+      },
+    });
+    expect(first.status).toBe(201);
+    expect(first.body.amountCents).toBe(100_00);
+
+    const sameAmount = await f2Json<{ id: string; amountCents: number }>("/f2/payments", {
+      user: admin,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 100_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+        bankMovementId,
+      },
+    });
+    expect(sameAmount.status).toBe(201);
+    expect(sameAmount.body.id).toBe(first.body.id);
+    expect(sameAmount.body.amountCents).toBe(100_00);
+
+    await expectDomainCode(
+      await f2Request("/f2/payments", {
+        user: admin,
+        body: {
+          fracaoId: fracao.id,
+          amountCents: 60_00,
+          paymentMethod: PAYMENT_METHODS.bankTransfer,
+          bankMovementId,
+        },
+      }),
+      409,
+      "payment_amount_mismatch",
+    );
+
+    const byMovement = await client.execute(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS t FROM payments WHERE bank_movement_id = ?`,
+      [bankMovementId],
+    );
+    expect(Number(byMovement.rows[0]!.n)).toBe(1);
+    expect(Number(byMovement.rows[0]!.t)).toBe(100_00);
+
+    const externalRef = "a6-unique-amount-ext";
+    const extFirst = await registerPayment(deps, {
+      tenantId: TENANT,
+      fracaoId: fracao.id,
+      amountCents: 80_00,
+      paymentMethod: PAYMENT_METHODS.bankTransfer,
+      externalRef,
+      actor: { personId: admin.id, userId: admin.userId },
+    });
+    expect(extFirst.amountCents).toBe(80_00);
+
+    const extSame = await registerPayment(deps, {
+      tenantId: TENANT,
+      fracaoId: fracao.id,
+      amountCents: 80_00,
+      paymentMethod: PAYMENT_METHODS.bankTransfer,
+      externalRef,
+      actor: { personId: admin.id, userId: admin.userId },
+    });
+    expect(extSame.id).toBe(extFirst.id);
+
+    try {
+      await registerPayment(deps, {
+        tenantId: TENANT,
+        fracaoId: fracao.id,
+        amountCents: 40_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+        externalRef,
+        actor: { personId: admin.id, userId: admin.userId },
+      });
+      throw new Error("expected payment_amount_mismatch");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("payment_amount_mismatch");
+      expect((err as DomainError).httpStatus).toBe(409);
+    }
+
+    const byRef = await client.execute(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(amount_cents), 0) AS t FROM payments WHERE tenant_id = ? AND external_ref = ?`,
+      [TENANT, externalRef],
+    );
+    expect(Number(byRef.rows[0]!.n)).toBe(1);
+    expect(Number(byRef.rows[0]!.t)).toBe(80_00);
+  });
+
   test("6. Recibo antes da Allocation é recusado; depois só mostra Allocations que existem", async () => {
     const { fracao } = await seedFracaoWithObligations({
       lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
@@ -2950,6 +3055,109 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
     expect(receiptAgain.body.id).toBe(receipt.body.id);
     expect(receiptAgain.body.generatedFromJson).toBe(receipt.body.generatedFromJson);
     expect(receiptAgain.body.amountCents).toBe(receipt.body.amountCents);
+  });
+
+  test("recibo após reversal parcial omite a Allocation revertida e o montante bate", async () => {
+    const { fracao } = await seedFracaoWithObligations({
+      lines: [
+        { kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 40_00 },
+        { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Quota", amountCents: 60_00 },
+      ],
+    });
+    const admin = await seedActor({
+      userId: "user-admin-a6-receipt-reversal",
+      roleCode: "Admin",
+      name: "Admin A6 receipt reversal",
+      email: "admin-a6-receipt-reversal@test",
+    });
+
+    const created = await f2Json<{ id: string }>("/f2/payments", {
+      user: admin,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 100_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
+    });
+    expect(created.status).toBe(201);
+
+    const allocated = await f2Json<{
+      allocations: Array<{ id: string; amountCents: number }>;
+    }>(`/f2/payments/${created.body.id}/allocate`, { user: admin, method: "POST" });
+    expect(allocated.status).toBe(200);
+    expect(allocated.body.allocations).toHaveLength(2);
+    const reversedAlloc = allocated.body.allocations.find((a) => a.amountCents === 40_00)!;
+    const remainingAlloc = allocated.body.allocations.find((a) => a.amountCents === 60_00)!;
+    expect(reversedAlloc).toBeDefined();
+    expect(remainingAlloc).toBeDefined();
+
+    const reversed = await f2Json<{
+      reversal: { id: string; amountCents: number; reversesAllocationId: string | null };
+    }>(`/f2/payments/${created.body.id}/allocations/${reversedAlloc.id}/reverse`, {
+      user: admin,
+      body: { reason: "estorno parcial A6" },
+    });
+    expect(reversed.status).toBe(200);
+    expect(reversed.body.reversal.reversesAllocationId).toBe(reversedAlloc.id);
+    expect(reversed.body.reversal.amountCents).toBe(-40_00);
+
+    const receipt = await f2Json<{
+      id: string;
+      docType: string;
+      amountCents: number;
+      generatedFromJson: string;
+    }>(`/f2/payments/${created.body.id}/receipt`, { user: admin, method: "POST" });
+    expect(receipt.status).toBe(201);
+    expect(receipt.body.docType).toBe("Receipt");
+    const generatedFrom = JSON.parse(receipt.body.generatedFromJson) as {
+      paymentId: string;
+      allocationIds: string[];
+      allocatedCents: number;
+    };
+    expect(generatedFrom.paymentId).toBe(created.body.id);
+    expect(generatedFrom.allocationIds).not.toContain(reversedAlloc.id);
+    expect(generatedFrom.allocationIds).not.toContain(reversed.body.reversal.id);
+    expect(generatedFrom.allocationIds).toEqual([remainingAlloc.id]);
+    expect(receipt.body.amountCents).toBe(60_00);
+    expect(generatedFrom.allocatedCents).toBe(60_00);
+    expect(receipt.body.amountCents).toBe(remainingAlloc.amountCents);
+    expect(receipt.body.amountCents).toBe(
+      generatedFrom.allocationIds.reduce((sum, id) => {
+        const row = allocated.body.allocations.find((a) => a.id === id);
+        return sum + (row?.amountCents ?? 0);
+      }, 0),
+    );
+
+    const originalStillPositive = await client.execute(
+      `SELECT amount_cents FROM allocations WHERE id = ?`,
+      [reversedAlloc.id],
+    );
+    expect(Number(originalStillPositive.rows[0]!.amount_cents)).toBe(40_00);
+
+    const receiptAgain = await f2Json<{ id: string; generatedFromJson: string; amountCents: number }>(
+      `/f2/payments/${created.body.id}/receipt`,
+      { user: admin, method: "POST" },
+    );
+    expect(receiptAgain.status).toBe(201);
+    expect(receiptAgain.body.id).toBe(receipt.body.id);
+    expect(receiptAgain.body.generatedFromJson).toBe(receipt.body.generatedFromJson);
+    expect(receiptAgain.body.amountCents).toBe(receipt.body.amountCents);
+
+    const reverseRemaining = await f2Json<{ idempotent: boolean }>(
+      `/f2/payments/${created.body.id}/allocations/${remainingAlloc.id}/reverse`,
+      { user: admin, body: { reason: "não reescreve recibo já emitido" } },
+    );
+    expect(reverseRemaining.status).toBe(200);
+
+    const afterFullReversal = await f2Json<{
+      id: string;
+      generatedFromJson: string;
+      amountCents: number;
+    }>(`/f2/payments/${created.body.id}/receipt`, { user: admin, method: "POST" });
+    expect(afterFullReversal.status).toBe(201);
+    expect(afterFullReversal.body.id).toBe(receipt.body.id);
+    expect(afterFullReversal.body.generatedFromJson).toBe(receipt.body.generatedFromJson);
+    expect(afterFullReversal.body.amountCents).toBe(60_00);
   });
 });
 

@@ -84,6 +84,34 @@ function isUniqueConstraintError(err: unknown): boolean {
   return false;
 }
 
+/** UNIQUE reuse is idempotent only when amountCents matches; otherwise fail closed. */
+function reuseExistingPaymentOrConflict(
+  existing: typeof payments.$inferSelect | undefined,
+  amountCents: number,
+): typeof payments.$inferSelect | undefined {
+  if (!existing) return undefined;
+  if (existing.amountCents !== amountCents) {
+    throw new DomainError(
+      "payment_amount_mismatch",
+      "Pagamento existente para a mesma chave tem amountCents diferente",
+      409,
+    );
+  }
+  return existing;
+}
+
+/** Original allocations still in force: exclude reversal rows and anything they reverse. */
+function liveAllocationsForReceipt<
+  T extends { id: string; amountCents: number; reversesAllocationId: string | null },
+>(allocs: T[]): T[] {
+  const reversedIds = new Set(
+    allocs.map((a) => a.reversesAllocationId).filter((id): id is string => Boolean(id)),
+  );
+  return allocs.filter(
+    (a) => a.amountCents > 0 && !a.reversesAllocationId && !reversedIds.has(a.id),
+  );
+}
+
 function isRetryableLedgerWrite(err: unknown): boolean {
   if (err instanceof DomainError && err.code === "obligation_race") return true;
   const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
@@ -581,7 +609,8 @@ export async function registerPayment(
             ),
           )
           .limit(1);
-        if (existing) return existing;
+        const reused = reuseExistingPaymentOrConflict(existing, input.amountCents);
+        if (reused) return reused;
       }
       if (input.externalRef) {
         const [existing] = await deps.db
@@ -591,7 +620,8 @@ export async function registerPayment(
             and(eq(payments.tenantId, input.tenantId), eq(payments.externalRef, input.externalRef)),
           )
           .limit(1);
-        if (existing) return existing;
+        const reused = reuseExistingPaymentOrConflict(existing, input.amountCents);
+        if (reused) return reused;
       }
     }
     throw err;
@@ -1565,15 +1595,6 @@ export async function issueReceiptForPayment(
     .limit(1);
   if (!payment) throw new DomainError("not_found", "Pagamento não encontrado", 404);
 
-  const allocs = await deps.db
-    .select()
-    .from(allocations)
-    .where(eq(allocations.paymentId, payment.id));
-  const netAllocated = allocs.reduce((s, a) => s + a.amountCents, 0);
-  if (netAllocated <= 0) {
-    throw new DomainError("empty_receipt", "Recibo nunca é emitido sem Allocation", 409);
-  }
-
   const [existing] = await deps.db
     .select()
     .from(financialDocuments)
@@ -1586,6 +1607,16 @@ export async function issueReceiptForPayment(
     )
     .limit(1);
   if (existing) return existing;
+
+  const allocs = await deps.db
+    .select()
+    .from(allocations)
+    .where(eq(allocations.paymentId, payment.id));
+  const liveAllocs = liveAllocationsForReceipt(allocs);
+  const netAllocated = liveAllocs.reduce((s, a) => s + a.amountCents, 0);
+  if (netAllocated <= 0) {
+    throw new DomainError("empty_receipt", "Recibo nunca é emitido sem Allocation", 409);
+  }
 
   const now = kernelNow(deps);
   try {
@@ -1602,7 +1633,7 @@ export async function issueReceiptForPayment(
         documentNumber: `RC-${payment.id.slice(0, 8)}`,
         generatedFromJson: canonicalJson({
           paymentId: payment.id,
-          allocationIds: allocs.filter((a) => a.amountCents > 0).map((a) => a.id),
+          allocationIds: liveAllocs.map((a) => a.id),
           allocatedCents: netAllocated,
         }),
         sourcePaymentId: payment.id,
