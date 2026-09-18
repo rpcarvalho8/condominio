@@ -16,12 +16,14 @@ import { DomainError } from "../../domain/errors";
 import { kernelNow, type KernelDb, type KernelDeps } from "../../infra/kernel-deps";
 import { parseBankCsvCredits } from "./f2-csv-movements";
 import { matchCandidateIdentity } from "./f2-identity";
+import { resolveF2AuditActor } from "./f2-audit-actor";
 import { registerPayment } from "./f2-finance";
 
 type Actor = {
   personId?: string | null;
   userId?: string | null;
   requestId?: string | null;
+  source?: string | null;
 };
 
 /** Caps for POST /payments/candidates — reject 400 before parse/insert. */
@@ -248,6 +250,7 @@ export async function ingestCandidateMovement(
     throw new DomainError("invalid_amount", "amountCents inválido", 400);
   }
 
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const externalRef = movementExternalRef(input.tenantId, input.movement);
 
   return withTenantMutex(input.tenantId, async () => {
@@ -260,7 +263,7 @@ export async function ingestCandidateMovement(
         return await insertCandidateInTransaction(deps, {
           tenantId: input.tenantId,
           movement: input.movement,
-          actor: input.actor,
+          actor,
           amountCents,
           externalRef,
         });

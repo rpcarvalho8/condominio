@@ -1,7 +1,8 @@
 /**
  * F2 — Financeiro / Ledger (vertical slice).
- * Astra A5/A6: prova contra handlers/use cases reais (`createF2Routes` + Membership HTTP).
+ * Astra A5/A6/A7: prova contra handlers/use cases reais (`createF2Routes` + Membership HTTP).
  * A6: Payment sem Allocation, parcial, multi-allocation, reversal append-only, duplicado, recibo.
+ * A7: AuditEvent.actor_person_id = Person da Membership activa; sem Membership falha fechado.
  * Dublês só para Enable Banking (ASPSP). Sem réplica da lógica de negócio no teste.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -25,6 +26,7 @@ import {
   isUniqueConstraintError,
   issueReceiptForPayment,
   listPayments,
+  openAccountingPeriod,
   recordKernelBankMovement,
   registerPayment,
 } from "./application/finance/f2-finance";
@@ -79,6 +81,13 @@ import { createMembershipRepo } from "./infra/repos/membership-repo";
 import { createPersonRepo } from "./infra/repos/person-repo";
 import type { KernelAuthUser, KernelVariables } from "./middleware/membership";
 import { createF2Routes } from "./routes/f2";
+import {
+  AUDIT_SOURCE_F2,
+  AUDIT_SOURCE_F2_JOB,
+  F2_ACTOR_REQUIRED_CODE,
+  systemAuditActor,
+} from "./domain/audit";
+import { createAuditEventRepo } from "./infra/repos/audit-event-repo";
 
 const DB_PATH = path.join(import.meta.dir, "..", "..", ".tmp-test-f2.db");
 const DB_URL = `file:${DB_PATH}`;
@@ -140,6 +149,7 @@ async function seedActor(opts: {
   roleCode: string;
   name: string;
   email: string;
+  tenantId?: string;
 }) {
   const personRepo = createPersonRepo(deps.db);
   const membershipRepo = createMembershipRepo(deps.db);
@@ -153,11 +163,23 @@ async function seedActor(opts: {
   await membershipRepo.insert({
     id: crypto.randomUUID(),
     personId: person.id,
-    tenantId: TENANT,
+    tenantId: opts.tenantId ?? TENANT,
     roleCode: opts.roleCode,
     createdAt: new Date(),
   });
   return person;
+}
+
+function membershipAuditActor(
+  person: { id: string; userId?: string | null },
+  requestId?: string | null,
+) {
+  return {
+    personId: person.id,
+    userId: person.userId ?? null,
+    requestId: requestId ?? null,
+    source: AUDIT_SOURCE_F2,
+  };
 }
 
 function buildApp() {
@@ -183,23 +205,37 @@ async function membershipIdFor(personId: string): Promise<string> {
 /** HTTP real via `createF2Routes` + Membership (padrão A4/A5). */
 async function f2Request(
   path: string,
-  init?: { method?: string; body?: unknown; user?: SeededActor | KernelAuthUser | null },
+  init?: {
+    method?: string;
+    body?: unknown;
+    user?: SeededActor | KernelAuthUser | null;
+    headers?: Record<string, string>;
+  },
 ): Promise<Response> {
   if (init && "user" in init) {
     const u = init.user;
     currentUser = !u ? null : "userId" in u ? authUser(u as SeededActor) : (u as KernelAuthUser);
   }
   const method = init?.method ?? (init?.body !== undefined ? "POST" : "GET");
+  const headers: Record<string, string> = { ...(init?.headers ?? {}) };
+  if (init?.body !== undefined) {
+    headers["content-type"] = headers["content-type"] ?? "application/json";
+  }
   return app.request(path, {
     method,
-    headers: init?.body !== undefined ? { "content-type": "application/json" } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
 }
 
 async function f2Json<T>(
   path: string,
-  init?: { method?: string; body?: unknown; user?: SeededActor | KernelAuthUser | null },
+  init?: {
+    method?: string;
+    body?: unknown;
+    user?: SeededActor | KernelAuthUser | null;
+    headers?: Record<string, string>;
+  },
 ): Promise<{ status: number; body: T }> {
   const res = await f2Request(path, init);
   return { status: res.status, body: (await res.json()) as T };
@@ -727,9 +763,10 @@ describe("F2 ADR-029 hash-chain concurrency", () => {
       const depsA: KernelDeps = { db: drizzle(clientA, { schema }), getTenantId: () => TENANT };
       const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT };
 
+      const actor = { personId: admin.id, userId: admin.userId };
       const settled = await Promise.allSettled([
-        allocatePayment(depsA, { tenantId: TENANT, paymentId: p1.body.id }),
-        allocatePayment(depsB, { tenantId: TENANT, paymentId: p2.body.id }),
+        allocatePayment(depsA, { tenantId: TENANT, paymentId: p1.body.id, actor }),
+        allocatePayment(depsB, { tenantId: TENANT, paymentId: p2.body.id, actor }),
       ]);
 
       const fulfilled = settled.filter((s) => s.status === "fulfilled");
@@ -795,9 +832,10 @@ describe("F2 ADR-029 hash-chain concurrency", () => {
       const depsA: KernelDeps = { db: drizzle(clientA, { schema }), getTenantId: () => TENANT };
       const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT };
 
+      const actor = { personId: admin.id, userId: admin.userId };
       const settled = await Promise.allSettled([
-        allocatePayment(depsA, { tenantId: TENANT, paymentId }),
-        allocatePayment(depsB, { tenantId: TENANT, paymentId }),
+        allocatePayment(depsA, { tenantId: TENANT, paymentId, actor }),
+        allocatePayment(depsB, { tenantId: TENANT, paymentId, actor }),
       ]);
       expect(settled.filter((s) => s.status === "fulfilled").length).toBe(2);
     } finally {
@@ -1286,18 +1324,29 @@ describe("F2 BankConnection aviso proactivo de reautorização", () => {
     expect(audits.rows.length).toBe(1);
   });
 
-  test("sem gestor no tenant o aviso não usa IBAN como destino de email", async () => {
+  test("job de reauth (f2.job) sem gestor: aviso não usa IBAN como destino de email", async () => {
     const iban = "PT50001800034978380602065";
     deps.now = () => new Date("2026-09-10T12:00:00.000Z");
-    // Sem Membership de gestor: o use case persiste a ligação; o job HTTP exige gestor.
-    // A5 prova o destino via o serviço real (não replica a lógica) e o 403 HTTP sem gestor.
+    const setupAdmin = await seedActor({
+      userId: "user-admin-reauth-setup",
+      roleCode: "Admin",
+      name: "Admin Reauth Setup",
+      email: "admin-reauth-setup@test",
+    });
     await upsertBankConnection(deps, {
       tenantId: TENANT,
       accountIban: iban,
       consentStatus: BANK_CONSENT_STATUS.authorized,
       consentValidUntil: "2026-09-20T00:00:00.000Z",
+      actor: membershipAuditActor(setupAdmin, "human-reauth-setup"),
     });
-    const sweep = await sweepBankReauthNotices(deps, { tenantId: TENANT });
+    const membershipRepo = createMembershipRepo(deps.db);
+    const [membership] = await membershipRepo.findActiveForPersonTenant(setupAdmin.id, TENANT);
+    await membershipRepo.revoke({ id: membership!.id, revokedAt: new Date() });
+    const sweep = await sweepBankReauthNotices(deps, {
+      tenantId: TENANT,
+      actor: systemAuditActor("job-reauth-no-manager"),
+    });
     expect(sweep.noticed.some((n) => n.noticed)).toBe(true);
     await processOutbox(deps);
     const deliveries = await client.execute(
@@ -1539,6 +1588,13 @@ describe("F2 Payments candidatos (CSV / identity-matrix / reconciliação)", () 
 
   test("índice único (tenant_id, external_ref) e ingest concorrente são idempotentes", async () => {
     await seedFracaoWithObligations();
+    const admin = await seedActor({
+      userId: "user-admin-ingest-race",
+      roleCode: "Admin",
+      name: "Admin Ingest Race",
+      email: "admin-ingest-race@test",
+    });
+    const actor = { personId: admin.id, userId: admin.userId };
     const idx = await client.execute(
       `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'payments_tenant_external_ref_uq'`,
     );
@@ -1552,8 +1608,8 @@ describe("F2 Payments candidatos (CSV / identity-matrix / reconciliação)", () 
       source: CANDIDATE_SOURCES.reconciliation,
     };
     const [a, b] = await Promise.all([
-      ingestCandidateMovement(deps, { tenantId: TENANT, movement }),
-      ingestCandidateMovement(deps, { tenantId: TENANT, movement }),
+      ingestCandidateMovement(deps, { tenantId: TENANT, movement, actor }),
+      ingestCandidateMovement(deps, { tenantId: TENANT, movement, actor }),
     ]);
     expect(a.paymentId).toBe(b.paymentId);
     expect(a.created || b.created).toBe(true);
@@ -1571,7 +1627,7 @@ describe("F2 Payments candidatos (CSV / identity-matrix / reconciliação)", () 
     );
     expect(Number(movementsCount.rows[0]!.n)).toBe(1);
 
-    const third = await ingestCandidateMovement(deps, { tenantId: TENANT, movement });
+    const third = await ingestCandidateMovement(deps, { tenantId: TENANT, movement, actor });
     expect(third.created).toBe(false);
     expect(third.paymentId).toBe(a.paymentId);
 
@@ -2158,13 +2214,24 @@ describe("F2 Enable Banking PSD2", () => {
     const otherTenant = "tenant-f2-other";
     const otherDeps = { ...deps, getTenantId: () => otherTenant };
     otherDeps.enableBanking = mockEnableBanking();
+    const otherAdmin = await seedActor({
+      userId: "user-admin-sync-other",
+      roleCode: "Admin",
+      name: "Admin Sync Other",
+      email: "admin-sync-other@test",
+      tenantId: otherTenant,
+    });
     const otherStart = await startBankConsent(otherDeps, {
       tenantId: otherTenant,
       accountIban: "PT50001800034978380602065",
+      actor: membershipAuditActor(otherAdmin, "a7-tenant-isolation"),
     });
     const otherState = new URL(otherStart.authorizationUrl).searchParams.get("state");
     await completeBankConsent(otherDeps, { code: "ok-other", state: otherState });
-    await syncBankConnection(otherDeps, { tenantId: otherTenant });
+    await syncBankConnection(otherDeps, {
+      tenantId: otherTenant,
+      actor: membershipAuditActor(otherAdmin, "a7-tenant-isolation"),
+    });
 
     const aOnly = await client.execute(
       `SELECT COUNT(*) AS n FROM f2_bank_movements WHERE tenant_id = ?`,
@@ -3200,6 +3267,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
     const receipt = await issueReceiptForPayment(deps, {
       tenantId: TENANT,
       paymentId: created.body.id,
+      actor: { personId: admin.id, userId: admin.userId },
     });
     const generatedFrom = JSON.parse(receipt.generatedFromJson) as {
       allocationIds: string[];
@@ -3480,6 +3548,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
 
 describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
   const managerRoutes: Array<{ path: string; method: string; body?: Record<string, unknown> }> = [
+    { path: "/f2/payments", method: "POST", body: { amountCents: 100, paymentMethod: "bank_transfer" } },
     { path: "/f2/payments/candidates", method: "POST", body: { movements: [{ amountCents: 100 }] } },
     { path: "/f2/payments", method: "GET" },
     {
@@ -3526,6 +3595,7 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
           headers: route.body ? { "content-type": "application/json" } : undefined,
           body: route.body ? JSON.stringify(route.body) : undefined,
         });
+        const body = (await res.json()) as { message?: string; code?: string };
         expect({
           who: actor.email,
           method: route.method,
@@ -3537,6 +3607,7 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
           path: route.path,
           status: 403,
         });
+        expect(body).toEqual({ message: "Acesso negado" });
       }
     }
   });
@@ -3557,6 +3628,7 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
         headers: route.body ? { "content-type": "application/json" } : undefined,
         body: route.body ? JSON.stringify(route.body) : undefined,
       });
+      const body = (await res.json()) as { message?: string; code?: string };
       expect({
         path: route.path,
         method: route.method,
@@ -3566,6 +3638,504 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
         method: route.method,
         status: 403,
       });
+      if (route.method === "GET") {
+        expect(body).toEqual({ message: "Acesso negado" });
+      } else {
+        expect(body.code).toBe(F2_ACTOR_REQUIRED_CODE);
+      }
     }
+  });
+});
+
+describe("F2 Astra A7 — AuditEvent identity (Membership → actor_person_id)", () => {
+  test("Membership HTTP persiste actor_person_id, source, request_id; before/after/reason quando o percurso já os tem", async () => {
+    const { fracao, obligations: obs } = await seedFracaoWithObligations({
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
+    });
+    const admin = await seedActor({
+      userId: "user-admin-a7",
+      roleCode: "Admin",
+      name: "Admin A7",
+      email: "admin-a7@test",
+    });
+    const requestId = "req-a7-identity";
+    const headers = { "x-request-id": requestId };
+
+    const created = await f2Json<{ id: string }>("/f2/payments", {
+      user: admin,
+      headers,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 100_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
+    });
+    expect(created.status).toBe(201);
+
+    const notice = await f2Json<{ id: string }>("/f2/documents/payment-notice", {
+      user: admin,
+      headers,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: obs.reduce((s, o) => s + o.openAmountCents, 0),
+        periodLabel: "2026-09-a7",
+        obligationIds: obs.map((o) => o.id),
+      },
+    });
+    expect(notice.status).toBe(201);
+
+    const allocated = await f2Json<{ allocations: Array<{ id: string }> }>(
+      `/f2/payments/${created.body.id}/allocate`,
+      { user: admin, method: "POST", headers },
+    );
+    expect(allocated.status).toBe(200);
+    const allocationId = allocated.body.allocations[0]!.id;
+
+    const reversed = await f2Json<{ reversal: { id: string } }>(
+      `/f2/payments/${created.body.id}/allocations/${allocationId}/reverse`,
+      { user: admin, headers, body: { reason: "correcção A7" } },
+    );
+    expect(reversed.status).toBe(200);
+
+    const reallocated = await f2Request(`/f2/payments/${created.body.id}/allocate`, {
+      user: admin,
+      method: "POST",
+      headers,
+    });
+    expect(reallocated.status).toBe(200);
+
+    const receipt = await f2Json<{ id: string }>(`/f2/payments/${created.body.id}/receipt`, {
+      user: admin,
+      method: "POST",
+      headers,
+    });
+    expect(receipt.status).toBe(201);
+
+    const opened = await f2Json<{ id: string }>("/f2/periods/open", {
+      user: admin,
+      headers,
+      body: { year: 2026, month: 11 },
+    });
+    expect(opened.status).toBe(201);
+    const closed = await f2Json<{ period: { status: string } }>("/f2/periods/close", {
+      user: admin,
+      headers,
+      body: { year: 2026, month: 11 },
+    });
+    expect(closed.status).toBe(200);
+    expect(closed.body.period.status).toBe("closed");
+
+    const audit = createAuditEventRepo(deps.db);
+    const events = await audit.listByTenant(TENANT);
+    const byType = (type: string) => events.filter((e) => e.type === type);
+    const registered = byType("payment.registered");
+    expect(registered).toHaveLength(1);
+    expect(registered[0]!.actorPersonId).toBe(admin.id);
+    expect(registered[0]!.actorUserId).toBe(admin.userId);
+    expect(registered[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(registered[0]!.requestId).toBe(requestId);
+    expect(registered[0]!.tenantId).toBe(TENANT);
+    expect(registered[0]!.after).toMatchObject({ amountCents: 100_00 });
+
+    const allocatedEv = byType("payment.allocated");
+    expect(allocatedEv.length).toBeGreaterThanOrEqual(1);
+    expect(allocatedEv.every((e) => e.actorPersonId === admin.id && e.source === AUDIT_SOURCE_F2)).toBe(
+      true,
+    );
+    expect(allocatedEv[0]!.before).toMatchObject({ allocationStatus: expect.any(String) });
+
+    const reversedEv = byType("payment.allocation_reversed");
+    expect(reversedEv).toHaveLength(1);
+    expect(reversedEv[0]!.actorPersonId).toBe(admin.id);
+    expect(reversedEv[0]!.reason).toBe("correcção A7");
+    expect(reversedEv[0]!.before).toMatchObject({ allocationId, amountCents: 100_00 });
+    expect(reversedEv[0]!.requestId).toBe(requestId);
+
+    const openedEv = byType("accounting_period.opened");
+    expect(openedEv).toHaveLength(1);
+    expect(openedEv[0]!.actorPersonId).toBe(admin.id);
+    expect(openedEv[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(openedEv[0]!.requestId).toBe(requestId);
+    expect(openedEv[0]!.after).toMatchObject({ year: 2026, month: 11, status: "open" });
+
+    const closedEv = byType("accounting_period.closed");
+    expect(closedEv).toHaveLength(1);
+    expect(closedEv[0]!.actorPersonId).toBe(admin.id);
+    expect(closedEv[0]!.before).toMatchObject({ status: "open" });
+    expect(closedEv[0]!.source).toBe(AUDIT_SOURCE_F2);
+
+    const receiptEv = events.filter(
+      (e) => e.type === "financial_document.issued" && e.entityId === receipt.body.id,
+    );
+    expect(receiptEv).toHaveLength(1);
+    expect(receiptEv[0]!.actorPersonId).toBe(admin.id);
+    expect(receiptEv[0]!.requestId).toBe(requestId);
+    const noticeEv = events.filter(
+      (e) => e.type === "financial_document.issued" && e.entityId === notice.body.id,
+    );
+    expect(noticeEv).toHaveLength(1);
+    expect(noticeEv[0]!.actorPersonId).toBe(admin.id);
+
+    const otherTenant = await audit.listByTenant("tenant-f2-other");
+    expect(otherTenant).toHaveLength(0);
+  });
+
+  test("verify-cash e deposit-cash gravam actor_person_id da Membership verificadora / gestora", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    const admin = await seedActor({
+      userId: "user-admin-a7-cash",
+      roleCode: "Admin",
+      name: "Admin A7 cash",
+      email: "admin-a7-cash@test",
+    });
+    const fiscal = await seedActor({
+      userId: "user-fiscal-a7-cash",
+      roleCode: "Fiscalizacao",
+      name: "Fiscal A7",
+      email: "fiscal-a7-cash@test",
+    });
+    const created = await f2Json<{ id: string }>("/f2/payments", {
+      user: admin,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 5_000,
+        paymentMethod: PAYMENT_METHODS.cash,
+        evidenceUploadId: "ev-a7-cash",
+      },
+    });
+    expect(created.status).toBe(201);
+
+    const verified = await f2Json<{ cashStatus: string }>(`/f2/payments/${created.body.id}/verify-cash`, {
+      user: fiscal,
+      body: { verificationMethod: VERIFICATION_METHOD.secondPerson },
+    });
+    expect(verified.status).toBe(200);
+
+    const movement = await recordKernelBankMovement(deps, {
+      tenantId: TENANT,
+      amountCents: 5_000,
+    });
+    const deposited = await f2Json<{ cashStatus: string }>(
+      `/f2/payments/${created.body.id}/deposit-cash`,
+      { user: admin, body: { bankMovementId: movement.id } },
+    );
+    expect(deposited.status).toBe(200);
+
+    const events = await createAuditEventRepo(deps.db).listByTenant(TENANT);
+    const verifiedEv = events.find((e) => e.type === "payment.cash_verified");
+    expect(verifiedEv?.actorPersonId).toBe(fiscal.id);
+    expect(verifiedEv?.before).toMatchObject({ cashStatus: CASH_STATUS.registered });
+    expect(verifiedEv?.after).toMatchObject({ cashStatus: CASH_STATUS.verified });
+    expect(verifiedEv?.source).toBe(AUDIT_SOURCE_F2);
+    const depositedEv = events.find((e) => e.type === "payment.cash_deposited");
+    expect(depositedEv?.actorPersonId).toBe(admin.id);
+    expect(depositedEv?.before).toMatchObject({ cashStatus: CASH_STATUS.verified });
+    expect(depositedEv?.tenantId).toBe(TENANT);
+  });
+
+  test("sem Membership activa falha fechado: 403, sem Payment nem AuditEvent financeiro", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    const person = await createPersonRepo(deps.db).insert({
+      id: crypto.randomUUID(),
+      userId: "user-a7-no-membership",
+      name: "Sem Membership A7",
+      email: "a7-no-membership@test",
+      createdAt: new Date(),
+    });
+
+    const res = await f2Request("/f2/payments", {
+      user: { id: person.userId!, email: person.email ?? undefined },
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 10_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe(F2_ACTOR_REQUIRED_CODE);
+    const paymentsCount = await client.execute(
+      `SELECT COUNT(*) AS n FROM payments WHERE tenant_id = ?`,
+      [TENANT],
+    );
+    expect(Number(paymentsCount.rows[0]!.n)).toBe(0);
+    const audits = await createAuditEventRepo(deps.db).listByTenant(TENANT);
+    expect(audits.filter((e) => e.type === "payment.registered")).toHaveLength(0);
+  });
+
+  test("use-case sem actor, Membership revogada ou doutro tenant: actor_required e sem side-effect", async () => {
+    const { fracao } = await seedFracaoWithObligations();
+    const admin = await seedActor({
+      userId: "user-admin-a7-usecase",
+      roleCode: "Admin",
+      name: "Admin A7 use-case",
+      email: "admin-a7-usecase@test",
+    });
+
+    try {
+      await registerPayment(deps, {
+        tenantId: TENANT,
+        fracaoId: fracao.id,
+        amountCents: 10_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      });
+      throw new Error("expected actor_required");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+      expect((err as DomainError).httpStatus).toBe(403);
+    }
+
+    const membershipRepo = createMembershipRepo(deps.db);
+    const [membership] = await membershipRepo.findActiveForPersonTenant(admin.id, TENANT);
+    await membershipRepo.revoke({ id: membership!.id, revokedAt: new Date() });
+    try {
+      await registerPayment(deps, {
+        tenantId: TENANT,
+        fracaoId: fracao.id,
+        amountCents: 10_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+        actor: { personId: admin.id, userId: admin.userId },
+      });
+      throw new Error("expected actor_required after revoke");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+    }
+
+    const other = await seedActor({
+      userId: "user-admin-a7-other",
+      roleCode: "Admin",
+      name: "Admin A7 other tenant",
+      email: "admin-a7-other@test",
+    });
+    try {
+      await registerPayment(deps, {
+        tenantId: "tenant-f2-foreign",
+        amountCents: 10_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+        actor: { personId: other.id, userId: other.userId },
+      });
+      throw new Error("expected actor_required for foreign tenant");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+    }
+
+    const paymentsCount = await client.execute(
+      `SELECT COUNT(*) AS n FROM payments WHERE tenant_id IN (?, ?)`,
+      [TENANT, "tenant-f2-foreign"],
+    );
+    expect(Number(paymentsCount.rows[0]!.n)).toBe(0);
+    const homeAudit = await createAuditEventRepo(deps.db).listByTenant(TENANT);
+    const foreignAudit = await createAuditEventRepo(deps.db).listByTenant("tenant-f2-foreign");
+    expect(homeAudit.filter((e) => e.type === "payment.registered")).toHaveLength(0);
+    expect(foreignAudit).toHaveLength(0);
+  });
+
+  test("job de sistema (f2.job) pode gravar AuditEvent com actor_person_id null", async () => {
+    const { fracao } = await seedFracaoWithObligations({
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 40_00 }],
+    });
+    const admin = await seedActor({
+      userId: "user-admin-a7-job",
+      roleCode: "Admin",
+      name: "Admin A7 job",
+      email: "admin-a7-job@test",
+    });
+    const created = await f2Json<{ id: string }>("/f2/payments", {
+      user: admin,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 40_00,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
+    });
+    expect(created.status).toBe(201);
+    expect(
+      (await f2Request(`/f2/payments/${created.body.id}/allocate`, { user: admin, method: "POST" }))
+        .status,
+    ).toBe(200);
+
+    const receipt = await issueReceiptForPayment(deps, {
+      tenantId: TENANT,
+      paymentId: created.body.id,
+      actor: systemAuditActor("job-a7-receipt"),
+    });
+    const events = await createAuditEventRepo(deps.db).listByTenant(TENANT);
+    const issued = events.filter(
+      (e) => e.type === "financial_document.issued" && e.entityId === receipt.id,
+    );
+    expect(issued).toHaveLength(1);
+    expect(issued[0]!.actorPersonId).toBeNull();
+    expect(issued[0]!.source).toBe(AUDIT_SOURCE_F2_JOB);
+    expect(issued[0]!.requestId).toBe("job-a7-receipt");
+    expect(issued[0]!.tenantId).toBe(TENANT);
+  });
+
+  test("upsertBankConnection e reauth notice: Membership activa; sem actor falha fechado antes do audit", async () => {
+    deps.now = () => new Date("2026-09-10T12:00:00.000Z");
+    const admin = await seedActor({
+      userId: "user-admin-a7-bank",
+      roleCode: "Admin",
+      name: "Admin A7 bank",
+      email: "admin-a7-bank@test",
+    });
+    const requestId = "req-a7-bank";
+    const iban = "PT50001800034978380602065";
+
+    try {
+      await upsertBankConnection(deps, {
+        tenantId: TENANT,
+        accountIban: iban,
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+      });
+      throw new Error("expected actor_required");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+      expect((err as DomainError).httpStatus).toBe(403);
+    }
+    expect(await listBankConnections(deps, TENANT)).toHaveLength(0);
+    expect(
+      (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+        (e) => e.type === "bank_connection.upserted",
+      ),
+    ).toHaveLength(0);
+
+    const created = await f2Json<{ id: string }>("/f2/bank-connections", {
+      user: admin,
+      headers: { "x-request-id": requestId },
+      body: {
+        accountIban: iban,
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+      },
+    });
+    expect(created.status).toBe(201);
+    const upserted = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.upserted",
+    );
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]!.actorPersonId).toBe(admin.id);
+    expect(upserted[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(upserted[0]!.requestId).toBe(requestId);
+    expect(upserted[0]!.tenantId).toBe(TENANT);
+
+    try {
+      await sweepBankReauthNotices(deps, { tenantId: TENANT });
+      throw new Error("expected actor_required on reauth notice");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+      expect((err as DomainError).httpStatus).toBe(403);
+    }
+    expect(
+      (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+        (e) => e.type === "bank_connection.reauthorization_notice",
+      ),
+    ).toHaveLength(0);
+    const pendingNotices = await client.execute(
+      `SELECT COUNT(*) AS n FROM outbox_jobs WHERE tenant_id = ? AND job_type = 'notify.bank_reauth'`,
+      [TENANT],
+    );
+    expect(Number(pendingNotices.rows[0]!.n)).toBe(0);
+
+    const noticed = await f2Json<{ noticed: Array<{ noticed: boolean }> }>(
+      "/f2/jobs/reauth-notices",
+      { user: admin, headers: { "x-request-id": requestId }, body: {} },
+    );
+    expect(noticed.status).toBe(200);
+    expect(noticed.body.noticed.some((n) => n.noticed)).toBe(true);
+    const notices = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.reauthorization_notice",
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.actorPersonId).toBe(admin.id);
+    expect(notices[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(notices[0]!.requestId).toBe(requestId);
+  });
+
+  test("job de sistema em bank connection / reauth grava source f2.job com actor_person_id null", async () => {
+    deps.now = () => new Date("2026-09-10T12:00:00.000Z");
+    const row = await upsertBankConnection(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+      consentStatus: BANK_CONSENT_STATUS.authorized,
+      consentValidUntil: "2026-09-20T00:00:00.000Z",
+      actor: systemAuditActor("job-a7-bank"),
+    });
+    const upserted = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.upserted" && e.entityId === row.id,
+    );
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]!.actorPersonId).toBeNull();
+    expect(upserted[0]!.source).toBe(AUDIT_SOURCE_F2_JOB);
+    expect(upserted[0]!.requestId).toBe("job-a7-bank");
+
+    const sweep = await sweepBankReauthNotices(deps, {
+      tenantId: TENANT,
+      actor: systemAuditActor("job-a7-reauth"),
+    });
+    expect(sweep.noticed.some((n) => n.noticed)).toBe(true);
+    const notices = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.reauthorization_notice",
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.actorPersonId).toBeNull();
+    expect(notices[0]!.source).toBe(AUDIT_SOURCE_F2_JOB);
+    expect(notices[0]!.requestId).toBe("job-a7-reauth");
+  });
+
+  test("openAccountingPeriod grava AuditEvent; sem actor falha fechado e não insere", async () => {
+    try {
+      await openAccountingPeriod(deps, { tenantId: TENANT, year: 2026, month: 12 });
+      throw new Error("expected actor_required");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+      expect((err as DomainError).httpStatus).toBe(403);
+    }
+    const periodsCount = await client.execute(
+      `SELECT COUNT(*) AS n FROM accounting_periods WHERE tenant_id = ?`,
+      [TENANT],
+    );
+    expect(Number(periodsCount.rows[0]!.n)).toBe(0);
+    expect(
+      (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+        (e) => e.type === "accounting_period.opened",
+      ),
+    ).toHaveLength(0);
+
+    const admin = await seedActor({
+      userId: "user-admin-a7-period",
+      roleCode: "Admin",
+      name: "Admin A7 period",
+      email: "admin-a7-period@test",
+    });
+    const requestId = "req-a7-period-open";
+    const opened = await f2Json<{ id: string; status: string }>("/f2/periods/open", {
+      user: admin,
+      headers: { "x-request-id": requestId },
+      body: { year: 2026, month: 12 },
+    });
+    expect(opened.status).toBe(201);
+    expect(opened.body.status).toBe("open");
+    const again = await f2Json<{ id: string }>("/f2/periods/open", {
+      user: admin,
+      headers: { "x-request-id": requestId },
+      body: { year: 2026, month: 12 },
+    });
+    expect(again.status).toBe(201);
+    const openedEv = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "accounting_period.opened",
+    );
+    expect(openedEv).toHaveLength(1);
+    expect(openedEv[0]!.actorPersonId).toBe(admin.id);
+    expect(openedEv[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(openedEv[0]!.requestId).toBe(requestId);
+    expect(openedEv[0]!.entityId).toBe(opened.body.id);
+    expect(openedEv[0]!.after).toMatchObject({ year: 2026, month: 12, status: "open" });
   });
 });

@@ -12,16 +12,14 @@ import { DomainError } from "../../domain/errors";
 import { MEMBERSHIP_STATUS } from "../../domain/membership";
 import { canManageFinance } from "../../domain/roles";
 import { OUTBOX_JOB_TYPES } from "../../domain/outbox";
+import { auditActorFields, type AuditActor } from "../../domain/audit";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createDomainEventRepo } from "../../infra/repos/domain-event-repo";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
+import { resolveF2AuditActor } from "./f2-audit-actor";
 
-type Actor = {
-  personId?: string | null;
-  userId?: string | null;
-  requestId?: string | null;
-};
+type Actor = AuditActor;
 
 function asConsent(value: string | undefined): string {
   const allowed = Object.values(BANK_CONSENT_STATUS) as string[];
@@ -171,6 +169,7 @@ export async function upsertBankConnection(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const now = kernelNow(deps);
   const existing = await deps.db
     .select()
@@ -253,15 +252,12 @@ export async function upsertBankConnection(
     type: "bank_connection.upserted",
     entityType: "bank_connection",
     entityId: row!.id,
-    actorPersonId: input.actor?.personId ?? null,
-    actorUserId: input.actor?.userId ?? null,
-    requestId: input.actor?.requestId ?? null,
+    ...auditActorFields(actor),
     after: {
       accountIban: row!.accountIban,
       consentStatus: row!.consentStatus,
       reauthorizationRequired: row!.reauthorizationRequired,
     },
-    source: "f2",
   });
 
   return row!;
@@ -331,6 +327,7 @@ async function issueReauthNotice(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const now = kernelNow(deps);
   const notifyEmails = await resolveFinanceManagerEmails(deps, input.tenantId);
   const key = noticeKey(input.tenantId, input.connection.id, input.connection.consentValidUntil);
@@ -347,7 +344,7 @@ async function issueReauthNotice(
       consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
       leadDays: BANK_REAUTH_LEAD_DAYS,
     },
-    correlationId: input.actor?.requestId ?? null,
+    correlationId: actor.requestId,
     availableAt: now,
   });
 
@@ -372,15 +369,12 @@ async function issueReauthNotice(
       type: "bank_connection.reauthorization_notice",
       entityType: "bank_connection",
       entityId: input.connection.id,
-      actorPersonId: input.actor?.personId ?? null,
-      actorUserId: input.actor?.userId ?? null,
-      requestId: input.actor?.requestId ?? null,
+      ...auditActorFields(actor),
       after: {
         consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
         leadDays: BANK_REAUTH_LEAD_DAYS,
       },
       reason: "aviso proactivo de reautorização (coexiste com reauth PSD2 real)",
-      source: "f2",
     });
 
     await createDomainEventRepo(deps.db).append({
@@ -391,7 +385,7 @@ async function issueReauthNotice(
       payload: {
         consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
       },
-      correlationId: input.actor?.requestId ?? null,
+      correlationId: actor.requestId,
     });
   }
 

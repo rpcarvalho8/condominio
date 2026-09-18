@@ -35,7 +35,7 @@ import {
 import { reconstructFracaoBalance } from "./application/finance/f2-ledger-balance";
 import { processOutbox } from "./application/jobs/process-outbox";
 import { BUDGET_LINE_KINDS, INGEST_DOCUMENT_KINDS } from "./domain/constitution";
-import { AUDIT_TYPES } from "./domain/audit";
+import { AUDIT_SOURCE_F2, AUDIT_TYPES } from "./domain/audit";
 import { LEDGER_ENTRY_TYPES, PAYMENT_METHODS } from "./domain/finance";
 import { applyDomainKernelSchema } from "./infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "./infra/f1-schema";
@@ -134,6 +134,28 @@ async function seedActor(opts: {
     createdAt: new Date(),
   });
   return person;
+}
+
+function f2MembershipActor(
+  person: { id: string; userId?: string | null },
+  requestId = "f3-fixture",
+) {
+  return {
+    personId: person.id,
+    userId: person.userId ?? null,
+    requestId,
+    source: AUDIT_SOURCE_F2,
+  };
+}
+
+async function seedFinanceActor(tenantId = TENANT_A) {
+  return seedActor({
+    userId: `user-f3-finance-${tenantId}`,
+    roleCode: "Admin",
+    name: "Admin F3 fixture",
+    email: `f3-finance-${tenantId}@test`,
+    tenantId,
+  });
 }
 
 async function acceptOwnerForFracao(opts: {
@@ -282,14 +304,20 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       userId: "user-maria",
       name: "Maria",
     });
+    const finance = await seedFinanceActor(TENANT_A);
 
     const payment = await registerPayment(deps, {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       amountCents: 20_000,
       paymentMethod: PAYMENT_METHODS.bankTransfer,
+      actor: f2MembershipActor(finance),
     });
-    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
+    await allocatePayment(deps, {
+      tenantId: TENANT_A,
+      paymentId: payment.id,
+      actor: f2MembershipActor(finance),
+    });
     await processOutbox(deps);
 
     await client.execute(
@@ -395,16 +423,19 @@ describe("F3 portal — saldo Ledger + documentos", () => {
     });
     currentUser = { id: "user-extrato", email: "extrato@condo.test" };
     deps.now = () => new Date("2026-09-12T10:00:00.000Z");
+    const finance = await seedFinanceActor(TENANT_A);
 
     const first = await issueAccountStatement(deps, {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       periodLabel: "2026-09",
+      actor: f2MembershipActor(finance),
     });
     const second = await issueAccountStatement(deps, {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       periodLabel: "2026-09",
+      actor: f2MembershipActor(finance),
     });
     expect(second.id).toBe(first.id);
 
@@ -439,21 +470,32 @@ describe("F3 portal — saldo Ledger + documentos", () => {
     const { fracoes, obligations: obs } = await seedFracoesWithBudget(TENANT_A, ["A"]);
     const fracao = fracoes[0]!;
     const mine = obs.filter((o) => o.fracaoId === fracao.id && o.openAmountCents > 0);
+    const finance = await seedFinanceActor(TENANT_A);
     const notice = await issuePaymentNotice(deps, {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       amountCents: mine.reduce((s, o) => s + o.openAmountCents, 0),
       periodLabel: "2026-09",
       obligationIds: mine.map((o) => o.id),
+      actor: f2MembershipActor(finance),
     });
     const payment = await registerPayment(deps, {
       tenantId: TENANT_A,
       fracaoId: fracao.id,
       amountCents: 15_000,
       paymentMethod: PAYMENT_METHODS.bankTransfer,
+      actor: f2MembershipActor(finance),
     });
-    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
-    const receipt = await issueReceiptForPayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
+    await allocatePayment(deps, {
+      tenantId: TENANT_A,
+      paymentId: payment.id,
+      actor: f2MembershipActor(finance),
+    });
+    const receipt = await issueReceiptForPayment(deps, {
+      tenantId: TENANT_A,
+      paymentId: payment.id,
+      actor: f2MembershipActor(finance),
+    });
 
     await acceptOwnerForFracao({
       tenantId: TENANT_A,
@@ -541,13 +583,14 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       userId: "user-owner-x",
       name: "Owner X",
     });
-    await seedActor({
+    const adminA = await seedActor({
       userId: "user-admin",
       roleCode: "Admin",
       name: "Admin",
       email: "admin@condo.test",
       tenantId: TENANT_A,
     });
+    const adminB = await seedFinanceActor(TENANT_B);
 
     const obsB = seededA.obligations.filter((o) => o.fracaoId === fracaoB.id && o.openAmountCents > 0);
     const noticeB = await issuePaymentNotice(deps, {
@@ -556,6 +599,7 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       amountCents: obsB.reduce((s, o) => s + o.openAmountCents, 0),
       periodLabel: "2026-09",
       obligationIds: obsB.map((o) => o.id),
+      actor: f2MembershipActor(adminA),
     });
     const obsX = seededB.obligations.filter((o) => o.fracaoId === fracaoOtherTenant.id && o.openAmountCents > 0);
     const noticeX = await issuePaymentNotice(deps, {
@@ -564,6 +608,7 @@ describe("F3 portal — saldo Ledger + documentos", () => {
       amountCents: obsX.reduce((s, o) => s + o.openAmountCents, 0),
       periodLabel: "2026-09",
       obligationIds: obsX.map((o) => o.id),
+      actor: f2MembershipActor(adminB),
     });
 
     currentUser = { id: "user-owner-a", email: "owner-a@condo.test" };

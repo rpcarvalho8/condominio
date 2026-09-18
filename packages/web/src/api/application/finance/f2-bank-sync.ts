@@ -14,11 +14,13 @@ import {
 import { DomainError } from "../../domain/errors";
 import { normalizeIBAN } from "../../lib/iban";
 import { OUTBOX_JOB_TYPES } from "../../domain/outbox";
+import { auditActorFields, systemAuditActor, type AuditActor } from "../../domain/audit";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createDomainEventRepo } from "../../infra/repos/domain-event-repo";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
 import { ingestCandidateMovement } from "./f2-candidates";
+import { resolveF2AuditActor } from "./f2-audit-actor";
 import {
   consentHasExpired,
   listBankConnections,
@@ -39,11 +41,7 @@ import {
   type EnableBankingTransaction,
 } from "./enable-banking-adapter";
 
-type Actor = {
-  personId?: string | null;
-  userId?: string | null;
-  requestId?: string | null;
-};
+type Actor = AuditActor;
 
 type BankConnectionRow = typeof condoBankConnections.$inferSelect;
 
@@ -307,6 +305,7 @@ export async function startBankConsent(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const client = requireConfiguredClient(deps);
   const now = kernelNow(deps);
   const scopes = normalizePsd2Scopes(input.scopes);
@@ -333,7 +332,7 @@ export async function startBankConsent(
         : BANK_CONSENT_STATUS.pending,
     authorizedByMembershipId: input.authorizedByMembershipId ?? existing?.authorizedByMembershipId,
     consentScopes: JSON.stringify(scopes),
-    actor: input.actor,
+    actor,
   });
 
   const state = encodeConsentState({
@@ -355,7 +354,7 @@ export async function startBankConsent(
     });
   } catch (err) {
     const lastError = sanitizeBankError(err);
-    await upsertBankConnection(deps, { tenantId: input.tenantId, lastError });
+    await upsertBankConnection(deps, { tenantId: input.tenantId, lastError, actor });
     throw new DomainError("bank_consent_start_failed", lastError, 502);
   }
 
@@ -365,7 +364,7 @@ export async function startBankConsent(
     consentStatus: input.reauthorize
       ? BANK_CONSENT_STATUS.reauthorizationRequired
       : BANK_CONSENT_STATUS.pending,
-    actor: input.actor,
+    actor,
   });
 
   await createAuditEventRepo(deps.db).append({
@@ -375,11 +374,8 @@ export async function startBankConsent(
       : "bank_connection.consent_started",
     entityType: "bank_connection",
     entityId: updated.id,
-    actorPersonId: input.actor?.personId ?? null,
-    actorUserId: input.actor?.userId ?? null,
-    requestId: input.actor?.requestId ?? null,
+    ...auditActorFields(actor),
     after: { aspsp, scopes, reauthorize: Boolean(input.reauthorize) },
-    source: "f2",
   });
 
   return {
@@ -423,6 +419,7 @@ export async function completeBankConsent(
   deps: KernelDeps,
   input: { code?: string | null; state?: string | null; error?: string | null },
 ) {
+  const actor = systemAuditActor();
   const parsed = decodeConsentState(input.state);
   if (input.error) {
     const lastError = sanitizeBankError(input.error);
@@ -431,6 +428,7 @@ export async function completeBankConsent(
         tenantId: parsed.tenantId,
         lastError,
         consentStatus: BANK_CONSENT_STATUS.reauthorizationRequired,
+        actor,
       });
     }
     throw new DomainError("bank_consent_denied", lastError, 400);
@@ -470,6 +468,7 @@ export async function completeBankConsent(
       tenantId: parsed.tenantId,
       lastError: sanitizeBankError(err),
       consentStatus: BANK_CONSENT_STATUS.reauthorizationRequired,
+      actor,
     });
     throw err;
   }
@@ -499,19 +498,20 @@ export async function completeBankConsent(
       accountsJson: JSON.stringify(session.accounts),
       authState: null,
       lastError: null,
+      actor,
     });
     await createAuditEventRepo(deps.db).append({
       tenantId: parsed.tenantId,
       type: "bank_connection.consent_authorized",
       entityType: "bank_connection",
       entityId: updated.id,
+      ...auditActorFields(actor),
       after: {
         aspsp: updated.aspsp,
         accountIban: updated.accountIban,
         consentStatus: updated.consentStatus,
         consentValidUntil: validUntil.toISOString(),
       },
-      source: "f2",
     });
     await createDomainEventRepo(deps.db).append({
       tenantId: parsed.tenantId,
@@ -527,6 +527,7 @@ export async function completeBankConsent(
       tenantId: parsed.tenantId,
       lastError,
       consentStatus: BANK_CONSENT_STATUS.reauthorizationRequired,
+      actor,
     });
     if (err instanceof DomainError) throw err;
     throw new DomainError("bank_consent_exchange_failed", lastError, 502);
@@ -537,6 +538,7 @@ export async function revokeBankConnection(
   deps: KernelDeps,
   input: { tenantId: string; connectionId?: string | null; actor?: Actor },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const row = await loadTenantConnection(deps, input.tenantId, input.connectionId);
   const client = enableBankingClient(deps);
   if (row.sessionId && client.revokeSession) {
@@ -549,17 +551,14 @@ export async function revokeBankConnection(
     accountUid: null,
     authState: null,
     lastError: null,
-    actor: input.actor,
+    actor,
   });
   await createAuditEventRepo(deps.db).append({
     tenantId: input.tenantId,
     type: "bank_connection.revoked",
     entityType: "bank_connection",
     entityId: updated.id,
-    actorPersonId: input.actor?.personId ?? null,
-    actorUserId: input.actor?.userId ?? null,
-    requestId: input.actor?.requestId ?? null,
-    source: "f2",
+    ...auditActorFields(actor),
   });
   return updated;
 }
@@ -574,12 +573,13 @@ export async function syncBankConnection(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const now = kernelNow(deps);
   const row = await loadTenantConnection(deps, input.tenantId, input.connectionId);
 
   if (row.consentStatus === BANK_CONSENT_STATUS.revoked || row.revokedAt) {
     const lastError = "bank_connection_revoked; use CSV fallback";
-    await upsertBankConnection(deps, { tenantId: input.tenantId, lastError });
+    await upsertBankConnection(deps, { tenantId: input.tenantId, lastError, actor });
     return {
       skipped: true as const,
       reason: "revoked",
@@ -602,6 +602,7 @@ export async function syncBankConnection(
     await upsertBankConnection(deps, {
       tenantId: input.tenantId,
       lastError,
+      actor,
       consentStatus:
         consentHasExpired(row.consentValidUntil, now)
           ? BANK_CONSENT_STATUS.expired
@@ -653,6 +654,7 @@ export async function syncBankConnection(
     await upsertBankConnection(deps, {
       tenantId: input.tenantId,
       lastError,
+      actor,
       consentStatus: authFailed
         ? BANK_CONSENT_STATUS.reauthorizationRequired
         : row.consentStatus,
@@ -685,7 +687,7 @@ export async function syncBankConnection(
       tenantId: input.tenantId,
       connectionId: row.id,
       tx,
-      actor: input.actor,
+      actor,
     });
     if (applied.kind === "credit") credits += 1;
     else debits += 1;
@@ -700,6 +702,7 @@ export async function syncBankConnection(
     lastError,
     consentStatus: row.consentStatus,
     consentValidUntil: row.consentValidUntil,
+    actor,
   });
 
   await createAuditEventRepo(deps.db).append({
@@ -707,11 +710,8 @@ export async function syncBankConnection(
     type: "bank_connection.synced",
     entityType: "bank_connection",
     entityId: row.id,
-    actorPersonId: input.actor?.personId ?? null,
-    actorUserId: input.actor?.userId ?? null,
-    requestId: input.actor?.requestId ?? null,
+    ...auditActorFields(actor),
     after: { created, reused, credits, debits, errors: syncErrors.length },
-    source: "f2",
   });
 
   return {

@@ -66,6 +66,14 @@ export function createAuditEventRepo(db: KernelDb) {
         .orderBy(desc(auditEvents.createdAt));
       return rows.filter((r) => r.entityType === entityType).map(mapEvent);
     },
+    async listByTenant(tenantId: string): Promise<AuditEvent[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, tenantId))
+        .orderBy(desc(auditEvents.createdAt));
+      return rows.map(mapEvent);
+    },
     /** Distinct persons (or users) who produced a given audit type in the tenant. */
     async countDistinctActorsByTypes(tenantId: string, types: string[]): Promise<number> {
       if (types.length === 0) return 0;
