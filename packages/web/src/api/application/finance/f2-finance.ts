@@ -65,12 +65,23 @@ async function withTenantMutex<T>(tenantId: string, fn: () => Promise<T>): Promi
 }
 
 function isUniqueConstraintError(err: unknown): boolean {
-  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
-  return (
-    msg.includes("unique") ||
-    msg.includes("constraint failed") ||
-    msg.includes("already exists")
-  );
+  let current: unknown = err;
+  for (let i = 0; i < 4 && current; i++) {
+    const anyErr = current as { message?: string; code?: string; cause?: unknown };
+    const msg = String(anyErr?.message ?? current).toLowerCase();
+    const code = String(anyErr?.code ?? "").toLowerCase();
+    if (
+      code.includes("constraint") ||
+      code.includes("unique") ||
+      msg.includes("unique") ||
+      msg.includes("constraint failed") ||
+      msg.includes("already exists")
+    ) {
+      return true;
+    }
+    current = anyErr?.cause;
+  }
+  return false;
 }
 
 function isRetryableLedgerWrite(err: unknown): boolean {

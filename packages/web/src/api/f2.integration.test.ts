@@ -2444,7 +2444,7 @@ describe("F2 Enable Banking PSD2", () => {
 describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
   test("1. Payment sem Allocation existe, é reportável e não bloqueia fecho / avisos / outro pagamento", async () => {
     const { fracao, obligations: obs } = await seedFracaoWithObligations({
-      lines: [{ kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Quota", amountCents: 100_00 }],
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
     });
     const admin = await seedActor({
       userId: "user-admin-a6-1",
@@ -2548,7 +2548,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
 
   test("2. Allocation parcial — Obligation 100, Payment 60, em aberto 40", async () => {
     const { fracao, obligations: obs } = await seedFracaoWithObligations({
-      lines: [{ kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Quota", amountCents: 100_00 }],
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
     });
     const admin = await seedActor({
       userId: "user-admin-a6-2",
@@ -2574,7 +2574,8 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
       allocations: Array<{ amountCents: number; obligationId: string }>;
     }>(`/f2/payments/${created.body.id}/allocate`, { user: admin, method: "POST" });
     expect(result.status).toBe(200);
-    expect(result.body.payment.allocationStatus).toBe(ALLOCATION_STATUS.parcialmenteAlocado);
+    // Payment 60 fica totalmente alocado (o pagamento esgota-se); a Obligation 100 fica com 40 em aberto.
+    expect(result.body.payment.allocationStatus).toBe(ALLOCATION_STATUS.totalmenteAlocado);
     expect(result.body.allocations).toHaveLength(1);
     expect(result.body.allocations[0]!.amountCents).toBe(60_00);
 
@@ -2597,7 +2598,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
       payments: Array<{ id: string; allocationStatus: string; allocatedCents: number }>;
     }>("/f2/payments", { user: admin });
     const row = listed.body.payments.find((p) => p.id === created.body.id)!;
-    expect(row.allocationStatus).toBe(ALLOCATION_STATUS.parcialmenteAlocado);
+    expect(row.allocationStatus).toBe(ALLOCATION_STATUS.totalmenteAlocado);
     expect(row.allocatedCents).toBe(60_00);
   });
 
@@ -2664,7 +2665,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
 
   test("4. Reversal é ajuste append-only; Allocation original e hash-chain intactas", async () => {
     const { fracao, obligations: obs } = await seedFracaoWithObligations({
-      lines: [{ kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Quota", amountCents: 100_00 }],
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
     });
     const admin = await seedActor({
       userId: "user-admin-a6-4",
@@ -2783,7 +2784,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
 
   test("5. Mesmo movimento bancário processado duas vezes não duplica Allocation", async () => {
     const { fracao } = await seedFracaoWithObligations({
-      lines: [{ kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Quota", amountCents: 100_00 }],
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
     });
     await seedConfirmedOwner("A", "Maria Silva");
     const admin = await seedActor({
@@ -2869,7 +2870,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
 
   test("6. Recibo antes da Allocation é recusado; depois só mostra Allocations que existem", async () => {
     const { fracao } = await seedFracaoWithObligations({
-      lines: [{ kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Quota", amountCents: 100_00 }],
+      lines: [{ kind: BUDGET_LINE_KINDS.fcr, label: "FCR", amountCents: 100_00 }],
     });
     await seedConfirmedOwner("A", "Joao Costa");
     const admin = await seedActor({
