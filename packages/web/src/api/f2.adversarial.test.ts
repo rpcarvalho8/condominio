@@ -104,7 +104,13 @@ let tenantIdOverride = TENANT_A;
 let app: Hono;
 
 const MANAGER_ROUTES: Array<{ path: string; method: string; body?: Record<string, unknown> }> = [
-  { path: "/f2/payments/candidates", method: "POST", body: { movements: [{ amountCents: 100 }] } },
+    { path: "/f2/payments/candidates", method: "POST", body: { movements: [{ amountCents: 100 }] } },
+    { path: "/f2/payments", method: "GET" },
+    {
+      path: "/f2/payments/x/allocations/y/reverse",
+      method: "POST",
+      body: {},
+    },
   {
     path: "/f2/bank-connections",
     method: "POST",

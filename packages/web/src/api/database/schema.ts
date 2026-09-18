@@ -986,6 +986,8 @@ export const allocations = sqliteTable(
     confidence: real("confidence"),
     approvedByPersonId: text("approved_by_person_id"),
     ledgerEntryId: text("ledger_entry_id"),
+    /** Append-only reversal: aponta para a Allocation original; nunca a edita (ADR-003). */
+    reversesAllocationId: text("reverses_allocation_id"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -994,6 +996,9 @@ export const allocations = sqliteTable(
     paymentIdx: index("allocations_payment_idx").on(t.paymentId),
     obligationIdx: index("allocations_obligation_idx").on(t.obligationId),
     tenantIdx: index("allocations_tenant_idx").on(t.tenantId),
+    reversesUq: uniqueIndex("allocations_reverses_allocation_uq")
+      .on(t.reversesAllocationId)
+      .where(sql`${t.reversesAllocationId} is not null`),
   }),
 );
 

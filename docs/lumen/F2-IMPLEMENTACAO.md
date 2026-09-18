@@ -31,6 +31,7 @@ Esta cobertura não equivale a F2 operacional de ponta a ponta, a cutover da Fon
 | `Payment` + `allocation_status` (ADR-012) | ✅ | Válido sem Allocation; ortogonal a cash |
 | Cash `registered → verified → deposited` (ADR-028) | ✅ | Fiscalizacao `second_person`; `bank_deposit`/`deposited` exigem movimento tenant-scoped |
 | `Allocation` → `LedgerEntry` hash-chain (ADR-029) | ✅ | Mutex por tenant + `BEGIN IMMEDIATE` |
+| Reversão de Allocation | ✅ | Ajuste append-only (`entry_type=adjustment`); original intacta |
 | Aviso proactivo de reautorização | ✅ | Lead 14 dias; outbox `notify.bank_reauth`; destination = email do gestor, **nunca** IBAN; fallback `admin@invalid` + `skipped` |
 | Reauth PSD2 real | ✅ | `POST /bank-connections/authorize` + `/reauthorize` + `GET /bank/callback`; scopes persistidos; sessão/account_uid na conta do condomínio |
 | Sync Enable Banking → candidatos | ✅ | Créditos → `f2_bank_movements` + Payment (`candidate_source=enable_banking`); débitos só movimento; idempotente por `eb:{transaction_id}`; sem `Quota.pago`; `ownIbans` no mapping de produção (IBAN do condomínio nunca vaza como contraparte) |
@@ -91,10 +92,12 @@ Suite: `packages/web/src/api/f2.adversarial.test.ts` — `bun run test:f2-advers
 ## API (resumo)
 
 - `POST /api/f2/payments`
+- `GET /api/f2/payments` — inclui Payments sem Allocation (ADR-012)
 - `POST /api/f2/payments/candidates` — CSV (`csvText`) ou `movements[]`
 - `POST /api/f2/payments/:id/verify-cash`
 - `POST /api/f2/payments/:id/deposit-cash`
 - `POST /api/f2/payments/:id/allocate` — enfileira recibo
+- `POST /api/f2/payments/:id/allocations/:allocationId/reverse` — ajuste append-only (ADR-003)
 - `POST /api/f2/payments/:id/receipt`
 - `POST /api/f2/ledger/validate`
 - `POST /api/f2/periods/open`
