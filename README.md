@@ -11,7 +11,7 @@ Há **duas camadas no mesmo binário**, ainda sem cutover:
 
 O produto-alvo está especificado em [`docs/lumen/`](docs/lumen/00-INDICE.md) (v6.1). **Dinheiro, votos e efeitos legais em produção real permanecem NO-GO** até aos [production gates](docs/lumen/PRODUCTION-GATES.md). O kernel F2 **não** dual-write para `Quota.pago`.
 
-> Actualizado em 2026-09-17 a partir de `produto` @ `0f8f7ea` (incl. Astra A2). `packages/mobile` e `packages/desktop` estão em `_archive/` e não entram no `bun run dev`.
+> Actualizado em 2026-09-18 a partir de `produto` @ `26b7ec3` (incl. Astra A2; A4 #25 não muda este guia). `packages/mobile` e `packages/desktop` estão em `_archive/` e não entram no `bun run dev`.
 
 ---
 
