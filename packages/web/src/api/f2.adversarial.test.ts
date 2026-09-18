@@ -1,6 +1,7 @@
 /**
  * F2 — testes adversariais do Finance Kernel (ordem §8, 06-FATIAS).
- * Extende o kernel existente (sem modelo financeiro paralelo).
+ * Astra A5: HTTP real via `createF2Routes` + Membership; use cases só onde o HTTP
+ * não chega (concorrência 2 clientes, job sem gestor). Sem modelo financeiro paralelo.
  *
  * Propriedades:
  *  1. Isolamento multi-tenant
@@ -29,27 +30,19 @@ import {
 } from "./application/constitution/f1-constitution";
 import {
   allocatePayment,
-  depositCashPayment,
-  issueReceiptForPayment,
   recordKernelBankMovement,
-  registerPayment,
-  validateLedgerChain,
-  verifyCashPayment,
 } from "./application/finance/f2-finance";
 import {
   ingestCandidateMovement,
-  ingestCandidateMovements,
   MAX_CANDIDATE_CSV_CHARS,
   MAX_CANDIDATE_MOVEMENTS,
 } from "./application/finance/f2-candidates";
 import {
   BANK_REAUTH_ADMIN_FALLBACK,
   isResolvedAdminMailbox,
-  listBankConnections,
   sweepBankReauthNotices,
   upsertBankConnection,
 } from "./application/finance/f2-bank-connection";
-import { generateMonthlyPaymentNotices } from "./application/finance/f2-jobs";
 import { identityNameMatches } from "./application/finance/f2-identity";
 import { processOutbox } from "./application/jobs/process-outbox";
 import { ownerContactDrafts } from "./database/schema";
@@ -238,6 +231,45 @@ function buildApp() {
     .route("/f2", createF2Routes(deps));
 }
 
+type SeededActor = Awaited<ReturnType<typeof seedActor>>;
+
+function authUser(person: SeededActor["person"]): KernelAuthUser {
+  return { id: person.userId!, email: person.email ?? undefined };
+}
+
+async function f2Request(
+  path: string,
+  init?: { method?: string; body?: unknown; user?: SeededActor["person"] | KernelAuthUser | null },
+): Promise<Response> {
+  if (init && "user" in init) {
+    const u = init.user;
+    if (!u) currentUser = null;
+    else if ("userId" in u) currentUser = authUser(u);
+    else currentUser = u;
+  }
+  const method = init?.method ?? (init?.body !== undefined ? "POST" : "GET");
+  return app.request(path, {
+    method,
+    headers: init?.body !== undefined ? { "content-type": "application/json" } : undefined,
+    body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+  });
+}
+
+async function f2Json<T>(
+  path: string,
+  init?: { method?: string; body?: unknown; user?: SeededActor["person"] | KernelAuthUser | null },
+): Promise<{ status: number; body: T }> {
+  const res = await f2Request(path, init);
+  return { status: res.status, body: (await res.json()) as T };
+}
+
+async function expectDomainCode(res: Response, status: number, code: string) {
+  expect(res.status).toBe(status);
+  const body = (await res.json()) as { code?: string };
+  expect(body.code).toBe(code);
+  return body;
+}
+
 beforeAll(async () => {
   try {
     if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
@@ -307,107 +339,172 @@ describe("F2 adversarial — isolamento multi-tenant", () => {
     await seedConfirmedOwner(TENANT_A, "A", "Maria Silva");
     await seedConfirmedOwner(TENANT_B, "A", "Maria Silva");
 
-    const payA = await registerPayment(deps, {
-      tenantId: TENANT_A,
-      fracaoId: seededA.fracao.id,
-      amountCents: 20_000,
-      paymentMethod: PAYMENT_METHODS.bankTransfer,
-      actor: { personId: adminA.person.id },
+    const payA = await f2Json<{ id: string }>("/f2/payments", {
+      user: adminA.person,
+      body: {
+        fracaoId: seededA.fracao.id,
+        amountCents: 20_000,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
     });
-    const payB = await registerPayment(deps, {
-      tenantId: TENANT_B,
-      fracaoId: seededB.fracao.id,
-      amountCents: 20_000,
-      paymentMethod: PAYMENT_METHODS.bankTransfer,
-      actor: { personId: adminB.person.id },
+    expect(payA.status).toBe(201);
+    tenantIdOverride = TENANT_B;
+    const payB = await f2Json<{ id: string }>("/f2/payments", {
+      user: adminB.person,
+      body: {
+        fracaoId: seededB.fracao.id,
+        amountCents: 20_000,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
     });
-    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payA.id });
-    await allocatePayment(deps, { tenantId: TENANT_B, paymentId: payB.id });
+    expect(payB.status).toBe(201);
+    tenantIdOverride = TENANT_A;
+    const allocA = await f2Request(`/f2/payments/${payA.body.id}/allocate`, {
+      user: adminA.person,
+      method: "POST",
+    });
+    expect(allocA.status).toBe(200);
+    tenantIdOverride = TENANT_B;
+    const allocB = await f2Request(`/f2/payments/${payB.body.id}/allocate`, {
+      user: adminB.person,
+      method: "POST",
+    });
+    expect(allocB.status).toBe(200);
 
     const ibanA = "PT50001800034978380602065";
     const ibanB = "PT50000700000000000000000";
     deps.now = () => new Date("2026-09-10T12:00:00.000Z");
-    await upsertBankConnection(deps, {
-      tenantId: TENANT_A,
-      accountIban: ibanA,
-      consentStatus: BANK_CONSENT_STATUS.authorized,
-      consentValidUntil: "2026-09-20T00:00:00.000Z",
-      authorizedByMembershipId: adminA.membership.id,
+    tenantIdOverride = TENANT_A;
+    await f2Request("/f2/bank-connections", {
+      user: adminA.person,
+      body: {
+        accountIban: ibanA,
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+        authorizedByMembershipId: adminA.membership.id,
+      },
     });
-    await upsertBankConnection(deps, {
-      tenantId: TENANT_B,
-      accountIban: ibanB,
-      consentStatus: BANK_CONSENT_STATUS.authorized,
-      consentValidUntil: "2026-09-20T00:00:00.000Z",
-      authorizedByMembershipId: adminB.membership.id,
+    tenantIdOverride = TENANT_B;
+    await f2Request("/f2/bank-connections", {
+      user: adminB.person,
+      body: {
+        accountIban: ibanB,
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+        authorizedByMembershipId: adminB.membership.id,
+      },
     });
 
-    const listedA = await listBankConnections(deps, TENANT_A);
-    const listedB = await listBankConnections(deps, TENANT_B);
-    expect(listedA.map((r) => r.accountIban)).toEqual([ibanA]);
-    expect(listedB.map((r) => r.accountIban)).toEqual([ibanB]);
-    expect(listedA.some((r) => r.accountIban === ibanB)).toBe(false);
-    expect(listedB.some((r) => r.accountIban === ibanA)).toBe(false);
+    tenantIdOverride = TENANT_A;
+    const listedAHttp = await f2Json<{ connections: Array<{ accountIban: string | null }> }>(
+      "/f2/bank-connections",
+      { user: adminA.person, method: "GET" },
+    );
+    expect(listedAHttp.status).toBe(200);
+    expect(listedAHttp.body.connections.map((c) => c.accountIban)).toEqual([ibanA]);
+    tenantIdOverride = TENANT_B;
+    const listedBHttp = await f2Json<{ connections: Array<{ accountIban: string | null }> }>(
+      "/f2/bank-connections",
+      { user: adminB.person, method: "GET" },
+    );
+    expect(listedBHttp.status).toBe(200);
+    expect(listedBHttp.body.connections.map((c) => c.accountIban)).toEqual([ibanB]);
 
-    await expect(
-      allocatePayment(deps, { tenantId: TENANT_A, paymentId: payB.id }),
-    ).rejects.toMatchObject({ code: "not_found" });
-    await expect(
-      issueReceiptForPayment(deps, { tenantId: TENANT_A, paymentId: payB.id }),
-    ).rejects.toMatchObject({ code: "not_found" });
-    await expect(
-      registerPayment(deps, {
-        tenantId: TENANT_A,
-        fracaoId: seededB.fracao.id,
-        amountCents: 1_000,
-        paymentMethod: PAYMENT_METHODS.bankTransfer,
+    tenantIdOverride = TENANT_A;
+    await expectDomainCode(
+      await f2Request(`/f2/payments/${payB.body.id}/allocate`, {
+        user: adminA.person,
+        method: "POST",
       }),
-    ).rejects.toMatchObject({ code: "fracao_not_found" });
+      404,
+      "not_found",
+    );
+    await expectDomainCode(
+      await f2Request(`/f2/payments/${payB.body.id}/receipt`, {
+        user: adminA.person,
+        method: "POST",
+      }),
+      404,
+      "not_found",
+    );
+    await expectDomainCode(
+      await f2Request("/f2/payments", {
+        user: adminA.person,
+        body: {
+          fracaoId: seededB.fracao.id,
+          amountCents: 1_000,
+          paymentMethod: PAYMENT_METHODS.bankTransfer,
+        },
+      }),
+      404,
+      "fracao_not_found",
+    );
 
     const movementB = await recordKernelBankMovement(deps, {
       tenantId: TENANT_B,
       amountCents: 5_000,
     });
-    const cashA = await registerPayment(deps, {
-      tenantId: TENANT_A,
-      fracaoId: seededA.fracao.id,
-      amountCents: 5_000,
-      paymentMethod: PAYMENT_METHODS.cash,
-      evidenceUploadId: "ev-cross",
-      actor: { personId: adminA.person.id },
+    tenantIdOverride = TENANT_A;
+    const cashA = await f2Json<{ id: string }>("/f2/payments", {
+      user: adminA.person,
+      body: {
+        fracaoId: seededA.fracao.id,
+        amountCents: 5_000,
+        paymentMethod: PAYMENT_METHODS.cash,
+        evidenceUploadId: "ev-cross",
+      },
     });
-    await expect(
-      verifyCashPayment(deps, {
-        tenantId: TENANT_A,
-        paymentId: cashA.id,
-        verificationMethod: VERIFICATION_METHOD.bankDeposit,
-        bankMovementId: movementB.id,
-        actor: { personId: adminA.person.id },
+    expect(cashA.status).toBe(201);
+    await expectDomainCode(
+      await f2Request(`/f2/payments/${cashA.body.id}/verify-cash`, {
+        user: adminA.person,
+        body: {
+          verificationMethod: VERIFICATION_METHOD.bankDeposit,
+          bankMovementId: movementB.id,
+        },
       }),
-    ).rejects.toMatchObject({ code: "bank_movement_not_found" });
+      404,
+      "bank_movement_not_found",
+    );
 
     const sharedRef = "shared-external-ref-1";
-    const ingestA = await ingestCandidateMovement(deps, {
-      tenantId: TENANT_A,
-      movement: {
-        amountCents: 50_00,
-        description: "TRF CRED SEPA+ DE MARIA SILVA",
-        externalRef: sharedRef,
-        source: CANDIDATE_SOURCES.identityMatrix,
+    tenantIdOverride = TENANT_A;
+    const ingestA = await f2Json<{
+      results: Array<{ paymentId: string; fracaoId: string | null }>;
+    }>("/f2/payments/candidates", {
+      user: adminA.person,
+      body: {
+        movements: [
+          {
+            amountCents: 50_00,
+            description: "TRF CRED SEPA+ DE MARIA SILVA",
+            externalRef: sharedRef,
+            source: CANDIDATE_SOURCES.identityMatrix,
+          },
+        ],
       },
     });
-    const ingestB = await ingestCandidateMovement(deps, {
-      tenantId: TENANT_B,
-      movement: {
-        amountCents: 50_00,
-        description: "TRF CRED SEPA+ DE MARIA SILVA",
-        externalRef: sharedRef,
-        source: CANDIDATE_SOURCES.identityMatrix,
+    tenantIdOverride = TENANT_B;
+    const ingestB = await f2Json<{
+      results: Array<{ paymentId: string; fracaoId: string | null }>;
+    }>("/f2/payments/candidates", {
+      user: adminB.person,
+      body: {
+        movements: [
+          {
+            amountCents: 50_00,
+            description: "TRF CRED SEPA+ DE MARIA SILVA",
+            externalRef: sharedRef,
+            source: CANDIDATE_SOURCES.identityMatrix,
+          },
+        ],
       },
     });
-    expect(ingestA.paymentId).not.toBe(ingestB.paymentId);
-    expect(ingestA.fracaoId).toBe(seededA.fracao.id);
-    expect(ingestB.fracaoId).toBe(seededB.fracao.id);
+    expect(ingestA.status).toBe(201);
+    expect(ingestB.status).toBe(201);
+    expect(ingestA.body.results[0]!.paymentId).not.toBe(ingestB.body.results[0]!.paymentId);
+    expect(ingestA.body.results[0]!.fracaoId).toBe(seededA.fracao.id);
+    expect(ingestB.body.results[0]!.fracaoId).toBe(seededB.fracao.id);
 
     const noticedA = await sweepBankReauthNotices(deps, { tenantId: TENANT_A });
     expect(noticedA.noticed.some((n) => n.noticed)).toBe(true);
@@ -428,44 +525,35 @@ describe("F2 adversarial — isolamento multi-tenant", () => {
     expect(jobsB.rows.some((r) => idsA.has(String(r.id)))).toBe(false);
     expect(jobsA.rows.some((r) => r.job_type === OUTBOX_JOB_TYPES.bankReauthNotice)).toBe(true);
 
-    const chainA = await validateLedgerChain(deps, { tenantId: TENANT_A });
-    const chainB = await validateLedgerChain(deps, { tenantId: TENANT_B });
-    expect(chainA.ok).toBe(true);
-    expect(chainB.ok).toBe(true);
-    expect(chainA.entries).toBeGreaterThan(0);
-    expect(chainB.entries).toBeGreaterThan(0);
+    tenantIdOverride = TENANT_A;
+    const chainA = await f2Json<{ ok: boolean; entries: number }>("/f2/ledger/validate", {
+      user: adminA.person,
+      method: "POST",
+    });
+    tenantIdOverride = TENANT_B;
+    const chainB = await f2Json<{ ok: boolean; entries: number }>("/f2/ledger/validate", {
+      user: adminB.person,
+      method: "POST",
+    });
+    expect(chainA.status).toBe(200);
+    expect(chainB.status).toBe(200);
+    expect(chainA.body.ok).toBe(true);
+    expect(chainB.body.ok).toBe(true);
+    expect(chainA.body.entries).toBeGreaterThan(0);
+    expect(chainB.body.entries).toBeGreaterThan(0);
 
     expect(await countForTenant("payments", TENANT_A)).toBeGreaterThan(0);
     expect(await countForTenant("payments", TENANT_B)).toBeGreaterThan(0);
-    expect(await countForTenant("ledger_entries", TENANT_A)).toBe(chainA.entries);
-    expect(await countForTenant("ledger_entries", TENANT_B)).toBe(chainB.entries);
+    expect(await countForTenant("ledger_entries", TENANT_A)).toBe(chainA.body.entries);
+    expect(await countForTenant("ledger_entries", TENANT_B)).toBe(chainB.body.entries);
 
     tenantIdOverride = TENANT_A;
-    currentUser = { id: adminA.person.userId!, email: "admin-a@test" };
-    const httpListA = await app.request("/f2/bank-connections");
-    expect(httpListA.status).toBe(200);
-    const bodyA = (await httpListA.json()) as {
-      connections: Array<{ accountIban: string | null }>;
-    };
-    expect(bodyA.connections.map((c) => c.accountIban)).toEqual([ibanA]);
-
-    const httpAllocB = await app.request(`/f2/payments/${payB.id}/allocate`, { method: "POST" });
-    expect(httpAllocB.status).toBe(404);
-
-    tenantIdOverride = TENANT_B;
-    currentUser = { id: adminB.person.userId!, email: "admin-b@test" };
-    const httpListB = await app.request("/f2/bank-connections");
-    expect(httpListB.status).toBe(200);
-    const bodyB = (await httpListB.json()) as {
-      connections: Array<{ accountIban: string | null }>;
-    };
-    expect(bodyB.connections.map((c) => c.accountIban)).toEqual([ibanB]);
-
-    const noticesAOnly = await generateMonthlyPaymentNotices(deps, {
-      tenantId: TENANT_A,
-      force: true,
-    });
-    expect(noticesAOnly.issued.length + noticesAOnly.reused.length).toBe(1);
+    const noticesAOnly = await f2Json<{ issued: string[]; reused: string[] }>(
+      "/f2/jobs/monthly-notices",
+      { user: adminA.person, body: { force: true } },
+    );
+    expect(noticesAOnly.status).toBe(200);
+    expect(noticesAOnly.body.issued.length + noticesAOnly.body.reused.length).toBe(1);
     expect(await countForTenant("financial_documents", TENANT_B)).toBe(0);
   });
 });
@@ -473,6 +561,12 @@ describe("F2 adversarial — isolamento multi-tenant", () => {
 describe("F2 adversarial — concorrência allocate + ingest", () => {
   test("allocate + ingest em paralelo: sequences e external_ref únicos, sem double-spend", async () => {
     const { fracao, obligations: obs } = await seedFracaoWithObligations(TENANT_A);
+    const admin = await seedActor(TENANT_A, {
+      userId: "user-admin-race-adv",
+      roleCode: "Admin",
+      name: "Admin Race",
+      email: "admin-race-adv@test",
+    });
     const keep = obs[0]!;
     await client.execute({
       sql: `UPDATE obligations SET open_amount_cents = 10000, amount_cents = 10000 WHERE id = ?`,
@@ -485,18 +579,24 @@ describe("F2 adversarial — concorrência allocate + ingest", () => {
       });
     }
 
-    const p1 = await registerPayment(deps, {
-      tenantId: TENANT_A,
-      fracaoId: fracao.id,
-      amountCents: 10_000,
-      paymentMethod: PAYMENT_METHODS.bankTransfer,
+    const p1 = await f2Json<{ id: string }>("/f2/payments", {
+      user: admin.person,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 10_000,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
     });
-    const p2 = await registerPayment(deps, {
-      tenantId: TENANT_A,
-      fracaoId: fracao.id,
-      amountCents: 10_000,
-      paymentMethod: PAYMENT_METHODS.bankTransfer,
+    const p2 = await f2Json<{ id: string }>("/f2/payments", {
+      user: admin.person,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 10_000,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
     });
+    expect(p1.status).toBe(201);
+    expect(p2.status).toBe(201);
     const movement = {
       amountCents: 12_00,
       description: "TRF CRED SEPA+ DE DESCONHECIDO RACE",
@@ -513,8 +613,8 @@ describe("F2 adversarial — concorrência allocate + ingest", () => {
       const depsB: KernelDeps = { db: drizzle(clientB, { schema }), getTenantId: () => TENANT_A };
 
       const settled = await Promise.allSettled([
-        allocatePayment(depsA, { tenantId: TENANT_A, paymentId: p1.id }),
-        allocatePayment(depsB, { tenantId: TENANT_A, paymentId: p2.id }),
+        allocatePayment(depsA, { tenantId: TENANT_A, paymentId: p1.body.id }),
+        allocatePayment(depsB, { tenantId: TENANT_A, paymentId: p2.body.id }),
         ingestCandidateMovement(depsA, { tenantId: TENANT_A, movement }),
         ingestCandidateMovement(depsB, { tenantId: TENANT_A, movement }),
       ]);
@@ -542,8 +642,12 @@ describe("F2 adversarial — concorrência allocate + ingest", () => {
     );
     expect(Number(movementsCount.rows[0]!.n)).toBe(1);
 
-    const chain = await validateLedgerChain(deps, { tenantId: TENANT_A });
-    expect(chain.ok).toBe(true);
+    const chain = await f2Json<{ ok: boolean }>("/f2/ledger/validate", {
+      user: admin.person,
+      method: "POST",
+    });
+    expect(chain.status).toBe(200);
+    expect(chain.body.ok).toBe(true);
 
     const openCents = Number(
       (
@@ -578,78 +682,87 @@ describe("F2 adversarial — cash", () => {
     });
 
     const openBefore = await openAmountSum(TENANT_A);
-    const payment = await registerPayment(deps, {
-      tenantId: TENANT_A,
-      fracaoId: fracao.id,
-      amountCents: 5_000,
-      paymentMethod: PAYMENT_METHODS.cash,
-      evidenceUploadId: "ev-adv-cash",
-      actor: { personId: admin.person.id },
+    const created = await f2Json<{ id: string; cashStatus: string }>("/f2/payments", {
+      user: admin.person,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 5_000,
+        paymentMethod: PAYMENT_METHODS.cash,
+        evidenceUploadId: "ev-adv-cash",
+      },
     });
-    expect(payment.cashStatus).toBe(CASH_STATUS.registered);
+    expect(created.status).toBe(201);
+    expect(created.body.cashStatus).toBe(CASH_STATUS.registered);
     expect(await openAmountSum(TENANT_A)).toBe(openBefore);
     const allocs = await client.execute(
       `SELECT COUNT(*) AS n FROM allocations WHERE payment_id = ?`,
-      [payment.id],
+      [created.body.id],
     );
     expect(Number(allocs.rows[0]!.n)).toBe(0);
 
-    await expect(
-      allocatePayment(deps, { tenantId: TENANT_A, paymentId: payment.id }),
-    ).rejects.toMatchObject({ code: "cash_not_verified" });
+    await expectDomainCode(
+      await f2Request(`/f2/payments/${created.body.id}/allocate`, {
+        user: admin.person,
+        method: "POST",
+      }),
+      409,
+      "cash_not_verified",
+    );
     expect(await openAmountSum(TENANT_A)).toBe(openBefore);
 
-    await expect(
-      verifyCashPayment(deps, {
-        tenantId: TENANT_A,
-        paymentId: payment.id,
-        verificationMethod: VERIFICATION_METHOD.secondPerson,
-        actor: { personId: admin.person.id },
+    await expectDomainCode(
+      await f2Request(`/f2/payments/${created.body.id}/verify-cash`, {
+        user: admin.person,
+        body: { verificationMethod: VERIFICATION_METHOD.secondPerson },
       }),
-    ).rejects.toMatchObject({ code: "self_verify_forbidden" });
+      403,
+      "self_verify_forbidden",
+    );
 
-    const verified = await verifyCashPayment(deps, {
-      tenantId: TENANT_A,
-      paymentId: payment.id,
-      verificationMethod: VERIFICATION_METHOD.secondPerson,
-      actor: { personId: fiscal.person.id },
-    });
-    expect(verified.cashStatus).toBe(CASH_STATUS.verified);
+    const verified = await f2Json<{ cashStatus: string }>(
+      `/f2/payments/${created.body.id}/verify-cash`,
+      {
+        user: fiscal.person,
+        body: { verificationMethod: VERIFICATION_METHOD.secondPerson },
+      },
+    );
+    expect(verified.status).toBe(200);
+    expect(verified.body.cashStatus).toBe(CASH_STATUS.verified);
     expect(await openAmountSum(TENANT_A)).toBe(openBefore);
 
-    await expect(
-      depositCashPayment(deps, {
-        tenantId: TENANT_A,
-        paymentId: payment.id,
-        actor: { personId: admin.person.id },
+    await expectDomainCode(
+      await f2Request(`/f2/payments/${created.body.id}/deposit-cash`, {
+        user: admin.person,
+        body: {},
       }),
-    ).rejects.toMatchObject({ code: "bank_movement_required" });
+      400,
+      "bank_movement_required",
+    );
 
     const foreign = await recordKernelBankMovement(deps, {
       tenantId: TENANT_B,
       amountCents: 5_000,
     });
-    await expect(
-      depositCashPayment(deps, {
-        tenantId: TENANT_A,
-        paymentId: payment.id,
-        bankMovementId: foreign.id,
-        actor: { personId: admin.person.id },
+    await expectDomainCode(
+      await f2Request(`/f2/payments/${created.body.id}/deposit-cash`, {
+        user: admin.person,
+        body: { bankMovementId: foreign.id },
       }),
-    ).rejects.toMatchObject({ code: "bank_movement_not_found" });
+      404,
+      "bank_movement_not_found",
+    );
 
     const movement = await recordKernelBankMovement(deps, {
       tenantId: TENANT_A,
       amountCents: 5_000,
     });
-    const deposited = await depositCashPayment(deps, {
-      tenantId: TENANT_A,
-      paymentId: payment.id,
-      bankMovementId: movement.id,
-      actor: { personId: admin.person.id },
-    });
-    expect(deposited.cashStatus).toBe(CASH_STATUS.deposited);
-    expect(deposited.bankMovementId).toBe(movement.id);
+    const deposited = await f2Json<{ cashStatus: string; bankMovementId: string | null }>(
+      `/f2/payments/${created.body.id}/deposit-cash`,
+      { user: admin.person, body: { bankMovementId: movement.id } },
+    );
+    expect(deposited.status).toBe(200);
+    expect(deposited.body.cashStatus).toBe(CASH_STATUS.deposited);
+    expect(deposited.body.bankMovementId).toBe(movement.id);
   });
 });
 
@@ -739,15 +852,20 @@ describe("F2 adversarial — reauth", () => {
       name: "Admin Reauth Adv",
       email: "admin-reauth-adv@test",
     });
-    await upsertBankConnection(deps, {
-      tenantId: TENANT_A,
-      accountIban: iban,
-      consentStatus: BANK_CONSENT_STATUS.authorized,
-      consentValidUntil: "2026-09-20T00:00:00.000Z",
-      authorizedByMembershipId: admin.membership.id,
+    await f2Request("/f2/bank-connections", {
+      user: admin.person,
+      body: {
+        accountIban: iban,
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+        authorizedByMembershipId: admin.membership.id,
+      },
     });
-    await sweepBankReauthNotices(deps, { tenantId: TENANT_A });
-    await processOutbox(deps);
+    const sweep = await f2Json<{ noticed: Array<{ noticed: boolean }> }>(
+      "/f2/jobs/reauth-notices",
+      { user: admin.person, body: {} },
+    );
+    expect(sweep.status).toBe(200);
     const withAdmin = await client.execute(
       `SELECT destination, status FROM notification_deliveries
        WHERE tenant_id = ? AND template = 'bank_reauth_required'`,
@@ -771,39 +889,50 @@ describe("F2 adversarial — identity", () => {
     expect(identityNameMatches("ANA", "Mariana Silva")).toBe(false);
     expect(identityNameMatches("ANA", "Joana Costa")).toBe(false);
 
-    const miss = await ingestCandidateMovements(deps, {
-      tenantId: TENANT_A,
-      movements: [
-        {
-          amountCents: 50_00,
-          description: "TRF CRED SEPA+ DE ANA",
-          externalRef: "ana-false-1",
-          source: CANDIDATE_SOURCES.identityMatrix,
-        },
-      ],
-    });
-    expect(miss.results[0]!.fracaoId).toBeNull();
-    expect(miss.results[0]!.allocationStatus).toBe(ALLOCATION_STATUS.naoAlocadoPendente);
-
-    const hit = await ingestCandidateMovements(deps, {
-      tenantId: TENANT_A,
-      movements: [
-        {
-          amountCents: 50_00,
-          description: "TRF CRED SEPA+ DE MARIANA SILVA",
-          externalRef: "mariana-hit-1",
-          source: CANDIDATE_SOURCES.identityMatrix,
-        },
-      ],
-    });
-    expect(hit.results[0]!.fracaoId).toBe(fracao.id);
-
     const admin = await seedActor(TENANT_A, {
       userId: "user-admin-id-adv",
       roleCode: "Admin",
       name: "Admin Id",
       email: "admin-id-adv@test",
     });
+
+    const miss = await f2Json<{
+      results: Array<{ fracaoId: string | null; allocationStatus: string }>;
+    }>("/f2/payments/candidates", {
+      user: admin.person,
+      body: {
+        movements: [
+          {
+            amountCents: 50_00,
+            description: "TRF CRED SEPA+ DE ANA",
+            externalRef: "ana-false-1",
+            source: CANDIDATE_SOURCES.identityMatrix,
+          },
+        ],
+      },
+    });
+    expect(miss.status).toBe(201);
+    expect(miss.body.results[0]!.fracaoId).toBeNull();
+    expect(miss.body.results[0]!.allocationStatus).toBe(ALLOCATION_STATUS.naoAlocadoPendente);
+
+    const hit = await f2Json<{
+      results: Array<{ fracaoId: string | null }>;
+    }>("/f2/payments/candidates", {
+      user: admin.person,
+      body: {
+        movements: [
+          {
+            amountCents: 50_00,
+            description: "TRF CRED SEPA+ DE MARIANA SILVA",
+            externalRef: "mariana-hit-1",
+            source: CANDIDATE_SOURCES.identityMatrix,
+          },
+        ],
+      },
+    });
+    expect(hit.status).toBe(201);
+    expect(hit.body.results[0]!.fracaoId).toBe(fracao.id);
+
     currentUser = { id: admin.person.userId!, email: admin.person.email };
 
     const tooMany = await app.request("/f2/payments/candidates", {
@@ -839,24 +968,48 @@ describe("F2 adversarial — hash-chain", () => {
       name: "Admin Hash A",
       email: "admin-hash-a@test",
     });
-
-    const payA = await registerPayment(deps, {
-      tenantId: TENANT_A,
-      fracaoId: seededA.fracao.id,
-      amountCents: 20_000,
-      paymentMethod: PAYMENT_METHODS.bankTransfer,
+    const adminB = await seedActor(TENANT_B, {
+      userId: "user-admin-hash-b",
+      roleCode: "Admin",
+      name: "Admin Hash B",
+      email: "admin-hash-b@test",
     });
-    const payB = await registerPayment(deps, {
-      tenantId: TENANT_B,
-      fracaoId: seededB.fracao.id,
-      amountCents: 20_000,
-      paymentMethod: PAYMENT_METHODS.bankTransfer,
-    });
-    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payA.id });
-    await allocatePayment(deps, { tenantId: TENANT_B, paymentId: payB.id });
 
-    expect((await validateLedgerChain(deps, { tenantId: TENANT_A })).ok).toBe(true);
-    expect((await validateLedgerChain(deps, { tenantId: TENANT_B })).ok).toBe(true);
+    tenantIdOverride = TENANT_A;
+    const payA = await f2Json<{ id: string }>("/f2/payments", {
+      user: adminA.person,
+      body: {
+        fracaoId: seededA.fracao.id,
+        amountCents: 20_000,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
+    });
+    tenantIdOverride = TENANT_B;
+    const payB = await f2Json<{ id: string }>("/f2/payments", {
+      user: adminB.person,
+      body: {
+        fracaoId: seededB.fracao.id,
+        amountCents: 20_000,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
+    });
+    expect(payA.status).toBe(201);
+    expect(payB.status).toBe(201);
+    tenantIdOverride = TENANT_A;
+    expect(
+      (await f2Request(`/f2/payments/${payA.body.id}/allocate`, { user: adminA.person, method: "POST" }))
+        .status,
+    ).toBe(200);
+    tenantIdOverride = TENANT_B;
+    expect(
+      (await f2Request(`/f2/payments/${payB.body.id}/allocate`, { user: adminB.person, method: "POST" }))
+        .status,
+    ).toBe(200);
+
+    tenantIdOverride = TENANT_A;
+    expect((await f2Json<{ ok: boolean }>("/f2/ledger/validate", { user: adminA.person, method: "POST" })).body.ok).toBe(true);
+    tenantIdOverride = TENANT_B;
+    expect((await f2Json<{ ok: boolean }>("/f2/ledger/validate", { user: adminB.person, method: "POST" })).body.ok).toBe(true);
 
     const tip = await client.execute(
       `SELECT id FROM ledger_entries WHERE tenant_id = ? AND entry_type = 'allocation' LIMIT 1`,
@@ -867,33 +1020,39 @@ describe("F2 adversarial — hash-chain", () => {
       args: ['{"tampered":true}', String(tip.rows[0]!.id)],
     });
 
-    const broken = await validateLedgerChain(deps, { tenantId: TENANT_A });
-    expect(broken.ok).toBe(false);
-    expect((await validateLedgerChain(deps, { tenantId: TENANT_B })).ok).toBe(true);
+    tenantIdOverride = TENANT_A;
+    const broken = await f2Json<{ ok: boolean }>("/f2/ledger/validate", {
+      user: adminA.person,
+      method: "POST",
+    });
+    expect(broken.status).toBe(200);
+    expect(broken.body.ok).toBe(false);
+    tenantIdOverride = TENANT_B;
+    expect((await f2Json<{ ok: boolean }>("/f2/ledger/validate", { user: adminB.person, method: "POST" })).body.ok).toBe(true);
 
     tenantIdOverride = TENANT_A;
-    currentUser = { id: adminA.person.userId!, email: adminA.person.email };
-    const httpBroken = await app.request("/f2/ledger/validate", { method: "POST" });
-    expect(httpBroken.status).toBe(200);
-    const httpBody = (await httpBroken.json()) as { ok: boolean };
-    expect(httpBody.ok).toBe(false);
-
-    await expect(
-      registerPayment(deps, {
-        tenantId: TENANT_A,
-        fracaoId: seededA.fracao.id,
-        amountCents: 1_000,
-        paymentMethod: PAYMENT_METHODS.bankTransfer,
+    await expectDomainCode(
+      await f2Request("/f2/payments", {
+        user: adminA.person,
+        body: {
+          fracaoId: seededA.fracao.id,
+          amountCents: 1_000,
+          paymentMethod: PAYMENT_METHODS.bankTransfer,
+        },
       }),
-    ).rejects.toMatchObject({ code: "ledger_chain_broken" });
-    await expect(
-      registerPayment(deps, {
-        tenantId: TENANT_B,
+      409,
+      "ledger_chain_broken",
+    );
+    tenantIdOverride = TENANT_B;
+    const stillOk = await f2Request("/f2/payments", {
+      user: adminB.person,
+      body: {
         fracaoId: seededB.fracao.id,
         amountCents: 1_000,
         paymentMethod: PAYMENT_METHODS.bankTransfer,
-      }),
-    ).resolves.toMatchObject({ tenantId: TENANT_B });
+      },
+    });
+    expect(stillOk.status).toBe(201);
   });
 });
 
@@ -908,17 +1067,27 @@ describe("F2 adversarial — idempotência outbox", () => {
     });
 
     deps.now = () => new Date("2026-09-10T12:00:00.000Z");
-    await upsertBankConnection(deps, {
-      tenantId: TENANT_A,
-      accountIban: "PT50001800034978380602065",
-      consentStatus: BANK_CONSENT_STATUS.authorized,
-      consentValidUntil: "2026-09-20T00:00:00.000Z",
-      authorizedByMembershipId: admin.membership.id,
+    await f2Request("/f2/bank-connections", {
+      user: admin.person,
+      body: {
+        accountIban: "PT50001800034978380602065",
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+        authorizedByMembershipId: admin.membership.id,
+      },
     });
-    const firstSweep = await sweepBankReauthNotices(deps, { tenantId: TENANT_A });
-    expect(firstSweep.noticed.some((n) => n.noticed)).toBe(true);
-    const secondSweep = await sweepBankReauthNotices(deps, { tenantId: TENANT_A });
-    expect(secondSweep.noticed.every((n) => n.noticed === false)).toBe(true);
+    const firstSweep = await f2Json<{ noticed: Array<{ noticed: boolean }> }>(
+      "/f2/jobs/reauth-notices",
+      { user: admin.person, body: {} },
+    );
+    expect(firstSweep.status).toBe(200);
+    expect(firstSweep.body.noticed.some((n) => n.noticed)).toBe(true);
+    const secondSweep = await f2Json<{ noticed: Array<{ noticed: boolean }> }>(
+      "/f2/jobs/reauth-notices",
+      { user: admin.person, body: {} },
+    );
+    expect(secondSweep.status).toBe(200);
+    expect(secondSweep.body.noticed.every((n) => n.noticed === false)).toBe(true);
 
     const reauthJobs = await client.execute(
       `SELECT COUNT(*) AS n FROM outbox_jobs WHERE tenant_id = ? AND job_type = ?`,
@@ -926,7 +1095,6 @@ describe("F2 adversarial — idempotência outbox", () => {
     );
     expect(Number(reauthJobs.rows[0]!.n)).toBe(1);
 
-    await processOutbox(deps);
     await resetOutboxJobToPending(OUTBOX_JOB_TYPES.bankReauthNotice, TENANT_A);
     await processOutbox(deps);
 
@@ -938,13 +1106,19 @@ describe("F2 adversarial — idempotência outbox", () => {
     expect(deliveries.rows.length).toBe(1);
     expect(String(deliveries.rows[0]!.destination)).toBe("admin-outbox@test");
 
-    const payment = await registerPayment(deps, {
-      tenantId: TENANT_A,
-      fracaoId: fracao.id,
-      amountCents: 20_000,
-      paymentMethod: PAYMENT_METHODS.bankTransfer,
+    const payment = await f2Json<{ id: string }>("/f2/payments", {
+      user: admin.person,
+      body: {
+        fracaoId: fracao.id,
+        amountCents: 20_000,
+        paymentMethod: PAYMENT_METHODS.bankTransfer,
+      },
     });
-    await allocatePayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
+    expect(payment.status).toBe(201);
+    expect(
+      (await f2Request(`/f2/payments/${payment.body.id}/allocate`, { user: admin.person, method: "POST" }))
+        .status,
+    ).toBe(200);
 
     const receiptJobs = await client.execute(
       `SELECT COUNT(*) AS n FROM outbox_jobs WHERE tenant_id = ? AND job_type = ?`,
@@ -955,12 +1129,16 @@ describe("F2 adversarial — idempotência outbox", () => {
     await processOutbox(deps);
     await resetOutboxJobToPending(OUTBOX_JOB_TYPES.issueReceipt, TENANT_A);
     await processOutbox(deps);
-    await issueReceiptForPayment(deps, { tenantId: TENANT_A, paymentId: payment.id });
+    const receiptAgain = await f2Request(`/f2/payments/${payment.body.id}/receipt`, {
+      user: admin.person,
+      method: "POST",
+    });
+    expect(receiptAgain.status).toBe(201);
 
     const receipts = await client.execute(
       `SELECT id FROM financial_documents
        WHERE tenant_id = ? AND doc_type = 'Receipt' AND source_payment_id = ?`,
-      [TENANT_A, payment.id],
+      [TENANT_A, payment.body.id],
     );
     expect(receipts.rows.length).toBe(1);
   });

@@ -52,7 +52,11 @@ function requestIdFrom(c: { req: { header: (name: string) => string | undefined 
   return c.req.header("x-request-id")?.trim() || crypto.randomUUID();
 }
 
-function httpError(err: unknown): { message: string; status: 400 | 403 | 404 | 409 | 502 | 503 | 500 } {
+function httpError(err: unknown): {
+  message: string;
+  status: 400 | 403 | 404 | 409 | 502 | 503 | 500;
+  code?: string;
+} {
   if (err instanceof DomainError) {
     const status = err.httpStatus;
     if (
@@ -63,11 +67,26 @@ function httpError(err: unknown): { message: string; status: 400 | 403 | 404 | 4
       status === 502 ||
       status === 503
     ) {
-      return { message: err.message, status };
+      return { message: err.message, status, code: err.code };
     }
   }
   console.error("[f2]", sanitizeBankError(err));
   return { message: "Erro interno", status: 500 };
+}
+
+/** Astra A4/A5: DomainError.code no JSON HTTP (não só a mensagem). */
+function jsonFromCaught(err: unknown): [
+  { message: string; code?: string },
+  400 | 403 | 404 | 409 | 502 | 503 | 500,
+] {
+  const mapped = httpError(err);
+  return [
+    {
+      message: mapped.message,
+      ...(mapped.code ? { code: mapped.code } : {}),
+    },
+    mapped.status,
+  ];
 }
 
 function actorFrom(c: {
@@ -133,8 +152,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(payment, 201);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/payments/:id/verify-cash", requireCashVerifier, async (c) => {
@@ -155,14 +173,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(payment);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json(
-          {
-            message: mapped.message,
-            ...(err instanceof DomainError ? { code: err.code } : {}),
-          },
-          mapped.status,
-        );
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/payments/:id/deposit-cash", requireManager, async (c) => {
@@ -178,14 +189,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(payment);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json(
-          {
-            message: mapped.message,
-            ...(err instanceof DomainError ? { code: err.code } : {}),
-          },
-          mapped.status,
-        );
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/payments/:id/allocate", requireManager, async (c) => {
@@ -197,8 +201,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/payments/:id/receipt", requireManager, async (c) => {
@@ -210,8 +213,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(doc, 201);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/ledger/validate", requireManager, async (c) => {
@@ -222,8 +224,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/periods/open", requireManager, async (c) => {
@@ -243,8 +244,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(period, 201);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/periods/close", requireManager, async (c) => {
@@ -264,8 +264,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/documents/payment-notice", requireManager, async (c) => {
@@ -292,8 +291,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(doc, 201);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/bank-connections", requireManager, async (c) => {
@@ -318,8 +316,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(toPublicBankConnection(row), 201);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .get("/bank-connections", requireManager, async (c) => {
@@ -327,8 +324,7 @@ export function createF2Routes(deps: KernelDeps) {
         const rows = await listBankConnections(deps, c.get("tenantId")!);
         return c.json({ connections: rows.map(toPublicBankConnection) });
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/bank-connections/authorize", requireManager, async (c) => {
@@ -352,8 +348,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result, 201);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/bank-connections/reauthorize", requireManager, async (c) => {
@@ -371,8 +366,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/bank-connections/revoke", requireManager, async (c) => {
@@ -385,8 +379,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(toPublicBankConnection(row));
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/bank-connections/sync", requireManager, async (c) => {
@@ -405,8 +398,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/payments/candidates", requireManager, async (c) => {
@@ -468,8 +460,7 @@ export function createF2Routes(deps: KernelDeps) {
         const result = await ingestCandidateMovements(deps, { tenantId, movements, actor });
         return c.json(result, 201);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/jobs/reauth-notices", requireManager, async (c) => {
@@ -481,8 +472,7 @@ export function createF2Routes(deps: KernelDeps) {
         await processOutbox(deps);
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/jobs/monthly-notices", requireManager, async (c) => {
@@ -495,8 +485,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/jobs/receipt-sweep", requireManager, async (c) => {
@@ -507,8 +496,7 @@ export function createF2Routes(deps: KernelDeps) {
         });
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/jobs/bank-sync", requireManager, async (c) => {
@@ -528,8 +516,7 @@ export function createF2Routes(deps: KernelDeps) {
         await processOutbox(deps);
         return c.json(enqueued);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     })
     .post("/jobs/calendar-sweep", requireManager, async (c) => {
@@ -543,8 +530,7 @@ export function createF2Routes(deps: KernelDeps) {
         await processOutbox(deps);
         return c.json(result);
       } catch (err) {
-        const mapped = httpError(err);
-        return c.json({ message: mapped.message }, mapped.status);
+        return c.json(...jsonFromCaught(err));
       }
     });
 }
