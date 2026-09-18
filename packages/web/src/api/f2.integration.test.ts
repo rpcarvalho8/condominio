@@ -81,7 +81,12 @@ import { createMembershipRepo } from "./infra/repos/membership-repo";
 import { createPersonRepo } from "./infra/repos/person-repo";
 import type { KernelAuthUser, KernelVariables } from "./middleware/membership";
 import { createF2Routes } from "./routes/f2";
-import { AUDIT_SOURCE_F2, AUDIT_SOURCE_F2_JOB, systemAuditActor } from "./domain/audit";
+import {
+  AUDIT_SOURCE_F2,
+  AUDIT_SOURCE_F2_JOB,
+  F2_ACTOR_REQUIRED_CODE,
+  systemAuditActor,
+} from "./domain/audit";
 import { createAuditEventRepo } from "./infra/repos/audit-event-repo";
 
 const DB_PATH = path.join(import.meta.dir, "..", "..", ".tmp-test-f2.db");
@@ -144,6 +149,7 @@ async function seedActor(opts: {
   roleCode: string;
   name: string;
   email: string;
+  tenantId?: string;
 }) {
   const personRepo = createPersonRepo(deps.db);
   const membershipRepo = createMembershipRepo(deps.db);
@@ -157,11 +163,23 @@ async function seedActor(opts: {
   await membershipRepo.insert({
     id: crypto.randomUUID(),
     personId: person.id,
-    tenantId: TENANT,
+    tenantId: opts.tenantId ?? TENANT,
     roleCode: opts.roleCode,
     createdAt: new Date(),
   });
   return person;
+}
+
+function membershipAuditActor(
+  person: { id: string; userId?: string | null },
+  requestId?: string | null,
+) {
+  return {
+    personId: person.id,
+    userId: person.userId ?? null,
+    requestId: requestId ?? null,
+    source: AUDIT_SOURCE_F2,
+  };
 }
 
 function buildApp() {
@@ -1306,18 +1324,25 @@ describe("F2 BankConnection aviso proactivo de reautorização", () => {
     expect(audits.rows.length).toBe(1);
   });
 
-  test("sem gestor no tenant o aviso não usa IBAN como destino de email", async () => {
+  test("job de reauth (f2.job) sem gestor: aviso não usa IBAN como destino de email", async () => {
     const iban = "PT50001800034978380602065";
     deps.now = () => new Date("2026-09-10T12:00:00.000Z");
-    // Sem Membership de gestor: o percurso de job (`f2.job`) persiste a ligação; o job HTTP exige gestor.
-    // A5 prova o destino via o serviço real (não replica a lógica) e o 403 HTTP sem gestor.
+    const setupAdmin = await seedActor({
+      userId: "user-admin-reauth-setup",
+      roleCode: "Admin",
+      name: "Admin Reauth Setup",
+      email: "admin-reauth-setup@test",
+    });
     await upsertBankConnection(deps, {
       tenantId: TENANT,
       accountIban: iban,
       consentStatus: BANK_CONSENT_STATUS.authorized,
       consentValidUntil: "2026-09-20T00:00:00.000Z",
-      actor: systemAuditActor("job-reauth-no-manager"),
+      actor: membershipAuditActor(setupAdmin, "human-reauth-setup"),
     });
+    const membershipRepo = createMembershipRepo(deps.db);
+    const [membership] = await membershipRepo.findActiveForPersonTenant(setupAdmin.id, TENANT);
+    await membershipRepo.revoke({ id: membership!.id, revokedAt: new Date() });
     const sweep = await sweepBankReauthNotices(deps, {
       tenantId: TENANT,
       actor: systemAuditActor("job-reauth-no-manager"),
@@ -2189,16 +2214,23 @@ describe("F2 Enable Banking PSD2", () => {
     const otherTenant = "tenant-f2-other";
     const otherDeps = { ...deps, getTenantId: () => otherTenant };
     otherDeps.enableBanking = mockEnableBanking();
+    const otherAdmin = await seedActor({
+      userId: "user-admin-sync-other",
+      roleCode: "Admin",
+      name: "Admin Sync Other",
+      email: "admin-sync-other@test",
+      tenantId: otherTenant,
+    });
     const otherStart = await startBankConsent(otherDeps, {
       tenantId: otherTenant,
       accountIban: "PT50001800034978380602065",
-      actor: systemAuditActor("a7-tenant-isolation"),
+      actor: membershipAuditActor(otherAdmin, "a7-tenant-isolation"),
     });
     const otherState = new URL(otherStart.authorizationUrl).searchParams.get("state");
     await completeBankConsent(otherDeps, { code: "ok-other", state: otherState });
     await syncBankConnection(otherDeps, {
       tenantId: otherTenant,
-      actor: systemAuditActor("a7-tenant-isolation"),
+      actor: membershipAuditActor(otherAdmin, "a7-tenant-isolation"),
     });
 
     const aOnly = await client.execute(
@@ -3516,6 +3548,7 @@ describe("F2 Astra A6 — casos financeiros (handlers reais)", () => {
 
 describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
   const managerRoutes: Array<{ path: string; method: string; body?: Record<string, unknown> }> = [
+    { path: "/f2/payments", method: "POST", body: { amountCents: 100, paymentMethod: "bank_transfer" } },
     { path: "/f2/payments/candidates", method: "POST", body: { movements: [{ amountCents: 100 }] } },
     { path: "/f2/payments", method: "GET" },
     {
@@ -3562,6 +3595,7 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
           headers: route.body ? { "content-type": "application/json" } : undefined,
           body: route.body ? JSON.stringify(route.body) : undefined,
         });
+        const body = (await res.json()) as { message?: string; code?: string };
         expect({
           who: actor.email,
           method: route.method,
@@ -3573,6 +3607,7 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
           path: route.path,
           status: 403,
         });
+        expect(body).toEqual({ message: "Acesso negado" });
       }
     }
   });
@@ -3593,6 +3628,7 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
         headers: route.body ? { "content-type": "application/json" } : undefined,
         body: route.body ? JSON.stringify(route.body) : undefined,
       });
+      const body = (await res.json()) as { message?: string; code?: string };
       expect({
         path: route.path,
         method: route.method,
@@ -3602,6 +3638,11 @@ describe("F2 HTTP 403 — Owner e Fiscalizacao nas rotas de gestor", () => {
         method: route.method,
         status: 403,
       });
+      if (route.method === "GET") {
+        expect(body).toEqual({ message: "Acesso negado" });
+      } else {
+        expect(body.code).toBe(F2_ACTOR_REQUIRED_CODE);
+      }
     }
   });
 });
@@ -3811,6 +3852,8 @@ describe("F2 Astra A7 — AuditEvent identity (Membership → actor_person_id)",
       },
     });
     expect(res.status).toBe(403);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe(F2_ACTOR_REQUIRED_CODE);
     const paymentsCount = await client.execute(
       `SELECT COUNT(*) AS n FROM payments WHERE tenant_id = ?`,
       [TENANT],

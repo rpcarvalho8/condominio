@@ -25,6 +25,11 @@ export type AuditActor = {
 
 /** Human F2 HTTP / use-case mutations. */
 export const AUDIT_SOURCE_F2 = "f2";
+
+/** Fail-closed human F2 mutation: session has no Person with an active Membership. */
+export const F2_ACTOR_REQUIRED_CODE = "actor_required";
+export const F2_ACTOR_REQUIRED_MESSAGE =
+  "Mutação humana F2 exige Person da Membership activa neste tenant";
 /**
  * Outbox / calendar / ASPSP callback — null actor_person_id is allowed.
  * Never use this on a human HTTP mutation to skip Membership.

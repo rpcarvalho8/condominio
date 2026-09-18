@@ -44,9 +44,9 @@ import { processOutbox } from "../application/jobs/process-outbox";
 import { DomainError } from "../domain/errors";
 import type { KernelDeps } from "../infra/kernel-deps";
 import {
-  createRequireActiveMembership,
   createRequireCashVerifier,
   createRequireFinanceManager,
+  createRequireF2HumanMutationMembership,
   type KernelVariables,
 } from "../middleware/membership";
 
@@ -111,7 +111,7 @@ function actorFrom(c: {
  * verify-cash: Fiscalizacao ou gestor (ADR-028 / ADR-031).
  */
 export function createF2Routes(deps: KernelDeps) {
-  const requireMembership = createRequireActiveMembership(deps);
+  const requireMembership = createRequireF2HumanMutationMembership(deps);
   const requireManager = createRequireFinanceManager();
   const requireCashVerifier = createRequireCashVerifier();
 

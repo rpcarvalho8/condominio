@@ -64,7 +64,7 @@ import { createMembershipRepo } from "./infra/repos/membership-repo";
 import { createPersonRepo } from "./infra/repos/person-repo";
 import type { KernelAuthUser, KernelVariables } from "./middleware/membership";
 import { createF2Routes } from "./routes/f2";
-import { systemAuditActor } from "./domain/audit";
+import { AUDIT_SOURCE_F2, F2_ACTOR_REQUIRED_CODE, systemAuditActor } from "./domain/audit";
 
 const DB_PATH = path.join(import.meta.dir, "..", "..", ".tmp-test-f2-adversarial.db");
 const DB_URL = `file:${DB_PATH}`;
@@ -105,6 +105,7 @@ let tenantIdOverride = TENANT_A;
 let app: Hono;
 
 const MANAGER_ROUTES: Array<{ path: string; method: string; body?: Record<string, unknown> }> = [
+    { path: "/f2/payments", method: "POST", body: { amountCents: 100, paymentMethod: "bank_transfer" } },
     { path: "/f2/payments/candidates", method: "POST", body: { movements: [{ amountCents: 100 }] } },
     { path: "/f2/payments", method: "GET" },
     {
@@ -191,6 +192,18 @@ async function seedActor(
     createdAt: new Date(),
   });
   return { person, membership };
+}
+
+function membershipAuditActor(
+  person: { id: string; userId?: string | null },
+  requestId?: string | null,
+) {
+  return {
+    personId: person.id,
+    userId: person.userId ?? null,
+    requestId: requestId ?? null,
+    source: AUDIT_SOURCE_F2,
+  };
 }
 
 async function seedConfirmedOwner(tenantId: string, fracaoCodigo: string, personName: string) {
@@ -328,7 +341,7 @@ afterAll(() => {
 });
 
 describe("F2 adversarial — isolamento multi-tenant", () => {
-  test("A nunca lê/escreve payments, ledger, bank_connections ou outbox de B", async () => {
+  test("A nunca lê/escreve payments, ledger, bank_connections ou outbox de B; job de reauth (f2.job) também isola", async () => {
     const seededA = await seedFracaoWithObligations(TENANT_A, 2026);
     const seededB = await seedFracaoWithObligations(TENANT_B, 2027);
     const adminA = await seedActor(TENANT_A, {
@@ -814,6 +827,7 @@ describe("F2 adversarial — AuthZ gestor", () => {
           headers: route.body ? { "content-type": "application/json" } : undefined,
           body: route.body ? JSON.stringify(route.body) : undefined,
         });
+        const body = (await res.json()) as { message?: string; code?: string };
         expect({
           who: actor.email,
           method: route.method,
@@ -825,23 +839,38 @@ describe("F2 adversarial — AuthZ gestor", () => {
           path: route.path,
           status: 403,
         });
+        const missingMembership = actor.email === noMem.email;
+        const isMutation = route.method !== "GET";
+        if (missingMembership && isMutation) {
+          expect(body.code).toBe(F2_ACTOR_REQUIRED_CODE);
+        } else {
+          expect(body).toEqual({ message: "Acesso negado" });
+        }
       }
     }
   });
 });
 
 describe("F2 adversarial — reauth", () => {
-  test("destino nunca é IBAN; sem gestor → admin@invalid + skipped; com gestor → email real", async () => {
+  test("job de reauth (f2.job) sem gestor → admin@invalid + skipped; com gestor → email real", async () => {
     const iban = "PT50001800034978380602065";
     deps.now = () => new Date("2026-09-10T12:00:00.000Z");
 
+    const setupAdmin = await seedActor(TENANT_A, {
+      userId: "user-admin-reauth-setup",
+      roleCode: "Admin",
+      name: "Admin Reauth Setup",
+      email: "admin-reauth-setup@test",
+    });
     await upsertBankConnection(deps, {
       tenantId: TENANT_A,
       accountIban: iban,
       consentStatus: BANK_CONSENT_STATUS.authorized,
       consentValidUntil: "2026-09-20T00:00:00.000Z",
-      actor: systemAuditActor("job-reauth-no-manager"),
+      actor: membershipAuditActor(setupAdmin.person, "human-reauth-setup"),
     });
+    const membershipRepo = createMembershipRepo(deps.db);
+    await membershipRepo.revoke({ id: setupAdmin.membership.id, revokedAt: new Date() });
     await sweepBankReauthNotices(deps, {
       tenantId: TENANT_A,
       actor: systemAuditActor("job-reauth-no-manager"),

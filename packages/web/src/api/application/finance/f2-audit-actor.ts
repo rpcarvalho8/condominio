@@ -5,6 +5,8 @@
  */
 import {
   AUDIT_SOURCE_F2,
+  F2_ACTOR_REQUIRED_CODE,
+  F2_ACTOR_REQUIRED_MESSAGE,
   isSystemAuditSource,
   type AuditActor,
 } from "../../domain/audit";
@@ -34,11 +36,7 @@ export async function resolveF2AuditActor(
   }
 
   if (!personId) {
-    throw new DomainError(
-      "actor_required",
-      "Mutação humana F2 exige Person da Membership activa neste tenant",
-      403,
-    );
+    throw new DomainError(F2_ACTOR_REQUIRED_CODE, F2_ACTOR_REQUIRED_MESSAGE, 403);
   }
 
   const memberships = await createMembershipRepo(deps.db).findActiveForPersonTenant(
@@ -46,11 +44,7 @@ export async function resolveF2AuditActor(
     tenantId,
   );
   if (memberships.length === 0) {
-    throw new DomainError(
-      "actor_required",
-      "Mutação humana F2 exige Person da Membership activa neste tenant",
-      403,
-    );
+    throw new DomainError(F2_ACTOR_REQUIRED_CODE, F2_ACTOR_REQUIRED_MESSAGE, 403);
   }
 
   return { personId, userId, requestId, source };
