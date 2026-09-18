@@ -17,6 +17,7 @@ import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { createDomainEventRepo } from "../../infra/repos/domain-event-repo";
 import { createOutboxRepo } from "../../infra/repos/outbox-repo";
+import { resolveF2AuditActor } from "./f2-audit-actor";
 
 type Actor = AuditActor;
 
@@ -168,6 +169,7 @@ export async function upsertBankConnection(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const now = kernelNow(deps);
   const existing = await deps.db
     .select()
@@ -250,7 +252,7 @@ export async function upsertBankConnection(
     type: "bank_connection.upserted",
     entityType: "bank_connection",
     entityId: row!.id,
-    ...auditActorFields(input.actor),
+    ...auditActorFields(actor),
     after: {
       accountIban: row!.accountIban,
       consentStatus: row!.consentStatus,
@@ -325,6 +327,7 @@ async function issueReauthNotice(
     actor?: Actor;
   },
 ) {
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const now = kernelNow(deps);
   const notifyEmails = await resolveFinanceManagerEmails(deps, input.tenantId);
   const key = noticeKey(input.tenantId, input.connection.id, input.connection.consentValidUntil);
@@ -341,7 +344,7 @@ async function issueReauthNotice(
       consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
       leadDays: BANK_REAUTH_LEAD_DAYS,
     },
-    correlationId: input.actor?.requestId ?? null,
+    correlationId: actor.requestId,
     availableAt: now,
   });
 
@@ -366,7 +369,7 @@ async function issueReauthNotice(
       type: "bank_connection.reauthorization_notice",
       entityType: "bank_connection",
       entityId: input.connection.id,
-      ...auditActorFields(input.actor),
+      ...auditActorFields(actor),
       after: {
         consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
         leadDays: BANK_REAUTH_LEAD_DAYS,
@@ -382,7 +385,7 @@ async function issueReauthNotice(
       payload: {
         consentValidUntil: input.connection.consentValidUntil?.toISOString() ?? null,
       },
-      correlationId: input.actor?.requestId ?? null,
+      correlationId: actor.requestId,
     });
   }
 

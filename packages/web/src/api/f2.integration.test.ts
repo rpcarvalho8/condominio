@@ -26,6 +26,7 @@ import {
   isUniqueConstraintError,
   issueReceiptForPayment,
   listPayments,
+  openAccountingPeriod,
   recordKernelBankMovement,
   registerPayment,
 } from "./application/finance/f2-finance";
@@ -1308,15 +1309,19 @@ describe("F2 BankConnection aviso proactivo de reautorização", () => {
   test("sem gestor no tenant o aviso não usa IBAN como destino de email", async () => {
     const iban = "PT50001800034978380602065";
     deps.now = () => new Date("2026-09-10T12:00:00.000Z");
-    // Sem Membership de gestor: o use case persiste a ligação; o job HTTP exige gestor.
+    // Sem Membership de gestor: o percurso de job (`f2.job`) persiste a ligação; o job HTTP exige gestor.
     // A5 prova o destino via o serviço real (não replica a lógica) e o 403 HTTP sem gestor.
     await upsertBankConnection(deps, {
       tenantId: TENANT,
       accountIban: iban,
       consentStatus: BANK_CONSENT_STATUS.authorized,
       consentValidUntil: "2026-09-20T00:00:00.000Z",
+      actor: systemAuditActor("job-reauth-no-manager"),
     });
-    const sweep = await sweepBankReauthNotices(deps, { tenantId: TENANT });
+    const sweep = await sweepBankReauthNotices(deps, {
+      tenantId: TENANT,
+      actor: systemAuditActor("job-reauth-no-manager"),
+    });
     expect(sweep.noticed.some((n) => n.noticed)).toBe(true);
     await processOutbox(deps);
     const deliveries = await client.execute(
@@ -3705,6 +3710,13 @@ describe("F2 Astra A7 — AuditEvent identity (Membership → actor_person_id)",
     expect(reversedEv[0]!.before).toMatchObject({ allocationId, amountCents: 100_00 });
     expect(reversedEv[0]!.requestId).toBe(requestId);
 
+    const openedEv = byType("accounting_period.opened");
+    expect(openedEv).toHaveLength(1);
+    expect(openedEv[0]!.actorPersonId).toBe(admin.id);
+    expect(openedEv[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(openedEv[0]!.requestId).toBe(requestId);
+    expect(openedEv[0]!.after).toMatchObject({ year: 2026, month: 11, status: "open" });
+
     const closedEv = byType("accounting_period.closed");
     expect(closedEv).toHaveLength(1);
     expect(closedEv[0]!.actorPersonId).toBe(admin.id);
@@ -3916,5 +3928,171 @@ describe("F2 Astra A7 — AuditEvent identity (Membership → actor_person_id)",
     expect(issued[0]!.source).toBe(AUDIT_SOURCE_F2_JOB);
     expect(issued[0]!.requestId).toBe("job-a7-receipt");
     expect(issued[0]!.tenantId).toBe(TENANT);
+  });
+
+  test("upsertBankConnection e reauth notice: Membership activa; sem actor falha fechado antes do audit", async () => {
+    deps.now = () => new Date("2026-09-10T12:00:00.000Z");
+    const admin = await seedActor({
+      userId: "user-admin-a7-bank",
+      roleCode: "Admin",
+      name: "Admin A7 bank",
+      email: "admin-a7-bank@test",
+    });
+    const requestId = "req-a7-bank";
+    const iban = "PT50001800034978380602065";
+
+    try {
+      await upsertBankConnection(deps, {
+        tenantId: TENANT,
+        accountIban: iban,
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+      });
+      throw new Error("expected actor_required");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+      expect((err as DomainError).httpStatus).toBe(403);
+    }
+    expect(await listBankConnections(deps, TENANT)).toHaveLength(0);
+    expect(
+      (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+        (e) => e.type === "bank_connection.upserted",
+      ),
+    ).toHaveLength(0);
+
+    const created = await f2Json<{ id: string }>("/f2/bank-connections", {
+      user: admin,
+      headers: { "x-request-id": requestId },
+      body: {
+        accountIban: iban,
+        consentStatus: BANK_CONSENT_STATUS.authorized,
+        consentValidUntil: "2026-09-20T00:00:00.000Z",
+      },
+    });
+    expect(created.status).toBe(201);
+    const upserted = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.upserted",
+    );
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]!.actorPersonId).toBe(admin.id);
+    expect(upserted[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(upserted[0]!.requestId).toBe(requestId);
+    expect(upserted[0]!.tenantId).toBe(TENANT);
+
+    try {
+      await sweepBankReauthNotices(deps, { tenantId: TENANT });
+      throw new Error("expected actor_required on reauth notice");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+      expect((err as DomainError).httpStatus).toBe(403);
+    }
+    expect(
+      (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+        (e) => e.type === "bank_connection.reauthorization_notice",
+      ),
+    ).toHaveLength(0);
+    const pendingNotices = await client.execute(
+      `SELECT COUNT(*) AS n FROM outbox_jobs WHERE tenant_id = ? AND job_type = 'notify.bank_reauth'`,
+      [TENANT],
+    );
+    expect(Number(pendingNotices.rows[0]!.n)).toBe(0);
+
+    const noticed = await f2Json<{ noticed: Array<{ noticed: boolean }> }>(
+      "/f2/jobs/reauth-notices",
+      { user: admin, headers: { "x-request-id": requestId }, body: {} },
+    );
+    expect(noticed.status).toBe(200);
+    expect(noticed.body.noticed.some((n) => n.noticed)).toBe(true);
+    const notices = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.reauthorization_notice",
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.actorPersonId).toBe(admin.id);
+    expect(notices[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(notices[0]!.requestId).toBe(requestId);
+  });
+
+  test("job de sistema em bank connection / reauth grava source f2.job com actor_person_id null", async () => {
+    deps.now = () => new Date("2026-09-10T12:00:00.000Z");
+    const row = await upsertBankConnection(deps, {
+      tenantId: TENANT,
+      accountIban: "PT50001800034978380602065",
+      consentStatus: BANK_CONSENT_STATUS.authorized,
+      consentValidUntil: "2026-09-20T00:00:00.000Z",
+      actor: systemAuditActor("job-a7-bank"),
+    });
+    const upserted = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.upserted" && e.entityId === row.id,
+    );
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]!.actorPersonId).toBeNull();
+    expect(upserted[0]!.source).toBe(AUDIT_SOURCE_F2_JOB);
+    expect(upserted[0]!.requestId).toBe("job-a7-bank");
+
+    const sweep = await sweepBankReauthNotices(deps, {
+      tenantId: TENANT,
+      actor: systemAuditActor("job-a7-reauth"),
+    });
+    expect(sweep.noticed.some((n) => n.noticed)).toBe(true);
+    const notices = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "bank_connection.reauthorization_notice",
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.actorPersonId).toBeNull();
+    expect(notices[0]!.source).toBe(AUDIT_SOURCE_F2_JOB);
+    expect(notices[0]!.requestId).toBe("job-a7-reauth");
+  });
+
+  test("openAccountingPeriod grava AuditEvent; sem actor falha fechado e não insere", async () => {
+    try {
+      await openAccountingPeriod(deps, { tenantId: TENANT, year: 2026, month: 12 });
+      throw new Error("expected actor_required");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).code).toBe("actor_required");
+      expect((err as DomainError).httpStatus).toBe(403);
+    }
+    const periodsCount = await client.execute(
+      `SELECT COUNT(*) AS n FROM accounting_periods WHERE tenant_id = ?`,
+      [TENANT],
+    );
+    expect(Number(periodsCount.rows[0]!.n)).toBe(0);
+    expect(
+      (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+        (e) => e.type === "accounting_period.opened",
+      ),
+    ).toHaveLength(0);
+
+    const admin = await seedActor({
+      userId: "user-admin-a7-period",
+      roleCode: "Admin",
+      name: "Admin A7 period",
+      email: "admin-a7-period@test",
+    });
+    const requestId = "req-a7-period-open";
+    const opened = await f2Json<{ id: string; status: string }>("/f2/periods/open", {
+      user: admin,
+      headers: { "x-request-id": requestId },
+      body: { year: 2026, month: 12 },
+    });
+    expect(opened.status).toBe(201);
+    expect(opened.body.status).toBe("open");
+    const again = await f2Json<{ id: string }>("/f2/periods/open", {
+      user: admin,
+      headers: { "x-request-id": requestId },
+      body: { year: 2026, month: 12 },
+    });
+    expect(again.status).toBe(201);
+    const openedEv = (await createAuditEventRepo(deps.db).listByTenant(TENANT)).filter(
+      (e) => e.type === "accounting_period.opened",
+    );
+    expect(openedEv).toHaveLength(1);
+    expect(openedEv[0]!.actorPersonId).toBe(admin.id);
+    expect(openedEv[0]!.source).toBe(AUDIT_SOURCE_F2);
+    expect(openedEv[0]!.requestId).toBe(requestId);
+    expect(openedEv[0]!.entityId).toBe(opened.body.id);
+    expect(openedEv[0]!.after).toMatchObject({ year: 2026, month: 12, status: "open" });
   });
 });

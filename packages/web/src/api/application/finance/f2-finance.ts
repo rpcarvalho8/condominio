@@ -1453,7 +1453,7 @@ export async function openAccountingPeriod(
   if (input.month < 1 || input.month > 12) {
     throw new DomainError("invalid_month", "Mês inválido", 400);
   }
-  await resolveF2AuditActor(deps, input.tenantId, input.actor);
+  const actor = await resolveF2AuditActor(deps, input.tenantId, input.actor);
   const [existing] = await deps.db
     .select()
     .from(accountingPeriods)
@@ -1479,6 +1479,16 @@ export async function openAccountingPeriod(
       createdAt: now,
     })
     .returning();
+
+  await writeAudit(deps, {
+    tenantId: input.tenantId,
+    type: "accounting_period.opened",
+    entityType: "accounting_period",
+    entityId: row!.id,
+    actor,
+    after: { year: input.year, month: input.month, status: "open" },
+  });
+
   return row!;
 }
 

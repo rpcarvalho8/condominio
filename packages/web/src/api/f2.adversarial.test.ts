@@ -64,6 +64,7 @@ import { createMembershipRepo } from "./infra/repos/membership-repo";
 import { createPersonRepo } from "./infra/repos/person-repo";
 import type { KernelAuthUser, KernelVariables } from "./middleware/membership";
 import { createF2Routes } from "./routes/f2";
+import { systemAuditActor } from "./domain/audit";
 
 const DB_PATH = path.join(import.meta.dir, "..", "..", ".tmp-test-f2-adversarial.db");
 const DB_URL = `file:${DB_PATH}`;
@@ -512,9 +513,15 @@ describe("F2 adversarial — isolamento multi-tenant", () => {
     expect(ingestA.body.results[0]!.fracaoId).toBe(seededA.fracao.id);
     expect(ingestB.body.results[0]!.fracaoId).toBe(seededB.fracao.id);
 
-    const noticedA = await sweepBankReauthNotices(deps, { tenantId: TENANT_A });
+    const noticedA = await sweepBankReauthNotices(deps, {
+      tenantId: TENANT_A,
+      actor: systemAuditActor("job-reauth-tenant-a"),
+    });
     expect(noticedA.noticed.some((n) => n.noticed)).toBe(true);
-    const noticesB = await sweepBankReauthNotices(deps, { tenantId: TENANT_B });
+    const noticesB = await sweepBankReauthNotices(deps, {
+      tenantId: TENANT_B,
+      actor: systemAuditActor("job-reauth-tenant-b"),
+    });
     expect(noticesB.noticed.some((n) => n.noticed)).toBe(true);
 
     const jobsA = await client.execute(
@@ -833,8 +840,12 @@ describe("F2 adversarial — reauth", () => {
       accountIban: iban,
       consentStatus: BANK_CONSENT_STATUS.authorized,
       consentValidUntil: "2026-09-20T00:00:00.000Z",
+      actor: systemAuditActor("job-reauth-no-manager"),
     });
-    await sweepBankReauthNotices(deps, { tenantId: TENANT_A });
+    await sweepBankReauthNotices(deps, {
+      tenantId: TENANT_A,
+      actor: systemAuditActor("job-reauth-no-manager"),
+    });
     await processOutbox(deps);
 
     const none = await client.execute(
