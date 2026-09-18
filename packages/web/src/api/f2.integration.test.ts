@@ -2187,10 +2187,14 @@ describe("F2 Enable Banking PSD2", () => {
     const otherStart = await startBankConsent(otherDeps, {
       tenantId: otherTenant,
       accountIban: "PT50001800034978380602065",
+      actor: systemAuditActor("a7-tenant-isolation"),
     });
     const otherState = new URL(otherStart.authorizationUrl).searchParams.get("state");
     await completeBankConsent(otherDeps, { code: "ok-other", state: otherState });
-    await syncBankConnection(otherDeps, { tenantId: otherTenant });
+    await syncBankConnection(otherDeps, {
+      tenantId: otherTenant,
+      actor: systemAuditActor("a7-tenant-isolation"),
+    });
 
     const aOnly = await client.execute(
       `SELECT COUNT(*) AS n FROM f2_bank_movements WHERE tenant_id = ?`,
