@@ -667,6 +667,69 @@ O piloto **não** autoriza a omitir invariantes de domínio (dinheiro, Ledger, A
 
 ---
 
+## ADR-043 — Ingestão F1 é um pipeline canónico, não uma cascata de formatos
+
+**Estado:** ACEITE (arquitectura de produto F1). A ligação mínima ao fluxo `/f1` existente não fecha F1 operacional nem autoriza auto-confirmação.
+
+**Decisão:**
+
+A promessa de F1 não é «compreender qualquer documento». É: qualquer representação razoável de unidades e quotas de um condomínio pode ser levada ao modelo canónico LUMEN sem o admin pré-formatar o ficheiro; quando há ambiguidade, o sistema mostra exactamente o que falta decidir, com a evidência original.
+
+O pipeline, por esta ordem:
+
+1. **Document Intake** — bytes, nome, hash. Upload ≠ confirmação (ADR-017).
+2. **Structure Discovery** — que informação existe, e só depois como está representada (tabela, pares chave-valor, prosa, desconhecido). Não começa por «é CSV?» nem por um padrão de regex.
+3. **Semantic Extraction** — observações de código, designação, valor e pista de unidade. Interpretação, ainda não verdade.
+4. **Canonicalization** — modelo `CondominiumUnit`. Normalização de unidade (por exemplo % → ‰) só quando o contexto do documento a justifica, com o transform registado.
+5. **Deterministic Validation** — confiança construída pelo sistema a partir de verificações, nunca a partir de um score de LLM.
+6. **Human Review** — só onde a validação encontra ambiguidade real. Linhas coerentes continuam a exigir confirmação humana linha a linha antes de existir `Fracao` ou `Obligation`.
+
+Distinções que o código tem de manter separadas: **extracção ≠ interpretação ≠ validação ≠ confirmação.**
+
+Modelo canónico (pequeno):
+
+| Campo | Significado |
+|---|---|
+| `codigo` | Identificador da unidade |
+| `designacao_original` | Texto tal como aparece |
+| `permilagem` | Valor em ‰ quando a unidade é conhecida; vazio quando não se pode afirmar |
+| `origem` | Representação descoberta (`table`, `key_value`, `prose`) — não o nome de um regex |
+| `evidence` | Por campo, quando possível: documento, página / linha / célula / região, texto original, transform |
+| `confidence` | Score e lista de checks do sistema (`source: system_checks`) |
+| `warnings` | Ambiguidade visível; nunca descartada em silêncio |
+
+Evidência pretendida: «A → 600‰ porque se encontrou “Fracção A …… 600 milésimas” na linha 2» ou «coluna=Permilagem, linha=A, valor=600, unidade=‰».
+
+Estados:
+
+| Estado | Onde | Significado |
+|---|---|---|
+| `pending_review` | linha e documento | Candidato coerente. Ainda não é `Fracao`. O admin confirma linha a linha. |
+| `needs_human_review` | linha e/ou documento | Ambiguidade real. Confirmar o resto do lote está bloqueado — não se importam 29 de 37 unidades aparentes. |
+
+Verificações determinísticas obrigatórias:
+
+- identificação semântica de quota / permilagem (cabeçalho ou pista no texto: permilagem, milésimas, ‰, percentagem);
+- normalização de unidade só com contexto (todas as pistas são percentagem e a soma é 100 → `percent_to_permille:*10`);
+- unicidade de `codigo`;
+- cobertura: uma unidade aparente sem valor entra no resultado com `permilagem` vazia e `needs_human_review`;
+- Σ permilagens = 1000‰ quando todas as unidades têm valor em ‰;
+- unidade ambígua (`valor`, `quota`, mistura de ‰ e % no mesmo documento) → `needs_human_review`. Não se adivinha.
+
+Métrica de F1: quantas decisões humanas restam depois da análise (por exemplo 2 linhas prontas com evidência, 1 decisão de unidade em aberto). «Pronta» não escreve frações. Não há auto-confirmação silenciosa.
+
+LLM (`F1_LLM_EXTRACT=1` e chave Groq) pode anexar uma hipótese de estrutura. Essa hipótese não é autoridade: não preenche `permilagem`, não entra na confiança, não confirma. CI e omissão da variável = desligado (`F1_LLM_EXTRACT=0`).
+
+**O que isto não é.** A cascata do PR #31 (tabela delimitada → padrões regex → Groq JSON → revisão humana) é um parser mais tolerante com fallback de LLM. Não é o fecho de F1. Não responde primeiro a «que informação existe?». Não separa extracção, interpretação, validação e confirmação. Não constrói confiança a partir de evidência verificável. **Não fundir o #31. Não acrescentar regex de formato. Não introduzir arquitectura de agentes.** Extractores já existentes podem servir de fonte de texto bruto (OCR stub, grelha Excel); não crescem como catálogo de padrões.
+
+Dez representações que caem no mesmo modelo estão em [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md).
+
+**Justificação:** trocar permilagens ou importar um subconjunto mantém uma soma plausível e vicia a cobrança (invariante 1). Um score de modelo não é essa verificação. O admin tem de ver a origem de cada valor e decidir só o que o sistema não conseguiu verificar.
+
+**Impacto:** 06-FATIAS (F1), F1-IMPLEMENTACAO, F1-INGEST-EXEMPLOS, fluxo `/f1` (`StructuredExtraction`, `sourceExcerpt`, confirmação linha a linha). Fora deste ADR: F4+, atas, voto, PWA, Invitation, `Quota.pago`, QR, Authority, Event Bus, Orquestra, multi-agente.
+
+---
+
 ## Itens Tier 3 — Documentados como Visão Futura, Não Backlog Atual
 
 Não são ADRs (não há decisão de arquitetura a fixar agora), mas ficam registados para não se perderem nem serem reintroduzidos como scope creep prematuro:
