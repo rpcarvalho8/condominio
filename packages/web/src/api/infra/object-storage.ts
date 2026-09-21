@@ -4,8 +4,10 @@
  * Default: local content-addressed blob (`data/content` / CONTENT_BLOB_ROOT).
  * Staging/prod: `OBJECT_STORAGE_DRIVER=s3` + `S3_*` (Bun S3 client, S3-compatible).
  * Fail-closed without credentials. CI stays on local — never required.
+ *
+ * Do **not** statically `import … from "bun"`: Vite SSR (`ssrLoadModule`) cannot
+ * resolve the Bun builtin and crashes `bun run dev` even when the driver is local.
  */
-import { S3Client } from "bun";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors";
 import { storageNamespaceForTenant } from "../domain/tenant-id";
@@ -107,8 +109,25 @@ function wrapS3Error(err: unknown, fallback: string): never {
   throw new DomainError("object_storage_s3_error", fallback, 502);
 }
 
-export function createBunS3BlobClient(config: S3ObjectStorageConfig): S3BlobClient {
-  const client = new S3Client({
+type BunS3Client = {
+  write(key: string, data: Buffer, opts?: { type?: string }): Promise<unknown>;
+  file(key: string): { arrayBuffer(): Promise<ArrayBuffer> };
+  exists(key: string): Promise<boolean>;
+};
+
+async function loadBunS3Client(config: S3ObjectStorageConfig): Promise<BunS3Client> {
+  // @vite-ignore: builtin resolved by the Bun runtime, not by Vite's module graph.
+  const bunMod = (await import(/* @vite-ignore */ "bun")) as {
+    S3Client: new (opts: {
+      accessKeyId: string;
+      secretAccessKey: string;
+      bucket: string;
+      endpoint: string;
+      region: string;
+      virtualHostedStyle: boolean;
+    }) => BunS3Client;
+  };
+  return new bunMod.S3Client({
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,
     bucket: config.bucket,
@@ -116,6 +135,10 @@ export function createBunS3BlobClient(config: S3ObjectStorageConfig): S3BlobClie
     region: config.region,
     virtualHostedStyle: config.virtualHostedStyle,
   });
+}
+
+export async function createBunS3BlobClient(config: S3ObjectStorageConfig): Promise<S3BlobClient> {
+  const client = await loadBunS3Client(config);
   return {
     async put(objectKey, bytes) {
       await client.write(objectKey, bytes, { type: "application/octet-stream" });
@@ -198,7 +221,7 @@ export class MemoryObjectStorage implements ObjectStoragePort {
  */
 export class S3CompatibleObjectStorage implements ObjectStoragePort {
   readonly driver = "s3" as const;
-  private cachedClient: S3BlobClient | undefined;
+  private cachedClient: Promise<S3BlobClient> | undefined;
 
   constructor(
     private readonly config: S3ObjectStorageConfig | null,
@@ -219,10 +242,12 @@ export class S3CompatibleObjectStorage implements ObjectStoragePort {
     }
   }
 
-  private client(): S3BlobClient {
+  private client(): Promise<S3BlobClient> {
     this.assertReady();
     if (!this.cachedClient) {
-      this.cachedClient = this.injectedClient ?? createBunS3BlobClient(this.config);
+      this.cachedClient = this.injectedClient
+        ? Promise.resolve(this.injectedClient)
+        : createBunS3BlobClient(this.config);
     }
     return this.cachedClient;
   }
@@ -235,7 +260,7 @@ export class S3CompatibleObjectStorage implements ObjectStoragePort {
     const key = sha256Hex(buf);
     const objectKey = s3ObjectKey(tenantId, key, this.config.prefix);
     try {
-      await this.client().put(objectKey, buf);
+      await (await this.client()).put(objectKey, buf);
     } catch (err) {
       wrapS3Error(err, "Falha a gravar objecto no S3");
     }
@@ -246,7 +271,7 @@ export class S3CompatibleObjectStorage implements ObjectStoragePort {
     this.assertReady();
     const objectKey = s3ObjectKey(input.tenantId, input.key, this.config.prefix);
     try {
-      return await this.client().get(objectKey);
+      return await (await this.client()).get(objectKey);
     } catch (err) {
       wrapS3Error(err, "Falha a ler objecto no S3");
     }
@@ -256,7 +281,7 @@ export class S3CompatibleObjectStorage implements ObjectStoragePort {
     this.assertReady();
     const objectKey = s3ObjectKey(input.tenantId, input.key, this.config.prefix);
     try {
-      return await this.client().exists(objectKey);
+      return await (await this.client()).exists(objectKey);
     } catch (err) {
       if (isS3NoSuchKey(err)) return false;
       wrapS3Error(err, "Falha a verificar objecto no S3");
