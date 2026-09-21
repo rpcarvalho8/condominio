@@ -9,14 +9,11 @@ import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
-import { scrypt, randomBytes } from "crypto";
-import { promisify } from "util";
+import { hashPassword } from "better-auth/crypto";
 import { applyDomainKernelSchema } from "../src/api/infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "../src/api/infra/f1-schema";
 import { applyF2FinanceSchema } from "../src/api/infra/f2-schema";
 import { CONDOMINIO } from "../src/api/lib/condominio";
-
-const scryptAsync = promisify(scrypt);
 
 const DB_PATH = process.env.DATABASE_URL ?? "file:./local.db";
 
@@ -296,13 +293,6 @@ async function seedFornecedores() {
     });
   }
   console.log(`✅ ${FORNECEDORES.length} fornecedores inseridos`);
-}
-
-// ── Hash de password compatível com better-auth ────────────────────────────────
-async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16).toString("hex");
-  const buf = (await scryptAsync(password, salt, 64)) as Buffer;
-  return `${buf.toString("hex")}.${salt}`;
 }
 
 async function createAdminUser() {

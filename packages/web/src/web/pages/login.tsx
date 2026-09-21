@@ -17,14 +17,22 @@ export default function LoginPage() {
       { email, password },
       { onSuccess: captureToken }
     );
-    setLoading(false);
     if (result.error) {
-      setError("Email ou password incorretos");
+      setLoading(false);
+      const raw = result.error.message?.trim();
+      setError(
+        raw && raw !== "Failed to create session"
+          ? raw
+          : "Email ou password incorretos. Se acabaste de repor o admin, confirma que o .env (DATABASE_URL e WEBSITE_URL) é o da app que está a correr.",
+      );
       return;
     }
-    // Redirect based on role
-    const user = result.data?.user as any;
-    if (user?.role === "admin") {
+    const session = await authClient.getSession();
+    setLoading(false);
+    const role =
+      (session.data?.user as { role?: string } | undefined)?.role ??
+      (result.data?.user as { role?: string } | undefined)?.role;
+    if (role === "admin") {
       navigate("/");
     } else {
       navigate("/portal");

@@ -138,13 +138,15 @@ bun run dev
 # → http://localhost:4200
 ```
 
-Primeiro admin na BD configurada em `DATABASE_URL`:
+Primeiro admin (ou repor password) na BD de `DATABASE_URL`:
 
 ```bash
 cd packages/web
-bun --env-file=../../.env run scripts/create-admin.ts
+bun run create-admin
 # default: admin@condominio.local / admin123
 ```
+
+O script **não apaga** o user: actualiza a password com o hash do better-auth e liga `Person` + Membership Admin se o schema kernel existir. `WEBSITE_URL` no `.env` tem de ser a mesma origem do browser (ex. `http://localhost:4200`).
 
 Clone Fonte com dados: `bun run db:push` e, se a BD estiver vazia, os seeds em `packages/web` (`seed:fracoes`, `seed:gdpr-config`, `seed:ancora`, …). Smoke sem PII: `bun run smoke:db` na raiz.
 
