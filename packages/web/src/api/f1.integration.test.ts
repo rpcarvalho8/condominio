@@ -39,6 +39,7 @@ import { createF1Routes } from "./routes/f1";
 const DB_PATH = path.join(import.meta.dir, "..", "..", ".tmp-test-f1.db");
 const BLOB_ROOT = path.join(import.meta.dir, "..", "..", ".tmp-test-f1-content");
 process.env.CONTENT_BLOB_ROOT = BLOB_ROOT;
+process.env.F1_LLM_EXTRACT = "0";
 
 let client: ReturnType<typeof createClient>;
 let deps: KernelDeps;
@@ -397,6 +398,34 @@ describe("F1 constituição", () => {
     });
     expect(extracted.lines).toHaveLength(2);
     expect(extracted.lines.every((l) => l.sourceExcerpt.includes("‰"))).toBe(true);
+  });
+
+  test("upload texto em prosa/milésimas → pending_review canónico (nunca auto-confirma)", async () => {
+    const text = [
+      "Regulamento_fracao — mapa anexo",
+      "A fracção A tem 600 milésimas.",
+      "A fracção B corresponde a 0,400 do prédio.",
+    ].join("\n");
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "Regulamento_fracao.txt",
+      bytes: Buffer.from(text, "utf8"),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(extracted.document.status).toBe("pending_review");
+    expect(extracted.lines.every((l) => l.status === "pending_review")).toBe(true);
+    const byCode = Object.fromEntries(
+      extracted.lines.map((l) => {
+        const payload = JSON.parse(l.payloadJson) as { codigo: string; permilagem: number };
+        return [payload.codigo, payload.permilagem];
+      }),
+    );
+    expect(byCode.A).toBe(600);
+    expect(byCode.B).toBe(400);
   });
 
   test("extract-from-file duplicado → 409", async () => {

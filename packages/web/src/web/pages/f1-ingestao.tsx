@@ -244,7 +244,7 @@ export default function F1IngestaoPage() {
     <div>
       <PageHeader
         title="Ingestão"
-        subtitle="PDF, Excel ou foto → revisão linha a linha com excerto de origem. Sem auto-confirmação e sem convites automáticos."
+        subtitle="Qualquer layout (PDF, Excel, CSV, texto ou foto) é convertido para o modelo LUMEN. Revisão linha a linha; sem auto-confirmação e sem convites automáticos."
       />
       <div className="p-6 space-y-4 max-w-6xl">
         <Card>
@@ -290,7 +290,7 @@ export default function F1IngestaoPage() {
               </Button>
             </div>
             <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-              A extração OCR/LLM é consultiva. Confirme cada linha; convites ficam na porta F3.
+              A extração tenta tabela, padrões de fração/contacto e, se necessário, LLM. Tudo é consultivo: confirme cada linha. Convites ficam na porta F3.
             </p>
           </CardContent>
         </Card>

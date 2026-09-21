@@ -10,6 +10,8 @@ import {
 import { extractContactosFromPlainText } from "./from-text";
 import { extractStructuredFromBytes } from "./structured-extractor";
 
+process.env.F1_LLM_EXTRACT = "0";
+
 function fakePdf(text: string): Buffer {
   return Buffer.from(
     `%PDF-1.4\n1 0 obj\nBT (${text}) Tj ET\nendobj\n${text}\n%%EOF\n`,

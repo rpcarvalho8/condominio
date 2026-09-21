@@ -17,7 +17,8 @@ F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` vi
 | MIME CSV/Excel/texto **e** PDF/foto | ✅ | jpeg/png/webp/gif + application/pdf; executáveis rejeitados |
 | `content_uploads` + `ingest_documents` | ✅ | Upload ≠ confirmação |
 | Extracção CSV/Excel → `extract_lines` | ✅ | Determinística; `sourceExcerpt` = linha de origem |
-| Extracção texto com padrões ‰ | ✅ | Heurística |
+| Extracção texto com padrões ‰ | ✅ | Heurística alargada (milésimas, %, 0,6, 600/1000, TSV/pipe) |
+| Canonicalização layout-agnóstica | ✅ | Cascata tabela → regex → Groq JSON (`GROQ_API_KEY`) → HUMAN REVIEW; nunca auto-confirma (ADR-017) |
 | Extrator OCR/LLM de PDF/foto | ✅ | Mesmo contrato `StructuredExtraction`; stub determinístico em CI; `F1_OCR_ENDPOINT` opcional |
 | HUMAN REVIEW se extracção fraca | ✅ | Nunca auto-confirma; nunca envia convites (ADR-017) |
 | Object storage adapter | ✅ | Port `put/get/exists` inalterado; local default; S3-compatible **wired** via env |

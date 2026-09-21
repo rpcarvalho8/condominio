@@ -12,8 +12,8 @@ import {
 } from "../../../domain/constitution";
 import { DomainError } from "../../../domain/errors";
 import { f1FileExtension } from "../f1-upload-guard";
-import { extractStructuredFromTabular } from "./from-tabular";
-import { extractContactosFromPlainText, extractFracoesFromPlainText } from "./from-text";
+import { canonicalizeIngestText } from "./canonicalize-ingest";
+import type { LlmConstitutionChat } from "./from-llm-constitution";
 
 export const OCR_HUMAN_REVIEW_MIN_CONFIDENCE = 0.4;
 
@@ -186,41 +186,32 @@ function extractIbansFromText(text: string, regions: OcrRegion[]): StructuredExt
   return { lines };
 }
 
-function parseOcrText(input: {
+async function parseOcrText(input: {
   text: string;
   regions: OcrRegion[];
   documentKind: string;
-}): StructuredExtraction {
-  const kind = input.documentKind;
+  llmChat?: LlmConstitutionChat | null;
+}): Promise<StructuredExtraction> {
   const text = input.text.trim();
   if (!text) {
     throw humanReview("OCR/LLM não devolveu texto utilizável.");
   }
 
-  const looksCsv = /^[^\n]{2,120},[^\n]+/m.test(text) && /\n/.test(text);
+  if (input.documentKind === INGEST_DOCUMENT_KINDS.ibanProof) {
+    try {
+      return extractIbansFromText(text, input.regions);
+    } catch {
+      /* canonicalizar abaixo */
+    }
+  }
 
   try {
-    if (kind === INGEST_DOCUMENT_KINDS.contactos) {
-      if (looksCsv) {
-        return extractStructuredFromTabular({
-          bytes: Buffer.from(text, "utf8"),
-          filename: "ocr.csv",
-          kindHint: "contacto",
-        });
-      }
-      return extractContactosFromPlainText(text);
-    }
-    if (kind === INGEST_DOCUMENT_KINDS.ibanProof) {
-      return extractIbansFromText(text, input.regions);
-    }
-    if (looksCsv) {
-      return extractStructuredFromTabular({
-        bytes: Buffer.from(text, "utf8"),
-        filename: "ocr.csv",
-        kindHint: kind === INGEST_DOCUMENT_KINDS.regulamento ? "fracao" : "auto",
-      });
-    }
-    return extractFracoesFromPlainText(text);
+    return await canonicalizeIngestText({
+      text,
+      documentKind: input.documentKind,
+      filename: "ocr.txt",
+      llmChat: input.llmChat,
+    });
   } catch (err) {
     if (err instanceof DomainError && err.code === "human_review") throw err;
     const msg = err instanceof Error ? err.message : "extração vazia";
@@ -278,6 +269,7 @@ export async function extractStructuredFromVisual(input: {
   documentKind: string;
   mimeType?: string | null;
   ocr?: OcrProvider;
+  llmChat?: LlmConstitutionChat | null;
 }): Promise<StructuredExtraction> {
   const ocr = input.ocr ?? createOcrProviderFromEnv();
   const recognized = await ocr.recognize({
@@ -285,10 +277,11 @@ export async function extractStructuredFromVisual(input: {
     filename: input.filename,
     mimeType: input.mimeType,
   });
-  const parsed = parseOcrText({
+  const parsed = await parseOcrText({
     text: recognized.text,
     regions: recognized.regions,
     documentKind: input.documentKind,
+    llmChat: input.llmChat,
   });
   const withExcerpts = attachRegionExcerpts(parsed, recognized.regions);
   assertExtractionStrongEnough(withExcerpts);

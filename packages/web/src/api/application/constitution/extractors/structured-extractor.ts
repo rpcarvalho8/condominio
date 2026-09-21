@@ -1,18 +1,20 @@
 /**
  * Dispatcher StructuredExtraction — CSV/Excel/texto determinístico + OCR/LLM de PDF/foto.
  * O contrato de saída é sempre StructuredExtraction; o provider OCR é substituível.
+ * Texto irregular passa pela cascata de canonicalização (tabela → regex → LLM → human review).
  */
 import { type StructuredExtraction } from "../../../domain/constitution";
 import { DomainError } from "../../../domain/errors";
 import { f1FileExtension } from "../f1-upload-guard";
+import { canonicalizeIngestText } from "./canonicalize-ingest";
+import type { LlmConstitutionChat } from "./from-llm-constitution";
 import {
   createOcrProviderFromEnv,
   extractStructuredFromVisual,
   isVisualIngestFile,
   type OcrProvider,
 } from "./from-ocr";
-import { extractStructuredFromTabular } from "./from-tabular";
-import { extractFracoesFromPlainText } from "./from-text";
+import { extractStructuredFromTabular, tabularFileToPlainText } from "./from-tabular";
 
 function looksLikeUtf8Text(bytes: Buffer): boolean {
   if (bytes.length === 0) return false;
@@ -31,26 +33,43 @@ export async function extractStructuredFromBytes(input: {
   documentKind: string;
   mimeType?: string | null;
   ocr?: OcrProvider;
+  llmChat?: LlmConstitutionChat | null;
 }): Promise<StructuredExtraction> {
   const ext = f1FileExtension(input.filename);
   const isTabular = ext === ".csv" || ext === ".xlsx" || ext === ".xls";
+  const canonOpts = {
+    documentKind: input.documentKind,
+    filename: input.filename,
+    llmChat: input.llmChat,
+  };
 
   if (isTabular) {
-    const hint =
-      input.documentKind === "contactos"
-        ? "contacto"
-        : input.documentKind === "regulamento"
-          ? "fracao"
-          : "auto";
-    return extractStructuredFromTabular({
-      bytes: input.bytes,
-      filename: input.filename,
-      kindHint: hint,
-    });
+    try {
+      const hint =
+        input.documentKind === "contactos"
+          ? "contacto"
+          : input.documentKind === "regulamento"
+            ? "fracao"
+            : "auto";
+      return extractStructuredFromTabular({
+        bytes: input.bytes,
+        filename: input.filename,
+        kindHint: hint,
+      });
+    } catch (err) {
+      const text = tabularFileToPlainText(input.bytes, input.filename);
+      if (text.trim()) {
+        return canonicalizeIngestText({ ...canonOpts, text });
+      }
+      throw err;
+    }
   }
 
   if (ext === ".txt") {
-    return extractFracoesFromPlainText(input.bytes.toString("utf8"));
+    return canonicalizeIngestText({
+      ...canonOpts,
+      text: input.bytes.toString("utf8"),
+    });
   }
 
   if (isVisualIngestFile(input.filename, input.mimeType)) {
@@ -60,11 +79,15 @@ export async function extractStructuredFromBytes(input: {
       documentKind: input.documentKind,
       mimeType: input.mimeType,
       ocr: input.ocr ?? createOcrProviderFromEnv(),
+      llmChat: input.llmChat,
     });
   }
 
   if (looksLikeUtf8Text(input.bytes)) {
-    return extractFracoesFromPlainText(input.bytes.toString("utf8"));
+    return canonicalizeIngestText({
+      ...canonOpts,
+      text: input.bytes.toString("utf8"),
+    });
   }
 
   throw new DomainError(

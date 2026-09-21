@@ -135,7 +135,7 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 **GO:** após freeze v6.1, em paralelo conceptual com F0 só como vertical slice — não substituir o Domain Kernel.
 
-**Estado de código:** ver [F1-IMPLEMENTACAO.md](F1-IMPLEMENTACAO.md) — upload CSV/Excel/texto/PDF/foto + OCR/LLM via `StructuredExtraction` + object storage adapter + UI admin de revisão linha a linha; obligations a partir do orçamento. Convites continuam F3 (ADR-017).
+**Estado de código:** ver [F1-IMPLEMENTACAO.md](F1-IMPLEMENTACAO.md) — upload CSV/Excel/texto/PDF/foto + canonicalização layout-agnóstica (tabela → regex → Groq JSON) via `StructuredExtraction` + object storage + UI admin de revisão linha a linha; obligations a partir do orçamento. Convites continuam F3 (ADR-017).
 
 ---
 
