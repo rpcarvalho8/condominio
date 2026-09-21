@@ -135,7 +135,7 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 **GO:** após freeze v6.1, em paralelo conceptual com F0 só como vertical slice — não substituir o Domain Kernel.
 
-**Estado de código:** ver [F1-IMPLEMENTACAO.md](F1-IMPLEMENTACAO.md) — upload CSV/Excel/texto/PDF/foto + OCR/LLM via `StructuredExtraction` + object storage adapter + UI admin de revisão linha a linha; obligations a partir do orçamento. Convites continuam F3 (ADR-017).
+**Estado de código:** ver [F1-IMPLEMENTACAO.md](F1-IMPLEMENTACAO.md). Upload e revisão linha a linha já existem. A arquitectura de ingestão de unidades/quotas é o pipeline do [ADR-043](ADR-LOG.md) (intake → descoberta de estrutura → extracção semântica → canónico → validação determinística → revisão humana só na ambiguidade), com os dez exemplos em [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md). A cascata de formatos do PR #31 (regex + Groq JSON) **não** fecha F1. Convites continuam F3 (ADR-017). Não há auto-confirmação.
 
 ---
 
