@@ -59,7 +59,7 @@ function extractFracoesByRegex(text: string): StructuredExtraction["lines"] {
   const patterns: Array<{ re: RegExp; confidence: number }> = [
     {
       re: new RegExp(
-        String.raw`(?:${FRACAO_WORD}|unidade|loja|garagem|apto\.?|apartamento)?\s*(${CODIGO_TOKEN})\s*[—\-–:]\s*${PERMIL_TAIL}`,
+        String.raw`(?:${FRACAO_WORD}|unidade)?\s*(${CODIGO_TOKEN})\s*[—\-–:]\s*${PERMIL_TAIL}`,
         "gi",
       ),
       confidence: 0.72,
@@ -102,7 +102,7 @@ function codigoFromLeft(leftRaw: string): string | null {
   left = left.replace(/\s+(?:tem|possui|corresponde(?:\s+a)?|com)\s*$/i, "");
   const labeled = left.match(
     new RegExp(
-      String.raw`(?:${FRACAO_WORD}|unidade|loja|garagem|apto\.?|apartamento)\s+([A-Za-z0-9\/.\-ºª°]+(?:\s+[A-Za-z0-9\/.\-ºª°]+)?)\s*$`,
+      String.raw`(?:${FRACAO_WORD}|unidade)\s+([A-Za-z0-9\/.\-ºª°]+(?:\s+[A-Za-z0-9\/.\-ºª°]+)?)\s*$`,
       "i",
     ),
   );
@@ -164,6 +164,27 @@ function extractFracoesByLines(text: string): StructuredExtraction["lines"] {
   return lines;
 }
 
+function dedupeContainedCodigos(lines: StructuredExtraction["lines"]): StructuredExtraction["lines"] {
+  const sorted = [...lines].sort(
+    (a, b) => String(b.payload.codigo ?? "").length - String(a.payload.codigo ?? "").length,
+  );
+  const kept: StructuredExtraction["lines"] = [];
+  for (const line of sorted) {
+    const codigo = fracaoCodigoKey(String(line.payload.codigo ?? ""));
+    const perm = Number(line.payload.permilagem);
+    const absorbed = kept.some((existing) => {
+      if (Number(existing.payload.permilagem) !== perm) return false;
+      const other = fracaoCodigoKey(String(existing.payload.codigo ?? ""));
+      return (
+        other !== codigo &&
+        (other.endsWith(` ${codigo}`) || other.endsWith(`-${codigo}`) || other.endsWith(`/${codigo}`))
+      );
+    });
+    if (!absorbed) kept.push(line);
+  }
+  return kept;
+}
+
 /**
  * Extracção heurística de texto (PDF convertido, .txt, OCR stub, prosa irregular).
  * Canonicaliza para { codigo, permilagem } no modelo LUMEN.
@@ -179,14 +200,15 @@ export function extractFracoesFromPlainText(text: string): StructuredExtraction 
     seen.add(key);
     merged.push(line);
   }
-  if (!acceptFracaoSet(merged)) {
+  const lines = dedupeContainedCodigos(merged);
+  if (!acceptFracaoSet(lines)) {
     throw new DomainError(
       "empty_extraction",
       "Texto sem padrões de fração/permilagem reconhecíveis",
       400,
     );
   }
-  return { lines: merged };
+  return { lines };
 }
 
 function looksLikePersonName(s: string): boolean {
