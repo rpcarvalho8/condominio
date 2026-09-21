@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import {
   annualBudgetLines,
   annualBudgets,
@@ -27,6 +27,7 @@ import { assertSha256ContentHash } from "../../infra/content-blob-store";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
+import type { IngestPipelineSummary } from "./ingest/contracts";
 
 type Actor = {
   personId?: string | null;
@@ -144,12 +145,83 @@ export async function registerIngestDocument(
   return row!;
 }
 
+function lineReviewStatus(status: string | undefined): string {
+  return status === EXTRACT_LINE_STATUS.needsHumanReview
+    ? EXTRACT_LINE_STATUS.needsHumanReview
+    : EXTRACT_LINE_STATUS.pendingReview;
+}
+
+async function refreshFracaoReviewState(deps: KernelDeps, documentId: string) {
+  const lines = await deps.db
+    .select()
+    .from(extractLines)
+    .where(eq(extractLines.documentId, documentId));
+  const open = lines.filter(
+    (line) =>
+      line.kind === EXTRACT_LINE_KINDS.fracao &&
+      line.status !== EXTRACT_LINE_STATUS.confirmed &&
+      line.status !== EXTRACT_LINE_STATUS.rejected,
+  );
+  const ambiguous = open.filter((line) => line.status === EXTRACT_LINE_STATUS.needsHumanReview);
+  let sum = 0;
+  for (const line of open) {
+    if (line.status !== EXTRACT_LINE_STATUS.pendingReview) continue;
+    const payload = JSON.parse(line.editedPayloadJson ?? line.payloadJson) as { permilagem?: unknown };
+    const value = Number(payload.permilagem);
+    if (Number.isFinite(value) && value > 0) sum += Math.round(value);
+  }
+  const blocking: Array<{ code: string; message: string }> = [];
+  if (ambiguous.length > 0) {
+    blocking.push({
+      code: "needs_human_review",
+      message: `${ambiguous.length} linha(s) precisam de decisão humana.`,
+    });
+  } else if (open.length > 0 && sum !== PERMILAGEM_TOTAL) {
+    blocking.push({
+      code: "permilagem_sum",
+      message: `Σ permilagens = ${sum}‰; exige ${PERMILAGEM_TOTAL}‰.`,
+    });
+  }
+  const [doc] = await deps.db
+    .select()
+    .from(ingestDocuments)
+    .where(eq(ingestDocuments.id, documentId))
+    .limit(1);
+  const previous = doc?.pipelineJson
+    ? (JSON.parse(doc.pipelineJson) as IngestPipelineSummary)
+    : null;
+  const summary: IngestPipelineSummary = {
+    representation: previous?.representation ?? "unknown",
+    informationPresent: previous?.informationPresent ?? [],
+    readyForConfirmation: open.filter((line) => line.status === EXTRACT_LINE_STATUS.pendingReview).length,
+    needsHumanDecision:
+      ambiguous.length + (blocking.some((item) => item.code === "permilagem_sum") ? 1 : 0),
+    blocking,
+    checks: previous?.checks ?? [],
+    llmUsed: previous?.llmUsed ?? false,
+    llmHypothesis: previous?.llmHypothesis ?? null,
+    stages: previous?.stages ?? [],
+  };
+  await deps.db
+    .update(ingestDocuments)
+    .set({
+      status:
+        blocking.length > 0
+          ? INGEST_DOCUMENT_STATUS.needsHumanReview
+          : INGEST_DOCUMENT_STATUS.pendingReview,
+      pipelineJson: JSON.stringify(summary),
+      error: null,
+    })
+    .where(eq(ingestDocuments.id, documentId));
+}
+
 export async function extractDocumentLines(
   deps: KernelDeps,
   input: {
     tenantId: string;
     documentId: string;
     extraction: StructuredExtraction;
+    pipeline?: IngestPipelineSummary | null;
     actor?: Actor;
   },
 ) {
@@ -211,16 +283,28 @@ export async function extractDocumentLines(
         payloadJson: JSON.stringify(line.payload ?? {}),
         sourceExcerpt: excerpt,
         confidence: line.confidence ?? null,
-        status: EXTRACT_LINE_STATUS.pendingReview,
+        status: lineReviewStatus(line.status),
         createdAt: now,
       })
       .returning();
     inserted.push(row!);
   }
 
+  const blocked =
+    inserted.some((row) => row.status === EXTRACT_LINE_STATUS.needsHumanReview) ||
+    (input.pipeline?.blocking.length ?? 0) > 0;
+  const documentStatus = blocked
+    ? INGEST_DOCUMENT_STATUS.needsHumanReview
+    : INGEST_DOCUMENT_STATUS.pendingReview;
+
   await deps.db
     .update(ingestDocuments)
-    .set({ status: INGEST_DOCUMENT_STATUS.pendingReview, processedAt: now })
+    .set({
+      status: documentStatus,
+      processedAt: now,
+      error: null,
+      pipelineJson: input.pipeline ? JSON.stringify(input.pipeline) : null,
+    })
     .where(eq(ingestDocuments.id, doc.id));
 
   await writeAudit(deps, {
@@ -233,7 +317,11 @@ export async function extractDocumentLines(
   });
 
   return {
-    document: { ...doc, status: INGEST_DOCUMENT_STATUS.pendingReview },
+    document: {
+      ...doc,
+      status: documentStatus,
+      pipelineJson: input.pipeline ? JSON.stringify(input.pipeline) : null,
+    },
     lines: inserted,
   };
 }
@@ -284,13 +372,39 @@ export async function editExtractLine(
   const { document, lines } = await listExtractLines(deps, input);
   const line = lines.find((l) => l.id === input.lineId);
   if (!line) throw new DomainError("line_not_found", `Linha ${input.lineId} não encontrada`, 404);
-  if (line.status !== EXTRACT_LINE_STATUS.pendingReview) {
+  if (
+    line.status !== EXTRACT_LINE_STATUS.pendingReview &&
+    line.status !== EXTRACT_LINE_STATUS.needsHumanReview
+  ) {
     throw new DomainError("line_not_editable", "Só linhas em revisão podem ser editadas", 400);
   }
 
   let normalized: Record<string, unknown>;
   if (line.kind === EXTRACT_LINE_KINDS.fracao) {
-    normalized = asFracaoPayload(input.payload) as unknown as Record<string, unknown>;
+    const previous = JSON.parse(line.payloadJson) as Record<string, unknown>;
+    const fracao = asFracaoPayload(input.payload);
+    const evidence = Array.isArray(previous.evidence) ? previous.evidence : [];
+    normalized = {
+      ...previous,
+      codigo: fracao.codigo,
+      tipo: fracao.tipo ?? "fracao",
+      permilagem: fracao.permilagem,
+      review: EXTRACT_LINE_STATUS.pendingReview,
+      evidence: [
+        ...evidence,
+        {
+          field: "permilagem",
+          documentId: document.id,
+          documentName: document.filename,
+          page: null,
+          line: line.lineNo,
+          cell: null,
+          region: null,
+          originalText: String(input.payload.permilagem ?? ""),
+          transform: "human_edit",
+        },
+      ],
+    };
   } else if (line.kind === EXTRACT_LINE_KINDS.contacto) {
     normalized = asContactPayload(input.payload) as unknown as Record<string, unknown>;
   } else {
@@ -299,9 +413,19 @@ export async function editExtractLine(
 
   const [updated] = await deps.db
     .update(extractLines)
-    .set({ editedPayloadJson: JSON.stringify(normalized) })
+    .set({
+      editedPayloadJson: JSON.stringify(normalized),
+      status:
+        line.kind === EXTRACT_LINE_KINDS.fracao
+          ? EXTRACT_LINE_STATUS.pendingReview
+          : line.status,
+    })
     .where(eq(extractLines.id, line.id))
     .returning();
+
+  if (line.kind === EXTRACT_LINE_KINDS.fracao) {
+    await refreshFracaoReviewState(deps, document.id);
+  }
 
   await writeAudit(deps, {
     tenantId: input.tenantId,
@@ -336,6 +460,22 @@ export async function confirmFracaoLines(
 
   const now = kernelNow(deps);
   const batch: Array<{ lineId: string; payload: FracaoExtractPayload; excerpt: string }> = [];
+  const rejectedIds = new Set(
+    input.confirmations.filter((item) => item.reject).map((item) => item.lineId),
+  );
+  const unresolved = lines.filter(
+    (line) =>
+      line.kind === EXTRACT_LINE_KINDS.fracao &&
+      line.status === EXTRACT_LINE_STATUS.needsHumanReview &&
+      !rejectedIds.has(line.id),
+  );
+  if (unresolved.length > 0) {
+    throw new DomainError(
+      "needs_human_review",
+      `Há ${unresolved.length} linha(s) com ambiguidade por resolver. Nada foi confirmado (ADR-017).`,
+      400,
+    );
+  }
 
   for (const c of input.confirmations) {
     const line = lines.find((l) => l.id === c.lineId);
@@ -343,6 +483,13 @@ export async function confirmFracaoLines(
       throw new DomainError("line_not_found", `Linha ${c.lineId} não encontrada`, 404);
     }
     if (line.status === EXTRACT_LINE_STATUS.confirmed) continue;
+    if (line.status === EXTRACT_LINE_STATUS.needsHumanReview && !c.reject) {
+      throw new DomainError(
+        "needs_human_review",
+        "Linha ambígua não pode ser confirmada sem decisão humana (ADR-017).",
+        400,
+      );
+    }
     if (c.reject) {
       await deps.db
         .update(extractLines)
@@ -364,6 +511,15 @@ export async function confirmFracaoLines(
   }
 
   const sum = batch.reduce((acc, x) => acc + x.payload.permilagem, 0);
+  const codes = batch.map((item) => item.payload.codigo.trim().toUpperCase());
+  const duplicate = codes.find((code, index) => codes.indexOf(code) !== index);
+  if (duplicate) {
+    throw new DomainError(
+      "duplicate_codigo",
+      `Código ${duplicate} repetido no lote. Nada foi confirmado.`,
+      400,
+    );
+  }
   if (batch.length > 0 && sum !== PERMILAGEM_TOTAL) {
     throw new DomainError(
       "permilagem_sum",
@@ -411,7 +567,10 @@ export async function confirmFracaoLines(
     .where(
       and(
         eq(extractLines.documentId, document.id),
-        eq(extractLines.status, EXTRACT_LINE_STATUS.pendingReview),
+        inArray(extractLines.status, [
+          EXTRACT_LINE_STATUS.pendingReview,
+          EXTRACT_LINE_STATUS.needsHumanReview,
+        ]),
       ),
     );
 

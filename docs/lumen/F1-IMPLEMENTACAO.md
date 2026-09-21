@@ -13,7 +13,7 @@ O pipeline aceite é:
 
 Contrato e estados (`pending_review` vs `needs_human_review`): ADR-043. Dez documentos diferentes que caem no mesmo modelo canónico: [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md).
 
-Ligação mínima ao que já existe: o mesmo `/f1`, o mesmo `StructuredExtraction` / `sourceExcerpt`, a mesma confirmação linha a linha. Upload não cria `Fracao` nem `Obligation`. `F1_LLM_EXTRACT` omisso ou `0` no CI; Groq só se a variável for `1` e houver chave — e mesmo assim a hipótese não confirma valores.
+Ligação mínima já no fluxo existente: `POST /api/f1/documents/:id/extract-from-file` para `regulamento` corre o pipeline e devolve `StructuredExtraction` com `sourceExcerpt`. A UI `/f1` mostra a evidência, a confiança do sistema e quantas decisões humanas faltam. Upload e extracção não criam `Fracao` nem `Obligation`. Linhas `needs_human_review` bloqueiam a confirmação do lote. `F1_LLM_EXTRACT` omisso ou `0` no CI; Groq só se a variável for `1` e houver chave — e mesmo assim a hipótese não confirma valores.
 
 A métrica visível na revisão é quantas linhas estão prontas com evidência e quantas decisões humanas ainda faltam. Pronta ≠ confirmada.
 
