@@ -735,6 +735,7 @@ export const ingestDocuments = sqliteTable(
     createdByPersonId: text("created_by_person_id"),
     processedAt: integer("processed_at", { mode: "timestamp" }),
     error: text("error"),
+    pipelineJson: text("pipeline_json"),
   },
   (t) => ({
     tenantStatusIdx: index("ingest_documents_tenant_status_idx").on(t.tenantId, t.status),

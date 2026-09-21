@@ -13,6 +13,13 @@ type IngestDocument = {
   status: string;
   error?: string | null;
   contentHash?: string | null;
+  pipelineJson?: string | null;
+};
+
+type PipelineSummary = {
+  readyForConfirmation: number;
+  needsHumanDecision: number;
+  blocking?: Array<{ code: string; message: string }>;
 };
 
 type ExtractLine = {
@@ -47,6 +54,29 @@ async function f1Fetch<T>(path: string, init?: RequestInit): Promise<T> {
   return data;
 }
 
+function parsePipeline(doc: IngestDocument | null): PipelineSummary | null {
+  if (!doc?.pipelineJson) return null;
+  try {
+    return JSON.parse(doc.pipelineJson) as PipelineSummary;
+  } catch {
+    return null;
+  }
+}
+
+function lineWarnings(line: ExtractLine): string[] {
+  const payload = parsePayload(line);
+  const warnings = payload.warnings;
+  if (!Array.isArray(warnings)) return [];
+  return warnings
+    .map((warning) => {
+      if (warning && typeof warning === "object" && "message" in warning) {
+        return String((warning as { message?: unknown }).message ?? "");
+      }
+      return "";
+    })
+    .filter(Boolean);
+}
+
 function parsePayload(line: ExtractLine): Record<string, unknown> {
   try {
     return JSON.parse(line.editedPayloadJson || line.payloadJson) as Record<string, unknown>;
@@ -60,7 +90,7 @@ function statusVariant(status: string): "green" | "amber" | "red" | "muted" {
   if (status === "pending_review" || status === "partially_confirmed" || status === "extracting") {
     return "amber";
   }
-  if (status === "failed" || status === "rejected") return "red";
+  if (status === "failed" || status === "rejected" || status === "needs_human_review") return "red";
   return "muted";
 }
 
@@ -90,7 +120,18 @@ export default function F1IngestaoPage() {
   });
 
   const lines = linesQuery.data?.lines ?? [];
-  const pending = lines.filter((l) => l.status === "pending_review");
+  const reviewDocument = linesQuery.data?.document ?? selected;
+  const pipeline = parsePipeline(reviewDocument);
+  const pending = lines.filter((l) => l.status === "pending_review" || l.status === "needs_human_review");
+  const fracaoLines = lines.filter((l) => l.kind === "fracao");
+  const needsDecision = fracaoLines.filter((l) => l.status === "needs_human_review");
+  const readyCount = pipeline
+    ? pipeline.readyForConfirmation
+    : fracaoLines.filter((l) => l.status === "pending_review").length;
+  const decisionCount = pipeline ? pipeline.needsHumanDecision : needsDecision.length;
+  const decisionLabel =
+    decisionCount === 1 ? "1 decisão humana em aberto" : `${decisionCount} decisões humanas em aberto`;
+  const editable = (status: string) => status === "pending_review" || status === "needs_human_review";
 
   const permilagemSum = useMemo(() => {
     return pending
@@ -160,13 +201,16 @@ export default function F1IngestaoPage() {
         body: JSON.stringify({ payload }),
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["f1-lines", selectedId] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["f1-lines", selectedId] });
+      qc.invalidateQueries({ queryKey: ["f1-documents"] });
+    },
   });
 
   const confirmFracoes = useMutation({
     mutationFn: async () => {
       const confirmations = pending
-        .filter((l) => l.kind === "fracao")
+        .filter((l) => l.kind === "fracao" && l.status === "pending_review")
         .map((line) => {
           const payload = { ...parsePayload(line), ...(edits[line.id] ?? {}) };
           return {
@@ -194,7 +238,7 @@ export default function F1IngestaoPage() {
   const confirmContactos = useMutation({
     mutationFn: async () => {
       const confirmations = pending
-        .filter((l) => l.kind === "contacto")
+        .filter((l) => l.kind === "contacto" && l.status === "pending_review")
         .map((line) => {
           const payload = { ...parsePayload(line), ...(edits[line.id] ?? {}) };
           return {
@@ -399,9 +443,14 @@ export default function F1IngestaoPage() {
                             </p>
                             {line.confidence != null && (
                               <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                                confiança {line.confidence.toFixed(2)}
+                                confiança do sistema {line.confidence.toFixed(2)}
                               </p>
                             )}
+                            {lineWarnings(line).map((warning) => (
+                              <p key={warning} className="text-xs mt-1" style={{ color: SEVILLA_RED }}>
+                                {warning}
+                              </p>
+                            ))}
                           </td>
                           <td className="py-3 pr-2 space-y-1">
                             {line.kind === "fracao" && (
@@ -410,7 +459,7 @@ export default function F1IngestaoPage() {
                                   className="w-full rounded-md px-2 py-1 text-sm border"
                                   style={{ background: "var(--bg-elevated)", borderColor: "var(--border-strong)" }}
                                   value={field(line, "codigo")}
-                                  disabled={line.status !== "pending_review"}
+                                  disabled={!editable(line.status)}
                                   onChange={(e) => setField(line.id, "codigo", e.target.value)}
                                   placeholder="código"
                                 />
@@ -418,7 +467,7 @@ export default function F1IngestaoPage() {
                                   className="w-24 rounded-md px-2 py-1 text-sm border"
                                   style={{ background: "var(--bg-elevated)", borderColor: "var(--border-strong)" }}
                                   value={field(line, "permilagem")}
-                                  disabled={line.status !== "pending_review"}
+                                  disabled={!editable(line.status)}
                                   onChange={(e) => setField(line.id, "permilagem", e.target.value)}
                                   placeholder="‰"
                                 />
@@ -452,7 +501,7 @@ export default function F1IngestaoPage() {
                                 />
                               </>
                             )}
-                            {line.status === "pending_review" && (
+                            {editable(line.status) && (
                               <Button size="sm" variant="ghost" onClick={() => saveLine.mutate(line)}>
                                 Guardar edição
                               </Button>
@@ -468,19 +517,34 @@ export default function F1IngestaoPage() {
                 </div>
               )}
 
-              {selected?.kind === "regulamento" && pending.some((l) => l.kind === "fracao") && (
-                <div className="flex flex-wrap items-center gap-3">
-                  <p className="text-sm" style={{ color: permilagemSum === 1000 ? "var(--green)" : SEVILLA_RED }}>
-                    Σ permilagens = {permilagemSum}‰ (exige 1000‰)
+              {selected?.kind === "regulamento" && fracaoLines.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-sm">
+                    {readyCount} linhas prontas com evidência, {decisionLabel}. Nada fica confirmado sem esta revisão.
                   </p>
-                  <Button
-                    onClick={() => confirmFracoes.mutate()}
-                    disabled={permilagemSum !== 1000 || confirmFracoes.isPending}
-                    loading={confirmFracoes.isPending}
-                    style={{ background: SEVILLA_RED, color: "white" }}
-                  >
-                    Confirmar frações
-                  </Button>
+                  {(pipeline?.blocking ?? []).map((item) => (
+                    <p key={item.code} className="text-xs" style={{ color: SEVILLA_RED }}>
+                      {item.message}
+                    </p>
+                  ))}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <p className="text-sm" style={{ color: permilagemSum === 1000 && needsDecision.length === 0 ? "var(--green)" : SEVILLA_RED }}>
+                      Σ permilagens = {permilagemSum}‰ (exige 1000‰)
+                    </p>
+                    <Button
+                      onClick={() => confirmFracoes.mutate()}
+                      disabled={
+                        permilagemSum !== 1000 ||
+                        needsDecision.length > 0 ||
+                        reviewDocument?.status === "needs_human_review" ||
+                        confirmFracoes.isPending
+                      }
+                      loading={confirmFracoes.isPending}
+                      style={{ background: SEVILLA_RED, color: "white" }}
+                    >
+                      Confirmar frações
+                    </Button>
+                  </div>
                 </div>
               )}
 

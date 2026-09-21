@@ -18,6 +18,7 @@ import {
   editExtractLine,
   extractDocumentLines,
   listConstitutionFracoes,
+  listExtractLines,
   listIngestDocuments,
   registerIngestDocument,
 } from "./application/constitution/f1-constitution";
@@ -612,5 +613,145 @@ describe("F1 HTTP upload guards", () => {
     expect(listed.status).toBe(200);
     const listBody = (await listed.json()) as { documents: Array<{ id: string }> };
     expect(listBody.documents.some((d) => d.id === body.document.id)).toBe(true);
+  });
+});
+
+describe("F1 pipeline ADR-043 no fluxo /f1", () => {
+  test("prosa com líderes fica pendente, com evidência, e só a confirmação cria frações", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "lideres.txt",
+      bytes: Buffer.from(
+        "Fracção A ........ 600 milésimas\nFracção B ........ 400 milésimas\n",
+        "utf8",
+      ),
+    });
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(0);
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(extracted.document.status).toBe("pending_review");
+    expect(extracted.lines.every((line) => line.status === "pending_review")).toBe(true);
+    expect(extracted.lines.every((line) => line.sourceExcerpt.includes("milésimas"))).toBe(true);
+    const payload = JSON.parse(extracted.lines[0]!.payloadJson) as {
+      confidenceSource: string;
+      permilagem: number;
+    };
+    expect(payload.confidenceSource).toBe("system_checks");
+    expect(payload.permilagem).toBe(600);
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(0);
+
+    const confirmed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+      confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
+    });
+    expect(confirmed.permilagemSum).toBe(1000);
+  });
+
+  test("cobertura incompleta não confirma o subconjunto", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "cobertura.txt",
+      bytes: Buffer.from(
+        [
+          "Fracção A ........ 600 milésimas",
+          "Fracção B ........ 400 milésimas",
+          "Fracção C ........ a preencher",
+          "",
+        ].join("\n"),
+        "utf8",
+      ),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(extracted.lines).toHaveLength(3);
+    expect(extracted.document.status).toBe("needs_human_review");
+    const gap = extracted.lines.find((line) => line.status === "needs_human_review")!;
+    const ready = extracted.lines.filter((line) => line.status === "pending_review");
+    expect(ready).toHaveLength(2);
+    await expect(
+      confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: document.id,
+        confirmations: ready.map((line) => ({ lineId: line.id })),
+      }),
+    ).rejects.toMatchObject({ code: "needs_human_review" });
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(0);
+
+    const confirmed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+      confirmations: [
+        ...ready.map((line) => ({ lineId: line.id })),
+        { lineId: gap.id, reject: true },
+      ],
+    });
+    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.fracoes).toHaveLength(2);
+  });
+
+  test("coluna valor exige edição humana antes de confirmar", async () => {
+    const { document } = await uploadIngestDocumentFile(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "valor.csv",
+      bytes: Buffer.from("codigo,valor\nA,600\nB,400\n", "utf8"),
+    });
+    const extracted = await extractDocumentFromStoredContent(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(extracted.lines.every((line) => line.status === "needs_human_review")).toBe(true);
+    expect(
+      extracted.lines.every((line) => {
+        const payload = JSON.parse(line.payloadJson) as { permilagem: number | null };
+        return payload.permilagem == null;
+      }),
+    ).toBe(true);
+    await expect(
+      confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: document.id,
+        confirmations: extracted.lines.map((line) => ({
+          lineId: line.id,
+          payload: {
+            codigo: JSON.parse(line.payloadJson).codigo as string,
+            permilagem: 600,
+          },
+        })),
+      }),
+    ).rejects.toMatchObject({ code: "needs_human_review" });
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(0);
+
+    for (const line of extracted.lines) {
+      const payload = JSON.parse(line.payloadJson) as { codigo: string };
+      await editExtractLine(deps, {
+        tenantId: TENANT,
+        documentId: document.id,
+        lineId: line.id,
+        payload: {
+          codigo: payload.codigo,
+          permilagem: payload.codigo === "A" ? 600 : 400,
+        },
+      });
+    }
+    const listed = await listExtractLines(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+    });
+    expect(listed.lines.every((line) => line.status === "pending_review")).toBe(true);
+    expect(listed.document.status).toBe("pending_review");
+    const confirmed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: document.id,
+      confirmations: listed.lines.map((line) => ({ lineId: line.id })),
+    });
+    expect(confirmed.permilagemSum).toBe(1000);
   });
 });
