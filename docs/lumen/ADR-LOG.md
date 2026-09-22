@@ -726,7 +726,90 @@ Dez representações que caem no mesmo modelo estão em [F1-INGEST-EXEMPLOS](F1-
 
 **Justificação:** trocar permilagens ou importar um subconjunto mantém uma soma plausível e vicia a cobrança (invariante 1). Um score de modelo não é essa verificação. O admin tem de ver a origem de cada valor e decidir só o que o sistema não conseguiu verificar.
 
-**Impacto:** 06-FATIAS (F1), F1-IMPLEMENTACAO, F1-INGEST-EXEMPLOS, fluxo `/f1` (`StructuredExtraction`, `sourceExcerpt`, confirmação linha a linha). Fora deste ADR: F4+, atas, voto, PWA, Invitation, `Quota.pago`, QR, Authority, Event Bus, Orquestra, multi-agente.
+**Impacto:** 06-FATIAS (F1), F1-IMPLEMENTACAO, F1-INGEST-EXEMPLOS, fluxo `/f1` (`StructuredExtraction`, `sourceExcerpt`, confirmação linha a linha). Perfis sobre este pipeline: [ADR-044](#adr-044--ingestão-f1-tem-perfis-sobre-o-mesmo-pipeline). Fora deste ADR: F4+, atas, voto, PWA, Invitation, `Quota.pago`, QR, Authority, Event Bus, Orquestra, multi-agente.
+
+---
+
+## ADR-044 — Ingestão F1 tem perfis sobre o mesmo pipeline
+
+**Estado:** ACEITE como arquitectura de Fase B (2026-09-22). O perfil `unit_share` é o único executado. O perfil `budget_plan` fica em contratos e no corpus — não há extracção, confirmação, nem escrita de orçamento a partir de documento. Não funde o PR #31. Não implementa Orçamento.
+
+**Contexto:** o ADR-043 fixa a sequência para unidades e permilagem. F1 também prevê orçamento anual (06-FATIAS), e o domínio já separa orçamento previsto, `Obligation`, `Payment`, `Allocation` e saldo (ADR-003, 02-DOMINIO). A escrita que existe hoje é `createAnnualBudget` (draft, rubricas `quota_corrente` / `fcr` / `extraordinaria`) e `approveBudgetAndCreateObligations` (só com frações confirmadas e Σ = 1000‰). Um segundo pipeline, ou ligar `kind=orcamento` ao extractor de permilagem, apagava essa separação.
+
+**Decisão:**
+
+Há uma camada partilhada e perfis por cima. A sequência não se duplica:
+
+1. **Document Intake** — bytes, nome, hash. Upload ≠ confirmação (ADR-017).
+2. **Structure Discovery** — que informação existe, e só depois a representação (tabela, pares chave-valor, prosa, desconhecido).
+3. **Semantic Extraction** — observações. Interpretação, ainda não verdade.
+4. **Canonicalization** — o modelo do perfil. Transform registado; o texto original mantém-se.
+5. **Deterministic Validation** — confiança só de `SystemCheck`, nunca de um score de LLM.
+6. **Human Review** — só na ambiguidade real, e mesmo as linhas coerentes exigem confirmação humana explícita.
+
+Contratos partilhados (não são tabelas de domínio):
+
+| Contrato | Papel |
+|---|---|
+| `DocumentObservation` | Página, linha, célula, região e `originalText`. Ainda não é valor canónico. |
+| `FieldEvidence` | O mesmo sítio, mais o campo e o `transform`. |
+| `SystemCheck` | Verificação determinística (`id`, `passed`, `detail`). |
+| `ReviewState` | `pending_review` ou `needs_human_review`. Nenhum dos dois confirma. |
+| `IngestPipelineSummary` | Perfil, representação, checks, bloqueios, `readyForConfirmation`, `needsHumanDecision`. |
+
+KPI: quantas decisões humanas restam depois da análise (`needsHumanDecision`). «Pronta» não escreve `Fracao` nem `Obligation`.
+
+Cadeia de evidência, sem saltos e sem substituir o texto de origem:
+
+documento → página / linha / célula / região → `originalText` → interpretação (a observação do perfil) → `transform` → valor canónico → `review` → confirmação humana.
+
+A interpretação não é um campo novo gravado ao lado da evidência. Fica na observação e torna-se visível no `transform`, nos warnings e no excerto (`sourceExcerpt`). O valor canónico não apaga `originalText`.
+
+LLM (`F1_LLM_EXTRACT=1` e chave Groq) pode anexar uma hipótese com `authoritative: false`. Não preenche valores críticos, não entra na confiança, não confirma. Omissão da variável = desligado. Não há auto-confirmação silenciosa (ADR-017).
+
+### Perfil `unit_share` — actual
+
+Frações e permilagem. `runIngestPipeline` executa só este perfil, e o fluxo `/f1` só o chama para `kind=regulamento`. O modelo canónico, os checks (`semantic_quota_identified`, `unit_context_justifies`, `codigo_unique`, `coverage_complete`, `permilagem_sum_1000`) e os estados são os do ADR-043. Confirmar continua a ser linha a linha em `confirmFracaoLines`. Este ADR não altera essa semântica.
+
+### Perfil `budget_plan` — futuro, só contratos
+
+Documento de **orçamento previsto**. Quando o perfil existir, o candidato alinha-se com o que o domínio já sabe gravar à mão, não com entidades novas:
+
+- documento `orcamento` (`INGEST_DOCUMENT_KINDS`)
+- linha `budget_line` (`EXTRACT_LINE_KINDS`)
+- rubricas `quota_corrente`, `fcr`, `extraordinaria` (`BUDGET_LINE_KINDS`)
+- ano, título, `label`, `amountCents`, estado `draft` — os campos de `annual_budgets` / `annual_budget_lines`
+
+Distinções que o contrato tem de manter, e que esta fase não implementa:
+
+| | O que é | O que não é | Onde se escreve hoje |
+|---|---|---|---|
+| Orçamento previsto | Plano do ano, ainda por aprovar | Não é dívida nem dinheiro recebido | `createAnnualBudget` |
+| `Obligation` | Valor que uma fração deve, por rubrica e período | Não nasce do extract | `approveBudgetAndCreateObligations` |
+| `Payment` | Dinheiro recebido | Não é uma rubrica prevista | F2 |
+| `Allocation` | Imputação de um Payment a Obligations | Não é o orçamento | F2, `SettlementPolicy` |
+| Dívida / saldo | Reconstrução pelo Ledger | Não é um documento de previsão | F2 |
+
+`kind=orcamento` **não** entra no pipeline semântico. Nenhum caminho de ingest chama `createAnnualBudget` nem `approveBudgetAndCreateObligations`. A semântica dessas duas funções não muda.
+
+### Falsos positivos
+
+Um mapa de dívidas, um saldo por fração, um extrato, um aviso de débito ou um recibo com imputação trazem códigos de fração e euros. Isso não os torna `budget_plan` nem permilagem. O corpus está em [F1-INGEST-CORPUS](F1-INGEST-CORPUS.md). O mapa de dívidas é falso positivo explícito de `budget_plan`.
+
+### Não tocar
+
+- PR #31 — não fundir; não acrescentar catálogo de regex
+- Orçamento como produto (UI, extract, confirm, criação de `AnnualBudget` / `Obligation` a partir do documento)
+- F2: `Payment`, `Allocation`, `Ledger`, `SettlementPolicy`, `Quota.pago`
+- F4–F6, Orquestra, agentes, multi-agente
+- `FinancialTransaction`
+- Redesenho de Authority ou do Event Bus
+- OCR para além do que ADR-043 já usa como texto bruto
+- `F1_LLM_EXTRACT` ligado por omissão, ou LLM com autoridade sobre valores críticos
+
+**Justificação:** a mesma soma plausível que vicia a permilagem vicia a cobrança se um mapa de dívidas for lido como previsão, ou se a previsão for lançada como `Obligation` sem aprovação. O admin decide o que os checks não fecham. Um score de modelo não é essa decisão.
+
+**Impacto:** 06-FATIAS (F1), F1-IMPLEMENTACAO, 00-INDICE, F1-INGEST-CORPUS, `ingest/shared`, `ingest/profiles/unit-share`, `ingest/profiles/budget-plan` (contratos). Fora: ligar `budget_plan` ao extract/confirm.
 
 ---
 

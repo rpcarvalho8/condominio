@@ -54,8 +54,9 @@ Resumo: congelar a documentação v6.1 → implementar F0 e F1 → F2 → piloto
 | — | [AUDITORIA-COMPLEMENTAR-V61](AUDITORIA-COMPLEMENTAR-V61.md) | Existe | Análise complementar (convocatória, RecordingSegment); v6.1 permanece fechada |
 | — | [AUDITORIA-ALINHAMENTO-PRODUTO](AUDITORIA-ALINHAMENTO-PRODUTO.md) | Existe | Auditoria de alinhamento `produto` vs v6.1 |
 | — | [Diagramas de Arquitetura](LUMEN-diagramas-arquitetura.md) | Existe | Mermaid: domínio, onboarding, sequências, roadmap |
-| — | [F1-IMPLEMENTACAO](F1-IMPLEMENTACAO.md) | Implementação | Upload, revisão linha a linha, pipeline canónico ADR-043 |
+| — | [F1-IMPLEMENTACAO](F1-IMPLEMENTACAO.md) | Implementação | Upload, revisão linha a linha, pipeline ADR-043, perfis ADR-044 |
 | — | [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md) | Arquitectura F1 | 10 representações → o mesmo `CondominiumUnit` |
+| — | [F1-INGEST-CORPUS](F1-INGEST-CORPUS.md) | Arquitectura F1 | Corpus multi-perfil (ADR-044); mapa de dívidas é falso positivo de `budget_plan` |
 | — | [F3-IMPLEMENTACAO](F3-IMPLEMENTACAO.md) | Implementação | Invitation + portal Ledger + PWA (SW/offline/install) + spike iOS push FRAGILE |
 | 09 | `09-ANALISE-CODEBASE-E-PROMPTS-CURSOR.md` | **FORA DESTE PACOTE** | A incorporar quando for implementar (análise do codebase + prompts) |
 

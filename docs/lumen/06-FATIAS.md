@@ -135,7 +135,7 @@ Só com estas propriedades demonstradas — não “admin cria tenant e vê dash
 
 **GO:** após freeze v6.1, em paralelo conceptual com F0 só como vertical slice — não substituir o Domain Kernel.
 
-**Estado de código:** ver [F1-IMPLEMENTACAO.md](F1-IMPLEMENTACAO.md). Upload e revisão linha a linha já existem. A arquitectura de ingestão de unidades/quotas é o pipeline do [ADR-043](ADR-LOG.md) (intake → descoberta de estrutura → extracção semântica → canónico → validação determinística → revisão humana só na ambiguidade), com os dez exemplos em [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md). A cascata de formatos do PR #31 (regex + Groq JSON) **não** fecha F1. Convites continuam F3 (ADR-017). Não há auto-confirmação.
+**Estado de código:** ver [F1-IMPLEMENTACAO.md](F1-IMPLEMENTACAO.md). Upload e revisão linha a linha já existem. A arquitectura de ingestão de unidades/quotas é o pipeline do [ADR-043](ADR-LOG.md) (intake → descoberta de estrutura → extracção semântica → canónico → validação determinística → revisão humana só na ambiguidade), com os dez exemplos em [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md). O [ADR-044](ADR-LOG.md) põe perfis sobre esse pipeline: `unit_share` é o que corre hoje; `budget_plan` é contrato e corpus ([F1-INGEST-CORPUS](F1-INGEST-CORPUS.md)), sem extract nem confirm, e sem ligar `kind=orcamento`. A escrita de orçamento continua a ser `createAnnualBudget` / `approveBudgetAndCreateObligations` — previsão ≠ `Obligation`. A cascata de formatos do PR #31 (regex + Groq JSON) **não** fecha F1 e **não se funde**. Convites continuam F3 (ADR-017). Não há auto-confirmação.
 
 ---
 

@@ -1,6 +1,7 @@
 # F1 — Dez representações, um modelo canónico
 
 **ADR:** [ADR-043](ADR-LOG.md)  
+**Perfil:** `unit_share`. Outros perfis e falsos positivos (mapa de dívidas ≠ orçamento): [ADR-044](ADR-LOG.md), [F1-INGEST-CORPUS](F1-INGEST-CORPUS.md).  
 **Não é:** a cascata do PR #31 (delimitado → regex → Groq JSON). Esses padrões não são o contrato.
 
 Cada exemplo abaixo é uma representação diferente dos **mesmos** dois factos: a unidade A vale 600‰ e a unidade B vale 400‰. O resultado é sempre `CondominiumUnit`. A evidência e o `transform` mudam; `codigo` e `permilagem` não.
