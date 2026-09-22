@@ -107,6 +107,11 @@ describe("object-storage port", () => {
     expect(storage.driver).toBe("local");
   });
 
+  test("object-storage.ts não faz import estático de bun (Vite SSR)", () => {
+    const src = fs.readFileSync(path.join(import.meta.dir, "object-storage.ts"), "utf8");
+    expect(src).not.toMatch(/import\s*\{[^}]*S3Client[^}]*\}\s*from\s*["']bun["']/);
+  });
+
   test("S3 adapter without credentials fails closed on use, not on construct", async () => {
     snapshotEnv([
       "OBJECT_STORAGE_DRIVER",

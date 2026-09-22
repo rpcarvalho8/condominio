@@ -18,6 +18,14 @@ export default defineConfig(({ mode }) => {
 				"@": path.resolve(__dirname, "./src/web"),
 			},
 		},
+		// Bun builtins are not files on disk. Vite SSR must not try to fetchModule("bun")
+		// when loading /src/api (F1 object-storage S3 client).
+		ssr: {
+			external: ["bun"],
+		},
+		optimizeDeps: {
+			exclude: ["bun"],
+		},
 		server: {
 			host: true, // 0.0.0.0 — acessível na LAN (iPad / telemóvel)
 			port: 4200,
