@@ -207,6 +207,25 @@ export default function F1IngestaoPage() {
     },
   });
 
+  const rejectFracaoLine = useMutation({
+    mutationFn: async (line: ExtractLine) => {
+      return f1Fetch(`/documents/${selectedId}/confirm-fracoes`, {
+        method: "POST",
+        body: JSON.stringify({ confirmations: [{ lineId: line.id, reject: true }] }),
+      });
+    },
+    onSuccess: (_data, line) => {
+      setEdits((cur) => {
+        if (!(line.id in cur)) return cur;
+        const next = { ...cur };
+        delete next[line.id];
+        return next;
+      });
+      qc.invalidateQueries({ queryKey: ["f1-lines", selectedId] });
+      qc.invalidateQueries({ queryKey: ["f1-documents"] });
+    },
+  });
+
   const confirmFracoes = useMutation({
     mutationFn: async () => {
       const confirmations = pending
@@ -279,6 +298,7 @@ export default function F1IngestaoPage() {
   const actionError =
     (upload.error as Error | undefined)?.message ||
     (extractAgain.error as Error | undefined)?.message ||
+    (rejectFracaoLine.error as Error | undefined)?.message ||
     (confirmFracoes.error as Error | undefined)?.message ||
     (confirmContactos.error as Error | undefined)?.message ||
     (saveIban.error as Error | undefined)?.message ||
@@ -310,7 +330,9 @@ export default function F1IngestaoPage() {
                   <option value="regulamento">Regulamento / frações</option>
                   <option value="contactos">Contactos</option>
                   <option value="iban_proof">Comprovativo IBAN</option>
-                  <option value="orcamento">Orçamento</option>
+                  <option value="orcamento" disabled>
+                    Orçamento (só contratos · sem extracto)
+                  </option>
                 </select>
               </label>
               <label className="text-sm space-y-1 flex-1 min-w-[16rem]">
@@ -502,9 +524,25 @@ export default function F1IngestaoPage() {
                               </>
                             )}
                             {editable(line.status) && (
-                              <Button size="sm" variant="ghost" onClick={() => saveLine.mutate(line)}>
-                                Guardar edição
-                              </Button>
+                              <div className="flex flex-wrap gap-2 pt-1">
+                                <Button size="sm" variant="ghost" onClick={() => saveLine.mutate(line)}>
+                                  Guardar edição
+                                </Button>
+                                {line.kind === "fracao" && line.status === "needs_human_review" && (
+                                  <Button
+                                    size="sm"
+                                    variant="danger"
+                                    disabled={rejectFracaoLine.isPending}
+                                    loading={
+                                      rejectFracaoLine.isPending &&
+                                      rejectFracaoLine.variables?.id === line.id
+                                    }
+                                    onClick={() => rejectFracaoLine.mutate(line)}
+                                  >
+                                    Rejeitar
+                                  </Button>
+                                )}
+                              </div>
                             )}
                           </td>
                           <td className="py-3">
@@ -537,6 +575,7 @@ export default function F1IngestaoPage() {
                         permilagemSum !== 1000 ||
                         needsDecision.length > 0 ||
                         reviewDocument?.status === "needs_human_review" ||
+                        rejectFracaoLine.isPending ||
                         confirmFracoes.isPending
                       }
                       loading={confirmFracoes.isPending}

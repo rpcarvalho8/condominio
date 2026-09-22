@@ -614,6 +614,95 @@ describe("F1 HTTP upload guards", () => {
     const listBody = (await listed.json()) as { documents: Array<{ id: string }> };
     expect(listBody.documents.some((d) => d.id === body.document.id)).toBe(true);
   });
+
+  test("HTTP: cobertura incompleta → rejeitar lacuna → confirmar Σ=1000‰ sem inventar permilagem", async () => {
+    currentUser = { id: ADMIN_USER_ID, email: "admin-f1@example.test", name: "Admin F1" };
+    const form = new FormData();
+    form.set("kind", INGEST_DOCUMENT_KINDS.regulamento);
+    form.set(
+      "file",
+      new File(
+        [
+          [
+            "Fracção A ........ 600 milésimas",
+            "Fracção B ........ 400 milésimas",
+            "Fracção C ........ a preencher",
+            "",
+          ].join("\n"),
+        ],
+        "cobertura.txt",
+        { type: "text/plain" },
+      ),
+    );
+    const uploaded = await f1App.request("/f1/documents/upload", { method: "POST", body: form });
+    expect(uploaded.status).toBe(201);
+    const { document } = (await uploaded.json()) as { document: { id: string } };
+
+    const extractedRes = await f1App.request(`/f1/documents/${document.id}/extract-from-file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(extractedRes.status).toBe(201);
+    const extracted = (await extractedRes.json()) as {
+      document: { status: string };
+      lines: Array<{ id: string; status: string; payloadJson: string }>;
+    };
+    expect(extracted.document.status).toBe("needs_human_review");
+    const gap = extracted.lines.find((line) => line.status === "needs_human_review")!;
+    const ready = extracted.lines.filter((line) => line.status === "pending_review");
+    expect(ready).toHaveLength(2);
+    const gapPayload = JSON.parse(gap.payloadJson) as { permilagem: number | null };
+    expect(gapPayload.permilagem == null || !Number.isFinite(Number(gapPayload.permilagem))).toBe(
+      true,
+    );
+
+    const blocked = await f1App.request(`/f1/documents/${document.id}/confirm-fracoes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        confirmations: ready.map((line) => ({ lineId: line.id })),
+      }),
+    });
+    expect(blocked.status).toBe(400);
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(0);
+
+    // Mesmo contrato da UI Rejeitar: { lineId, reject: true } sem inventar permilagem.
+    const rejected = await f1App.request(`/f1/documents/${document.id}/confirm-fracoes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        confirmations: [{ lineId: gap.id, reject: true }],
+      }),
+    });
+    expect(rejected.status).toBe(200);
+
+    const linesAfterReject = await f1App.request(`/f1/documents/${document.id}/lines`);
+    expect(linesAfterReject.status).toBe(200);
+    const afterReject = (await linesAfterReject.json()) as {
+      document: { status: string };
+      lines: Array<{ id: string; status: string }>;
+    };
+    expect(afterReject.lines.find((line) => line.id === gap.id)?.status).toBe("rejected");
+    expect(afterReject.lines.filter((line) => line.status === "needs_human_review")).toHaveLength(0);
+
+    const confirmed = await f1App.request(`/f1/documents/${document.id}/confirm-fracoes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        confirmations: ready.map((line) => ({ lineId: line.id })),
+      }),
+    });
+    expect(confirmed.status).toBe(200);
+    const confirmedBody = (await confirmed.json()) as {
+      permilagemSum: number;
+      fracoes: Array<{ codigo: string; permilagem: number }>;
+    };
+    expect(confirmedBody.permilagemSum).toBe(1000);
+    expect(confirmedBody.fracoes).toHaveLength(2);
+    expect(confirmedBody.fracoes.every((f) => f.codigo !== "C")).toBe(true);
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(2);
+  });
 });
 
 describe("F1 pipeline ADR-043 no fluxo /f1", () => {
