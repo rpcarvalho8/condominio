@@ -13,29 +13,31 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
-    const result = await authClient.signIn.email(
-      { email, password },
-      { onSuccess: captureToken }
-    );
-    if (result.error) {
-      setLoading(false);
-      const raw = result.error.message?.trim();
-      setError(
-        raw && raw !== "Failed to create session"
-          ? raw
-          : "Email ou password incorretos. Se acabaste de repor o admin, confirma que o .env (DATABASE_URL e WEBSITE_URL) é o da app que está a correr.",
+    try {
+      const result = await authClient.signIn.email(
+        { email, password },
+        { onSuccess: captureToken }
       );
-      return;
-    }
-    const session = await authClient.getSession();
-    setLoading(false);
-    const role =
-      (session.data?.user as { role?: string } | undefined)?.role ??
-      (result.data?.user as { role?: string } | undefined)?.role;
-    if (role === "admin") {
-      navigate("/");
-    } else {
-      navigate("/portal");
+      if (result.error) {
+        const generic = "Email ou password incorretos.";
+        setError(
+          import.meta.env.DEV
+            ? `${generic} Se acabaste de repor o admin, confirma DATABASE_URL/WEBSITE_URL no .env e corre \`bun run create-admin\` se necessário.`
+            : generic,
+        );
+        return;
+      }
+      const session = await authClient.getSession();
+      const role =
+        (session.data?.user as { role?: string } | undefined)?.role ??
+        (result.data?.user as { role?: string } | undefined)?.role;
+      if (role === "admin") {
+        navigate("/");
+      } else {
+        navigate("/portal");
+      }
+    } finally {
+      setLoading(false);
     }
   }
 

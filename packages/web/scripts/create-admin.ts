@@ -5,18 +5,29 @@
  * Uso (a partir de packages/web):
  *   bun --env-file=../../.env run scripts/create-admin.ts
  *
- * Credenciais por defeito:
+ * Credenciais por defeito (só BD local file: fora de production):
  *   admin@condominio.local / admin123
+ *
+ * Remoto ou NODE_ENV=production: ADMIN_PASSWORD + ALLOW_ADMIN_BOOTSTRAP=1 obrigatórios.
  */
 
 import { createClient } from "@libsql/client";
 import { hashPassword } from "better-auth/crypto";
 import { resolve } from "path";
 import { CONDOMINIO } from "../src/api/lib/condominio";
+import {
+  authNowMs,
+  kernelNowSeconds,
+  resolveAdminBootstrap,
+} from "../src/api/lib/admin-bootstrap";
 
-const EMAIL = process.env.ADMIN_EMAIL ?? "admin@condominio.local";
-const PASSWORD = process.env.ADMIN_PASSWORD ?? "admin123";
-const NAME = process.env.ADMIN_NAME ?? "Administrador";
+const bootstrap = resolveAdminBootstrap(process.env);
+if (!bootstrap.ok) {
+  console.error(`❌ ${bootstrap.error}`);
+  process.exit(1);
+}
+
+const { email: EMAIL, password: PASSWORD, name: NAME } = bootstrap;
 
 function resolveDbUrl(raw: string | undefined): string {
   const url = raw?.trim() || "file:./local.db";
@@ -28,7 +39,7 @@ function resolveDbUrl(raw: string | undefined): string {
   return url;
 }
 
-const DB_URL = resolveDbUrl(process.env.DATABASE_URL);
+const DB_URL = resolveDbUrl(bootstrap.dbUrl);
 const client = createClient({
   url: DB_URL,
   authToken: process.env.DATABASE_AUTH_TOKEN,
@@ -49,7 +60,8 @@ async function ensureKernelAdmin(userId: string): Promise<void> {
   }
 
   const tenantId = String(process.env.TENANT_ID ?? "").trim() || CONDOMINIO.nif;
-  const now = Date.now();
+  // Kernel / Drizzle mode:"timestamp" stores unix seconds (same as seedKernelAdmin).
+  const now = kernelNowSeconds();
 
   const byUser = await client.execute({
     sql: "SELECT id FROM persons WHERE user_id = ? LIMIT 1",
@@ -100,9 +112,13 @@ async function ensureKernelAdmin(userId: string): Promise<void> {
 
 async function main() {
   console.log(`DB: ${DB_URL.startsWith("file:") ? DB_URL : "[remote]"}`);
+  if (bootstrap.usedWeakDefaultPassword) {
+    console.log("ℹ️  A usar password fraca por defeito (só permitido em BD file: local).");
+  }
 
   const hashedPw = await hashPassword(PASSWORD);
-  const now = Date.now();
+  // better-auth user/account rows in this project already use ms (Date.now()).
+  const now = authNowMs();
 
   const existing = await client.execute({
     sql: `SELECT id FROM "user" WHERE email = ? LIMIT 1`,
