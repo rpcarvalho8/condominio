@@ -3,6 +3,7 @@
  * Não decide permilagem final nem confirma nada.
  */
 import type { DiscoveredStructure, StructureRow } from "./intake";
+import type { UnitShareObservation } from "./profiles/unit-share";
 import {
   bestNumber,
   classifyHeader,
@@ -13,21 +14,9 @@ import {
   selectCodigo,
   tokenize,
   type ColumnRole,
-  type UnitCue,
 } from "./roles";
 
-export type Observation = {
-  codigo: string | null;
-  ambiguousIdentifier: boolean;
-  designation: string;
-  valueRaw: string | null;
-  valueNumber: number | null;
-  unitCue: UnitCue;
-  page: number | null;
-  line: number;
-  cell: string | null;
-  rowText: string;
-};
+export type Observation = UnitShareObservation;
 
 function roleIndex(headers: string[], role: ColumnRole): number {
   return headers.findIndex((header) => classifyHeader(header) === role);

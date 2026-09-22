@@ -90,6 +90,8 @@ export async function extractDocumentFromStoredContent(
   let pipeline = null;
   try {
     if (doc.kind === INGEST_DOCUMENT_KINDS.regulamento) {
+      // Único perfil ligado ao pipeline semântico: unit_share (ADR-044).
+      // kind=orcamento fica no extractor antigo e não cria AnnualBudget nem Obligation.
       const result = await runIngestPipeline({
         bytes,
         filename: doc.filename,

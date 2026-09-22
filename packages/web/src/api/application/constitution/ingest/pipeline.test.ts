@@ -13,6 +13,7 @@ import {
   MIXED_UNITS,
   SUM_MISMATCH,
 } from "./examples";
+import { corpusExample } from "./profiles/corpus";
 import { runIngestPipeline } from "./pipeline";
 
 const ENV_KEYS = ["F1_LLM_EXTRACT", "GROQ_API_KEY"] as const;
@@ -60,6 +61,7 @@ describe("F1 pipeline — dez representações, um modelo", () => {
       expect(perm?.originalText).toBe(doc.originalA);
       expect(perm?.transform).toBe(doc.transform);
       expect(perm?.documentName).toBe(doc.filename);
+      expect(result.summary.profile).toBe("unit_share");
       expect(result.summary.needsHumanDecision).toBe(0);
       expect(result.summary.readyForConfirmation).toBe(2);
       expect(result.summary.blocking).toEqual([]);
@@ -156,6 +158,24 @@ describe("F1 pipeline — ambiguidade fica visível", () => {
     const perm = result.units[0]!.evidence.find((item) => item.field === "permilagem");
     expect(perm?.page).toBe(3);
     expect(perm?.originalText).toBe("600");
+  });
+});
+
+describe("F1 pipeline — mapa de dívidas não é orçamento nem permilagem", () => {
+  test("euros em atraso ficam no perfil unit_share sem permilagem", async () => {
+    rememberEnv();
+    const debt = corpusExample("09-debt-map");
+    expect(debt.budgetPlanVerdict).toBe("false_positive");
+    const result = await runText("dividas.txt", debt.text);
+    expect(result.summary.profile).toBe("unit_share");
+    expect(result.units.map((unit) => unit.codigo)).toEqual(["A", "B"]);
+    expect(result.units.every((unit) => unit.permilagem == null)).toBe(true);
+    expect(result.units.every((unit) => unit.review === "needs_human_review")).toBe(true);
+    expect(result.units.every((unit) => unit.warnings.some((warning) => warning.code === "ambiguous_unit"))).toBe(
+      true,
+    );
+    expect(JSON.stringify(result)).not.toContain("budget_plan");
+    expect(JSON.stringify(result)).not.toContain("obligation");
   });
 });
 

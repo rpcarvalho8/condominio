@@ -27,7 +27,7 @@ import { assertSha256ContentHash } from "../../infra/content-blob-store";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
-import type { IngestPipelineSummary } from "./ingest/contracts";
+import { UNIT_SHARE_PROFILE_ID, type IngestPipelineSummary } from "./ingest/contracts";
 
 type Actor = {
   personId?: string | null;
@@ -191,6 +191,7 @@ async function refreshFracaoReviewState(deps: KernelDeps, documentId: string) {
     ? (JSON.parse(doc.pipelineJson) as IngestPipelineSummary)
     : null;
   const summary: IngestPipelineSummary = {
+    profile: previous?.profile ?? UNIT_SHARE_PROFILE_ID,
     representation: previous?.representation ?? "unknown",
     informationPresent: previous?.informationPresent ?? [],
     readyForConfirmation: open.filter((line) => line.status === EXTRACT_LINE_STATUS.pendingReview).length,

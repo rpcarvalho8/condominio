@@ -6,6 +6,7 @@ import { PERMILAGEM_TOTAL } from "../../../domain/constitution";
 import {
   INGEST_STAGES,
   REVIEW_STATE,
+  UNIT_SHARE_PROFILE_ID,
   type CanonicalUnit,
   type IngestPipelineSummary,
   type LlmHypothesis,
@@ -133,6 +134,7 @@ export function validateDrafts(input: {
   return {
     units,
     summary: {
+      profile: UNIT_SHARE_PROFILE_ID,
       representation: input.representation,
       informationPresent: input.informationPresent,
       readyForConfirmation: units.filter((unit) => unit.review === REVIEW_STATE.pendingReview).length,

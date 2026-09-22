@@ -3,6 +3,7 @@
  * Normaliza unidade só quando o contexto do documento o justifica.
  */
 import type { CanonicalOrigin, CanonicalWarning, FieldEvidence } from "./contracts";
+import { fieldEvidenceFromObservation, toDocumentObservation } from "./profiles/unit-share";
 import type { Observation } from "./semantic-extraction";
 
 export type DraftUnit = {
@@ -25,17 +26,13 @@ function evidence(input: {
   transform: string | null;
   region: string | null;
 }): FieldEvidence {
-  return {
+  return fieldEvidenceFromObservation({
     field: input.field,
     documentId: input.documentId,
     documentName: input.documentName,
-    page: input.observation.page,
-    line: input.observation.line,
-    cell: input.observation.cell,
-    region: input.region,
-    originalText: input.originalText,
+    observation: toDocumentObservation(input.observation, input.region, input.originalText),
     transform: input.transform,
-  };
+  });
 }
 
 export function canonicalizeObservations(input: {

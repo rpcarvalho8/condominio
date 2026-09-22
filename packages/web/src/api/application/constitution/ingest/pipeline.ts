@@ -1,5 +1,6 @@
 /**
- * Orquestra o pipeline F1. Para antes da confirmação humana.
+ * Orquestra o perfil unit_share (ADR-044). Para antes da confirmação humana.
+ * Documentos de orçamento não entram aqui.
  */
 import { EXTRACT_LINE_KINDS, type StructuredExtraction } from "../../../domain/constitution";
 import { canonicalizeObservations } from "./canonicalize";
