@@ -23,6 +23,7 @@ export const INGEST_DOCUMENT_STATUS = {
   uploaded: "uploaded",
   extracting: "extracting",
   pendingReview: "pending_review",
+  needsHumanReview: "needs_human_review",
   partiallyConfirmed: "partially_confirmed",
   confirmed: "confirmed",
   failed: "failed",
@@ -30,6 +31,7 @@ export const INGEST_DOCUMENT_STATUS = {
 
 export const EXTRACT_LINE_STATUS = {
   pendingReview: "pending_review",
+  needsHumanReview: "needs_human_review",
   confirmed: "confirmed",
   rejected: "rejected",
 } as const;
@@ -81,5 +83,7 @@ export type StructuredExtraction = {
     payload: Record<string, unknown>;
     sourceExcerpt: string;
     confidence?: number;
+    /** Gate de revisão do pipeline. Omisso = pending_review. Nunca confirma. */
+    status?: "pending_review" | "needs_human_review";
   }>;
 };

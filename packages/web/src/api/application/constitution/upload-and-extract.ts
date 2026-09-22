@@ -11,6 +11,7 @@ import { createObjectStorageFromEnv } from "../../infra/object-storage";
 import { registerContentUpload } from "../uploads/register-content-upload";
 import { extractDocumentLines, registerIngestDocument } from "./f1-constitution";
 import { extractStructuredFromBytes } from "./extractors/structured-extractor";
+import { pipelineToStructuredExtraction, runIngestPipeline } from "./ingest/pipeline";
 
 type Actor = {
   personId?: string | null;
@@ -86,12 +87,32 @@ export async function extractDocumentFromStoredContent(
   });
 
   let extraction;
+  let pipeline = null;
   try {
-    extraction = await extractStructuredFromBytes({
-      bytes,
-      filename: doc.filename,
-      documentKind: doc.kind,
-    });
+    if (doc.kind === INGEST_DOCUMENT_KINDS.regulamento) {
+      // Único perfil ligado ao pipeline semântico: unit_share (ADR-044).
+      // kind=orcamento fica no extractor antigo e não cria AnnualBudget nem Obligation.
+      const result = await runIngestPipeline({
+        bytes,
+        filename: doc.filename,
+        documentId: doc.id,
+      });
+      pipeline = result.summary;
+      if (result.units.length === 0) {
+        throw new DomainError(
+          "human_review",
+          "HUMAN REVIEW: o documento não tem unidades/quotas identificáveis. Nada foi confirmado nem enviado (ADR-017).",
+          400,
+        );
+      }
+      extraction = pipelineToStructuredExtraction(result);
+    } else {
+      extraction = await extractStructuredFromBytes({
+        bytes,
+        filename: doc.filename,
+        documentKind: doc.kind,
+      });
+    }
   } catch (err) {
     if (err instanceof DomainError && err.code === "already_extracted") throw err;
     const message = err instanceof Error ? err.message : "extração falhou";
@@ -134,6 +155,7 @@ export async function extractDocumentFromStoredContent(
     tenantId: input.tenantId,
     documentId: doc.id,
     extraction,
+    pipeline,
     actor: input.actor,
   });
 }

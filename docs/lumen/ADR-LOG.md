@@ -667,6 +667,152 @@ O piloto **não** autoriza a omitir invariantes de domínio (dinheiro, Ledger, A
 
 ---
 
+## ADR-043 — Ingestão F1 é um pipeline canónico, não uma cascata de formatos
+
+**Estado:** ACEITE (arquitectura de produto F1). A ligação mínima ao fluxo `/f1` existente não fecha F1 operacional nem autoriza auto-confirmação.
+
+**Decisão:**
+
+A promessa de F1 não é «compreender qualquer documento». É: qualquer representação razoável de unidades e quotas de um condomínio pode ser levada ao modelo canónico LUMEN sem o admin pré-formatar o ficheiro; quando há ambiguidade, o sistema mostra exactamente o que falta decidir, com a evidência original.
+
+O pipeline, por esta ordem:
+
+1. **Document Intake** — bytes, nome, hash. Upload ≠ confirmação (ADR-017).
+2. **Structure Discovery** — que informação existe, e só depois como está representada (tabela, pares chave-valor, prosa, desconhecido). Não começa por «é CSV?» nem por um padrão de regex.
+3. **Semantic Extraction** — observações de código, designação, valor e pista de unidade. Interpretação, ainda não verdade.
+4. **Canonicalization** — modelo `CondominiumUnit`. Normalização de unidade (por exemplo % → ‰) só quando o contexto do documento a justifica, com o transform registado.
+5. **Deterministic Validation** — confiança construída pelo sistema a partir de verificações, nunca a partir de um score de LLM.
+6. **Human Review** — só onde a validação encontra ambiguidade real. Linhas coerentes continuam a exigir confirmação humana linha a linha antes de existir `Fracao` ou `Obligation`.
+
+Distinções que o código tem de manter separadas: **extracção ≠ interpretação ≠ validação ≠ confirmação.**
+
+Modelo canónico (pequeno):
+
+| Campo | Significado |
+|---|---|
+| `codigo` | Identificador da unidade |
+| `designacao_original` | Texto tal como aparece |
+| `permilagem` | Valor em ‰ quando a unidade é conhecida; vazio quando não se pode afirmar |
+| `origem` | Representação descoberta (`table`, `key_value`, `prose`) — não o nome de um regex |
+| `evidence` | Por campo, quando possível: documento, página / linha / célula / região, texto original, transform |
+| `confidence` | Score e lista de checks do sistema (`source: system_checks`) |
+| `warnings` | Ambiguidade visível; nunca descartada em silêncio |
+
+Evidência pretendida: «A → 600‰ porque se encontrou “Fracção A …… 600 milésimas” na linha 2» ou «coluna=Permilagem, linha=A, valor=600, unidade=‰».
+
+Estados:
+
+| Estado | Onde | Significado |
+|---|---|---|
+| `pending_review` | linha e documento | Candidato coerente. Ainda não é `Fracao`. O admin confirma linha a linha. |
+| `needs_human_review` | linha e/ou documento | Ambiguidade real. Confirmar o resto do lote está bloqueado — não se importam 29 de 37 unidades aparentes. |
+
+Verificações determinísticas obrigatórias:
+
+- identificação semântica de quota / permilagem (cabeçalho ou pista no texto: permilagem, milésimas, ‰, percentagem);
+- normalização de unidade só com contexto (todas as pistas são percentagem e a soma é 100 → `percent_to_permille:*10`);
+- unicidade de `codigo`;
+- cobertura: uma unidade aparente sem valor entra no resultado com `permilagem` vazia e `needs_human_review`;
+- Σ permilagens = 1000‰ quando todas as unidades têm valor em ‰;
+- unidade ambígua (`valor`, `quota`, mistura de ‰ e % no mesmo documento) → `needs_human_review`. Não se adivinha.
+
+Métrica de F1: quantas decisões humanas restam depois da análise (por exemplo 2 linhas prontas com evidência, 1 decisão de unidade em aberto). «Pronta» não escreve frações. Não há auto-confirmação silenciosa.
+
+LLM (`F1_LLM_EXTRACT=1` e chave Groq) pode anexar uma hipótese de estrutura. Essa hipótese não é autoridade: não preenche `permilagem`, não entra na confiança, não confirma. CI e omissão da variável = desligado (`F1_LLM_EXTRACT=0`).
+
+**O que isto não é.** A cascata do PR #31 (tabela delimitada → padrões regex → Groq JSON → revisão humana) é um parser mais tolerante com fallback de LLM. Não é o fecho de F1. Não responde primeiro a «que informação existe?». Não separa extracção, interpretação, validação e confirmação. Não constrói confiança a partir de evidência verificável. **Não fundir o #31. Não acrescentar regex de formato. Não introduzir arquitectura de agentes.** Extractores já existentes podem servir de fonte de texto bruto (OCR stub, grelha Excel); não crescem como catálogo de padrões.
+
+Dez representações que caem no mesmo modelo estão em [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md).
+
+**Justificação:** trocar permilagens ou importar um subconjunto mantém uma soma plausível e vicia a cobrança (invariante 1). Um score de modelo não é essa verificação. O admin tem de ver a origem de cada valor e decidir só o que o sistema não conseguiu verificar.
+
+**Impacto:** 06-FATIAS (F1), F1-IMPLEMENTACAO, F1-INGEST-EXEMPLOS, fluxo `/f1` (`StructuredExtraction`, `sourceExcerpt`, confirmação linha a linha). Perfis sobre este pipeline: [ADR-044](#adr-044--ingestão-f1-tem-perfis-sobre-o-mesmo-pipeline). Fora deste ADR: F4+, atas, voto, PWA, Invitation, `Quota.pago`, QR, Authority, Event Bus, Orquestra, multi-agente.
+
+---
+
+## ADR-044 — Ingestão F1 tem perfis sobre o mesmo pipeline
+
+**Estado:** ACEITE como arquitectura de Fase B (2026-09-22). O perfil `unit_share` é o único executado. O perfil `budget_plan` fica em contratos e no corpus — não há extracção, confirmação, nem escrita de orçamento a partir de documento. Não funde o PR #31. Não implementa Orçamento.
+
+**Contexto:** o ADR-043 fixa a sequência para unidades e permilagem. F1 também prevê orçamento anual (06-FATIAS), e o domínio já separa orçamento previsto, `Obligation`, `Payment`, `Allocation` e saldo (ADR-003, 02-DOMINIO). A escrita que existe hoje é `createAnnualBudget` (draft, rubricas `quota_corrente` / `fcr` / `extraordinaria`) e `approveBudgetAndCreateObligations` (só com frações confirmadas e Σ = 1000‰). Um segundo pipeline, ou ligar `kind=orcamento` ao extractor de permilagem, apagava essa separação.
+
+**Decisão:**
+
+Há uma camada partilhada e perfis por cima. A sequência não se duplica:
+
+1. **Document Intake** — bytes, nome, hash. Upload ≠ confirmação (ADR-017).
+2. **Structure Discovery** — que informação existe, e só depois a representação (tabela, pares chave-valor, prosa, desconhecido).
+3. **Semantic Extraction** — observações. Interpretação, ainda não verdade.
+4. **Canonicalization** — o modelo do perfil. Transform registado; o texto original mantém-se.
+5. **Deterministic Validation** — confiança só de `SystemCheck`, nunca de um score de LLM.
+6. **Human Review** — só na ambiguidade real, e mesmo as linhas coerentes exigem confirmação humana explícita.
+
+Contratos partilhados (não são tabelas de domínio):
+
+| Contrato | Papel |
+|---|---|
+| `DocumentObservation` | Página, linha, célula, região e `originalText`. Ainda não é valor canónico. |
+| `FieldEvidence` | O mesmo sítio, mais o campo e o `transform`. |
+| `SystemCheck` | Verificação determinística (`id`, `passed`, `detail`). |
+| `ReviewState` | `pending_review` ou `needs_human_review`. Nenhum dos dois confirma. |
+| `IngestPipelineSummary` | Perfil, representação, checks, bloqueios, `readyForConfirmation`, `needsHumanDecision`. |
+
+KPI: quantas decisões humanas restam depois da análise (`needsHumanDecision`). «Pronta» não escreve `Fracao` nem `Obligation`.
+
+Cadeia de evidência, sem saltos e sem substituir o texto de origem:
+
+documento → página / linha / célula / região → `originalText` → interpretação (a observação do perfil) → `transform` → valor canónico → `review` → confirmação humana.
+
+A interpretação não é um campo novo gravado ao lado da evidência. Fica na observação e torna-se visível no `transform`, nos warnings e no excerto (`sourceExcerpt`). O valor canónico não apaga `originalText`.
+
+LLM (`F1_LLM_EXTRACT=1` e chave Groq) pode anexar uma hipótese com `authoritative: false`. Não preenche valores críticos, não entra na confiança, não confirma. Omissão da variável = desligado. Não há auto-confirmação silenciosa (ADR-017).
+
+### Perfil `unit_share` — actual
+
+Frações e permilagem. `runIngestPipeline` executa só este perfil, e o fluxo `/f1` só o chama para `kind=regulamento`. O modelo canónico, os checks (`semantic_quota_identified`, `unit_context_justifies`, `codigo_unique`, `coverage_complete`, `permilagem_sum_1000`) e os estados são os do ADR-043. Confirmar continua a ser linha a linha em `confirmFracaoLines`. Este ADR não altera essa semântica.
+
+### Perfil `budget_plan` — futuro, só contratos
+
+Documento de **orçamento previsto**. Quando o perfil existir, o candidato alinha-se com o que o domínio já sabe gravar à mão, não com entidades novas:
+
+- documento `orcamento` (`INGEST_DOCUMENT_KINDS`)
+- linha `budget_line` (`EXTRACT_LINE_KINDS`)
+- rubricas `quota_corrente`, `fcr`, `extraordinaria` (`BUDGET_LINE_KINDS`)
+- ano, título, `label`, `amountCents`, estado `draft` — os campos de `annual_budgets` / `annual_budget_lines`
+
+Distinções que o contrato tem de manter, e que esta fase não implementa:
+
+| | O que é | O que não é | Onde se escreve hoje |
+|---|---|---|---|
+| Orçamento previsto | Plano do ano, ainda por aprovar | Não é dívida nem dinheiro recebido | `createAnnualBudget` |
+| `Obligation` | Valor que uma fração deve, por rubrica e período | Não nasce do extract | `approveBudgetAndCreateObligations` |
+| `Payment` | Dinheiro recebido | Não é uma rubrica prevista | F2 |
+| `Allocation` | Imputação de um Payment a Obligations | Não é o orçamento | F2, `SettlementPolicy` |
+| Dívida / saldo | Reconstrução pelo Ledger | Não é um documento de previsão | F2 |
+
+`kind=orcamento` **não** entra no pipeline semântico. Nenhum caminho de ingest chama `createAnnualBudget` nem `approveBudgetAndCreateObligations`. A semântica dessas duas funções não muda.
+
+### Falsos positivos
+
+Um mapa de dívidas, um saldo por fração, um extrato, um aviso de débito ou um recibo com imputação trazem códigos de fração e euros. Isso não os torna `budget_plan` nem permilagem. O corpus está em [F1-INGEST-CORPUS](F1-INGEST-CORPUS.md). O mapa de dívidas é falso positivo explícito de `budget_plan`.
+
+### Não tocar
+
+- PR #31 — não fundir; não acrescentar catálogo de regex
+- Orçamento como produto (UI, extract, confirm, criação de `AnnualBudget` / `Obligation` a partir do documento)
+- F2: `Payment`, `Allocation`, `Ledger`, `SettlementPolicy`, `Quota.pago`
+- F4–F6, Orquestra, agentes, multi-agente
+- `FinancialTransaction`
+- Redesenho de Authority ou do Event Bus
+- OCR para além do que ADR-043 já usa como texto bruto
+- `F1_LLM_EXTRACT` ligado por omissão, ou LLM com autoridade sobre valores críticos
+
+**Justificação:** a mesma soma plausível que vicia a permilagem vicia a cobrança se um mapa de dívidas for lido como previsão, ou se a previsão for lançada como `Obligation` sem aprovação. O admin decide o que os checks não fecham. Um score de modelo não é essa decisão.
+
+**Impacto:** 06-FATIAS (F1), F1-IMPLEMENTACAO, 00-INDICE, F1-INGEST-CORPUS, `ingest/shared`, `ingest/profiles/unit-share`, `ingest/profiles/budget-plan` (contratos). Fora: ligar `budget_plan` ao extract/confirm.
+
+---
+
 ## Itens Tier 3 — Documentados como Visão Futura, Não Backlog Atual
 
 Não são ADRs (não há decisão de arquitetura a fixar agora), mas ficam registados para não se perderem nem serem reintroduzidos como scope creep prematuro:

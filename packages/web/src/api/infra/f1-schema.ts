@@ -22,8 +22,10 @@ const DDL = [
     created_at INTEGER NOT NULL,
     created_by_person_id TEXT,
     processed_at INTEGER,
-    error TEXT
+    error TEXT,
+    pipeline_json TEXT
   )`,
+  `ALTER TABLE ingest_documents ADD COLUMN pipeline_json TEXT`,
   `CREATE INDEX IF NOT EXISTS ingest_documents_tenant_status_idx
     ON ingest_documents (tenant_id, status)`,
   `CREATE INDEX IF NOT EXISTS ingest_documents_tenant_kind_idx

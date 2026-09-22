@@ -1,7 +1,29 @@
 # F1 — Estado de implementação
 
 **Branch:** `produto` (MinIO local via #21; tip pós-merge)  
-**Base documental:** `docs/lumen/06-FATIAS.md` (F1 — Ingestão + Constituição)
+**Base documental:** `docs/lumen/06-FATIAS.md` (F1 — Ingestão + Constituição), [ADR-043](ADR-LOG.md), [ADR-044](ADR-LOG.md)
+
+## Pipeline de unidades / permilagem (ADR-043)
+
+F1 não fecha quando um parser aceita mais formatos. A cascata do **PR #31** — tabela delimitada → padrões regex → Groq JSON → revisão humana — melhora a tolerância de formato e usa o LLM como fallback. Isso **não** é o sistema de ingestão F1: não pergunta primeiro que informação existe no documento, não separa extracção, interpretação, validação e confirmação, e trata um score de modelo como se fosse confiança. **Não fundir o #31. Não acrescentar regex de formato. Não há arquitectura de agentes.**
+
+O pipeline aceite é:
+
+`Document Intake → Structure Discovery → Semantic Extraction → Canonicalization → Deterministic Validation → Human Review` (só na ambiguidade real).
+
+Contrato e estados (`pending_review` vs `needs_human_review`): ADR-043. Dez documentos diferentes que caem no mesmo modelo canónico: [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md).
+
+## Perfis (ADR-044) — Fase B
+
+O pipeline é um só. O perfil em execução é `unit_share` (frações / permilagem), e só para `kind=regulamento`. Contratos partilhados: `DocumentObservation`, `FieldEvidence`, `SystemCheck`, `ReviewState`, `IngestPipelineSummary`. O KPI continua a ser quantas decisões humanas restam.
+
+`budget_plan` existe como contrato e no [corpus](F1-INGEST-CORPUS.md). Não há extract nem confirm. `kind=orcamento` não entra no pipeline semântico. `createAnnualBudget` e `approveBudgetAndCreateObligations` mantêm a semântica actual: orçamento previsto em draft, e `Obligation` só na aprovação, com frações já confirmadas. Orçamento previsto ≠ `Obligation` ≠ `Payment` ≠ dívida/saldo ≠ `Allocation`. O mapa de dívidas do corpus é falso positivo de `budget_plan`.
+
+Não fundir o #31. Não implementar Orçamento neste slice. Não tocar: F2 (`Payment`, `Allocation`, `Ledger`, `SettlementPolicy`, `Quota.pago`), F4–F6, Orquestra/agentes, `FinancialTransaction`, Authority, Event Bus.
+
+Ligação mínima já no fluxo existente: `POST /api/f1/documents/:id/extract-from-file` para `regulamento` corre o pipeline e devolve `StructuredExtraction` com `sourceExcerpt`. A UI `/f1` mostra a evidência, a confiança do sistema e quantas decisões humanas faltam. Upload e extracção não criam `Fracao` nem `Obligation`. Linhas `needs_human_review` bloqueiam a confirmação do lote. `F1_LLM_EXTRACT` omisso ou `0` no CI; Groq só se a variável for `1` e houver chave — e mesmo assim a hipótese não confirma valores.
+
+A métrica visível na revisão é quantas linhas estão prontas com evidência e quantas decisões humanas ainda faltam. Pronta ≠ confirmada.
 
 F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` via #19. O driver S3-compatible (env, fail-closed) entrou via #20. **Este slice é só validação técnica local com MinIO.** Não declara staging/prod ready. Não expande o produto.
 
