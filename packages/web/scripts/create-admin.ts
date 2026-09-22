@@ -8,7 +8,8 @@
  * Credenciais por defeito (só BD local file: fora de production):
  *   admin@condominio.local / admin123
  *
- * Remoto ou NODE_ENV=production: ADMIN_PASSWORD + ALLOW_ADMIN_BOOTSTRAP=1 obrigatórios.
+ * Remoto ou NODE_ENV=production: ALLOW_REMOTE_ADMIN_SEED=1 e ADMIN_PASSWORD
+ * explícito. Não há password por defeito nesse caso.
  */
 
 import { createClient } from "@libsql/client";
@@ -16,7 +17,7 @@ import { hashPassword } from "better-auth/crypto";
 import { resolve } from "path";
 import { CONDOMINIO } from "../src/api/lib/condominio";
 import {
-  authNowMs,
+  formatAdminCredentialReport,
   kernelNowSeconds,
   resolveAdminBootstrap,
 } from "../src/api/lib/admin-bootstrap";
@@ -112,13 +113,17 @@ async function ensureKernelAdmin(userId: string): Promise<void> {
 
 async function main() {
   console.log(`DB: ${DB_URL.startsWith("file:") ? DB_URL : "[remote]"}`);
-  if (bootstrap.usedWeakDefaultPassword) {
-    console.log("ℹ️  A usar password fraca por defeito (só permitido em BD file: local).");
+  if (bootstrap.restrictedTarget) {
+    console.warn(
+      "AVISO: ALLOW_REMOTE_ADMIN_SEED=1 — a seed vai escrever credenciais numa base remota ou com NODE_ENV=production. Não uses passwords de desenvolvimento.",
+    );
+  } else if (bootstrap.usedWeakDefaultPassword) {
+    console.log("ℹ️  A usar password fraca por defeito (só permitido em BD file: local, fora de produção).");
   }
 
   const hashedPw = await hashPassword(PASSWORD);
-  // better-auth user/account rows in this project already use ms (Date.now()).
-  const now = authNowMs();
+  // user/account usam integer mode "timestamp" (segundos), como persons/memberships.
+  const now = kernelNowSeconds();
 
   const existing = await client.execute({
     sql: `SELECT id FROM "user" WHERE email = ? LIMIT 1`,
@@ -173,10 +178,13 @@ async function main() {
 
   await ensureKernelAdmin(userId);
 
-  console.log(`   Email:    ${EMAIL}`);
-  console.log(`   Password: ${PASSWORD}`);
-  console.log("   Abre http://localhost:4200/login com estas credenciais.");
-  console.log("   Confirma que WEBSITE_URL no .env é exactamente a origem que usas no browser.");
+  console.log(
+    formatAdminCredentialReport({
+      email: EMAIL,
+      password: PASSWORD,
+      restrictedTarget: bootstrap.restrictedTarget,
+    }),
+  );
 }
 
 main()

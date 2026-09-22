@@ -138,13 +138,15 @@ bun run dev
 # → http://localhost:4200
 ```
 
-Primeiro admin (ou repor password) na BD de `DATABASE_URL`:
+Primeiro admin (ou repor password), **apenas em desenvolvimento local** (`DATABASE_URL` com `file:`, fora de produção):
 
 ```bash
 cd packages/web
 bun run create-admin
-# default: admin@condominio.local / admin123
+# só local/dev — nunca produção: admin@condominio.local / admin123
 ```
+
+`admin@condominio.local` / `admin123` é uma credencial de desenvolvimento local. Nunca a uses em produção nem contra uma base remota. O script recusa `DATABASE_URL` que não seja SQLite `file:` (e também `NODE_ENV=production`) salvo `ALLOW_REMOTE_ADMIN_SEED=1` com `ADMIN_PASSWORD` explícito — nesse caso avisa e não usa a password por defeito.
 
 O script **não apaga** o user: actualiza a password com o hash do better-auth e liga `Person` + Membership Admin se o schema kernel existir. `WEBSITE_URL` no `.env` tem de ser a mesma origem do browser (ex. `http://localhost:4200`).
 

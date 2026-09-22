@@ -20,11 +20,11 @@ export default function LoginPage() {
       );
       if (result.error) {
         const generic = "Email ou password incorretos.";
-        setError(
-          import.meta.env.DEV
-            ? `${generic} Se acabaste de repor o admin, confirma DATABASE_URL/WEBSITE_URL no .env e corre \`bun run create-admin\` se necessário.`
-            : generic,
-        );
+        const raw = result.error.message?.trim() ?? "";
+        if (import.meta.env.DEV && raw) {
+          console.error("[login]", raw);
+        }
+        setError(import.meta.env.DEV && raw ? `${generic} ${raw}` : generic);
         return;
       }
       const session = await authClient.getSession();

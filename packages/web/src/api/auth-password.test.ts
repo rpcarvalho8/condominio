@@ -3,7 +3,7 @@ import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { randomBytes, scrypt } from "crypto";
 import { promisify } from "util";
 import {
-  authNowMs,
+  formatAdminCredentialReport,
   isBetterAuthPasswordHash,
   isLocalFileDatabaseUrl,
   kernelNowSeconds,
@@ -56,20 +56,22 @@ describe("create-admin bootstrap guards", () => {
     expect(r.usedWeakDefaultPassword).toBe(false);
   });
 
-  test("remoto sem ALLOW_ADMIN_BOOTSTRAP é recusado", () => {
+  test("remoto sem ALLOW_REMOTE_ADMIN_SEED é recusado", () => {
     const r = resolveAdminBootstrap({
       DATABASE_URL: "libsql://example.turso.io",
       ADMIN_PASSWORD: "secret",
     });
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.error).toContain("ALLOW_ADMIN_BOOTSTRAP=1");
+    expect(r.error).toContain("ALLOW_REMOTE_ADMIN_SEED=1");
+    expect(r.error).not.toContain(WEAK_DEFAULT_ADMIN_PASSWORD);
+    expect(r.error).not.toContain("Password:");
   });
 
   test("remoto sem ADMIN_PASSWORD é recusado mesmo com ALLOW", () => {
     const r = resolveAdminBootstrap({
       DATABASE_URL: "libsql://example.turso.io",
-      ALLOW_ADMIN_BOOTSTRAP: "1",
+      ALLOW_REMOTE_ADMIN_SEED: "1",
     });
     expect(r.ok).toBe(false);
     if (r.ok) return;
@@ -77,7 +79,28 @@ describe("create-admin bootstrap guards", () => {
     expect(r.error).not.toContain(WEAK_DEFAULT_ADMIN_PASSWORD);
   });
 
-  test("remoto com ALLOW + ADMIN_PASSWORD é permitido", () => {
+  test("remoto com ALLOW_REMOTE_ADMIN_SEED + ADMIN_PASSWORD é permitido e avisa", () => {
+    const r = resolveAdminBootstrap({
+      DATABASE_URL: "libsql://example.turso.io",
+      ALLOW_REMOTE_ADMIN_SEED: "1",
+      ADMIN_PASSWORD: "prod-secret",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.password).toBe("prod-secret");
+    expect(r.usedWeakDefaultPassword).toBe(false);
+    expect(r.restrictedTarget).toBe(true);
+    const report = formatAdminCredentialReport({
+      email: r.email,
+      password: r.password,
+      restrictedTarget: true,
+    });
+    expect(report).toContain("Password: prod-secret");
+    expect(report).toContain("AVISO");
+    expect(report).not.toContain(WEAK_DEFAULT_ADMIN_PASSWORD);
+  });
+
+  test("ALLOW_ADMIN_BOOTSTRAP=1 continua a autorizar o alvo remoto", () => {
     const r = resolveAdminBootstrap({
       DATABASE_URL: "libsql://example.turso.io",
       ALLOW_ADMIN_BOOTSTRAP: "1",
@@ -85,8 +108,7 @@ describe("create-admin bootstrap guards", () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.password).toBe("prod-secret");
-    expect(r.usedWeakDefaultPassword).toBe(false);
+    expect(r.restrictedTarget).toBe(true);
   });
 
   test("NODE_ENV=production em file: exige ALLOW + ADMIN_PASSWORD", () => {
@@ -100,14 +122,14 @@ describe("create-admin bootstrap guards", () => {
     const noPass = resolveAdminBootstrap({
       DATABASE_URL: "file:./local.db",
       NODE_ENV: "production",
-      ALLOW_ADMIN_BOOTSTRAP: "1",
+      ALLOW_REMOTE_ADMIN_SEED: "1",
     });
     expect(noPass.ok).toBe(false);
 
     const ok = resolveAdminBootstrap({
       DATABASE_URL: "file:./local.db",
       NODE_ENV: "production",
-      ALLOW_ADMIN_BOOTSTRAP: "1",
+      ALLOW_REMOTE_ADMIN_SEED: "1",
       ADMIN_PASSWORD: "prod-only",
     });
     expect(ok.ok).toBe(true);
@@ -124,11 +146,9 @@ describe("create-admin bootstrap guards", () => {
 });
 
 describe("timestamp units", () => {
-  test("kernel persons/memberships usam segundos; auth user/account mantém ms", () => {
+  test("drizzle mode timestamp (kernel e user/account) usa segundos", () => {
     const ms = 1_700_000_000_123;
     expect(kernelNowSeconds(ms)).toBe(1_700_000_000);
-    expect(authNowMs(ms)).toBe(ms);
-    expect(kernelNowSeconds(ms)).toBeLessThan(1_000_000_000_000);
-    expect(authNowMs(ms)).toBeGreaterThan(1_000_000_000_000);
+    expect(kernelNowSeconds(ms)).toBeLessThan(10_000_000_000);
   });
 });
