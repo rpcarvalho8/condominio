@@ -13,21 +13,31 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
-    const result = await authClient.signIn.email(
-      { email, password },
-      { onSuccess: captureToken }
-    );
-    setLoading(false);
-    if (result.error) {
-      setError("Email ou password incorretos");
-      return;
-    }
-    // Redirect based on role
-    const user = result.data?.user as any;
-    if (user?.role === "admin") {
-      navigate("/");
-    } else {
-      navigate("/portal");
+    try {
+      const result = await authClient.signIn.email(
+        { email, password },
+        { onSuccess: captureToken }
+      );
+      if (result.error) {
+        const generic = "Email ou password incorretos.";
+        const raw = result.error.message?.trim() ?? "";
+        if (import.meta.env.DEV && raw) {
+          console.error("[login]", raw);
+        }
+        setError(import.meta.env.DEV && raw ? `${generic} ${raw}` : generic);
+        return;
+      }
+      const session = await authClient.getSession();
+      const role =
+        (session.data?.user as { role?: string } | undefined)?.role ??
+        (result.data?.user as { role?: string } | undefined)?.role;
+      if (role === "admin") {
+        navigate("/");
+      } else {
+        navigate("/portal");
+      }
+    } finally {
+      setLoading(false);
     }
   }
 

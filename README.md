@@ -138,13 +138,17 @@ bun run dev
 # → http://localhost:4200
 ```
 
-Primeiro admin na BD configurada em `DATABASE_URL`:
+Primeiro admin (ou repor password), **apenas em desenvolvimento local** (`DATABASE_URL` com `file:`, fora de produção):
 
 ```bash
 cd packages/web
-bun --env-file=../../.env run scripts/create-admin.ts
-# default: admin@condominio.local / admin123
+bun run create-admin
+# só local/dev — nunca produção: admin@condominio.local / admin123
 ```
+
+`admin@condominio.local` / `admin123` é uma credencial de desenvolvimento local. Nunca a uses em produção nem contra uma base remota. O script recusa `DATABASE_URL` que não seja SQLite `file:` (e também `NODE_ENV=production`) salvo `ALLOW_REMOTE_ADMIN_SEED=1` com `ADMIN_PASSWORD` explícito — nesse caso avisa e não usa a password por defeito.
+
+O script **não apaga** o user: actualiza a password com o hash do better-auth e liga `Person` + Membership Admin se o schema kernel existir. `WEBSITE_URL` no `.env` tem de ser a mesma origem do browser (ex. `http://localhost:4200`).
 
 Clone Fonte com dados: `bun run db:push` e, se a BD estiver vazia, os seeds em `packages/web` (`seed:fracoes`, `seed:gdpr-config`, `seed:ancora`, …). Smoke sem PII: `bun run smoke:db` na raiz.
 

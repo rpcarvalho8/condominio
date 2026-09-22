@@ -9,14 +9,12 @@ import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
-import { scrypt, randomBytes } from "crypto";
-import { promisify } from "util";
+import { hashPassword } from "better-auth/crypto";
 import { applyDomainKernelSchema } from "../src/api/infra/kernel-schema";
 import { applyF1ConstitutionSchema } from "../src/api/infra/f1-schema";
 import { applyF2FinanceSchema } from "../src/api/infra/f2-schema";
+import { isBetterAuthPasswordHash } from "../src/api/lib/admin-bootstrap";
 import { CONDOMINIO } from "../src/api/lib/condominio";
-
-const scryptAsync = promisify(scrypt);
 
 const DB_PATH = process.env.DATABASE_URL ?? "file:./local.db";
 
@@ -298,17 +296,26 @@ async function seedFornecedores() {
   console.log(`✅ ${FORNECEDORES.length} fornecedores inseridos`);
 }
 
-// ── Hash de password compatível com better-auth ────────────────────────────────
-async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16).toString("hex");
-  const buf = (await scryptAsync(password, salt, 64)) as Buffer;
-  return `${buf.toString("hex")}.${salt}`;
-}
-
 async function createAdminUser() {
   const existing = await client.execute("SELECT COUNT(*) as count FROM \"user\" WHERE email = 'admin@condominio.local'");
   if ((existing.rows[0] as any).count > 0) {
     console.log("⏭️  Utilizador admin já existe, a saltar...");
+    const account = await client.execute(
+      `SELECT password FROM "account" a
+       JOIN "user" u ON u.id = a.user_id
+       WHERE u.email = 'admin@condominio.local' AND a.provider_id = 'credential'
+       LIMIT 1`,
+    );
+    const hash = account.rows[0]
+      ? String((account.rows[0] as { password?: string }).password ?? "")
+      : "";
+    // better-auth: salt:key — legado scrypt: hex.salt
+    if (hash && !isBetterAuthPasswordHash(hash)) {
+      console.warn(
+        "⚠️  Hash de password do admin não está no formato better-auth (salt:key). " +
+          "O login vai falhar até correres `bun run create-admin`.",
+      );
+    }
     return;
   }
   console.log("👤 A criar utilizador admin...");
