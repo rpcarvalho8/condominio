@@ -1,7 +1,12 @@
+/**
+ * Identidade legal do tenant Fonte (piloto LUMEN Essencial).
+ * Um processo ↔ uma BD. `TENANT_ID` no env substitui o NIF como carimbo.
+ * Champion é nomeação de negócio, fora desta config.
+ */
 export const CONDOMINIO = {
-  nome: "Condomínio Urbanização da Fonte",
+  nome: "Condomínio do Prédio Sito na Urbanização da Fonte",
   nomeFormal: "CONDOMÍNIO DO PRÉDIO SITO NA URBANIZAÇÃO DA FONTE",
-  morada: "Rua Poeta António Boto, 21, 37 e 39, Trofa",
+  morada: "Rua Poeta António Boto, Trofa",
   localidade: "4785-390 Trofa",
   freguesia: "União das Freguesias de Trofa e Coronado",
   concelho: "Trofa",

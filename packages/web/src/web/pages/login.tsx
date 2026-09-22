@@ -52,7 +52,7 @@ export default function LoginPage() {
             </svg>
           </div>
           <h1 className="text-2xl font-bold text-white">Gestão Condomínio</h1>
-          <p className="text-gray-400 text-sm mt-1">Condomínio da Urbanização da Fonte</p>
+          <p className="text-gray-400 text-sm mt-1">Condomínio do Prédio Sito na Urbanização da Fonte</p>
         </div>
 
         {/* Card */}

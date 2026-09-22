@@ -6,10 +6,12 @@ Há **duas camadas no mesmo binário**, ainda sem cutover:
 
 | Camada | O que é | UI |
 |--------|---------|-----|
-| **Fonte** | Operação do piloto Urbanização da Fonte (`Quota.pago`, `user.role`, rotas `/api/quotas`, `/api/bank`, …) | Dashboard, quotas, morosos, `/portal` |
+| **Fonte** | Operação do piloto Essencial (`Quota.pago`, `user.role`, rotas `/api/quotas`, `/api/bank`, …) | Dashboard, quotas, morosos, `/portal` |
 | **LUMEN F0–F3** | Domain Kernel no mesmo processo: TenantDirectory, ingestão, Ledger, convites, portal Essencial | `/f1`, `/f2/banking`, `/f3/ativacao`, `/f3/portal` |
 
 O produto-alvo está especificado em [`docs/lumen/`](docs/lumen/00-INDICE.md) (v6.1). **Dinheiro, votos e efeitos legais em produção real permanecem NO-GO** até aos [production gates](docs/lumen/PRODUCTION-GATES.md). O kernel F2 **não** dual-write para `Quota.pago`.
+
+**Piloto Essencial = este tenant Fonte** (um processo ↔ uma BD). Identidade em `packages/web/src/api/lib/condominio.ts`: Condomínio do Prédio Sito na Urbanização da Fonte, Rua Poeta António Boto, Trofa, NIF `901932027`. Assembleia de referência: 2026-09-22. Se `TENANT_ID` estiver vazio, o carimbo do kernel é esse NIF. O champion (Rui Carvalho, Admin) é nomeação de negócio, fora da app — não há entidade, papel nem campo Champion.
 
 > Actualizado em 2026-09-18 a partir de `produto` @ `26b7ec3` (incl. Astra A2; A4 #25 não muda este guia). `packages/mobile` e `packages/desktop` estão em `_archive/` e não entram no `bun run dev`.
 
@@ -75,7 +77,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `PLATFORM_DATABASE_URL` | `file:./platform.db` | TenantDirectory (fora da BD de tenant) |
 | `PLATFORM_DATABASE_AUTH_TOKEN` | — | Turso da plataforma, se remoto |
 | `TENANT_DB_ROOT` | `./data/tenants` | Ficheiros `.db` no provisionamento local |
-| `TENANT_ID` | NIF em `condominio.ts` | Carimbo kernel neste processo (não vem do cliente) |
+| `TENANT_ID` | `901932027` | Carimbo kernel neste processo (omissão = NIF em `condominio.ts`; não vem do cliente) |
 | `PLATFORM_ENFORCE_DIRECTORY` | off | `1` = rotas kernel exigem tenant activo no directory |
 | `CONTENT_BLOB_ROOT` | `packages/web/data/content` | Blobs F1 em disco |
 | `OBJECT_STORAGE_DRIVER` | `local` | `s3` / `s3-compatible` para staging |

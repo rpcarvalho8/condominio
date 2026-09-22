@@ -24,7 +24,7 @@ Actualizado: 2026-08-22.
 | Email envio | CLI externo `send-email` |
 | PDF | Puppeteer |
 
-**Condomínio piloto:** Urbanização da Fonte — config em `packages/web/src/api/lib/condominio.ts`.
+**Condomínio piloto:** Condomínio do Prédio Sito na Urbanização da Fonte (Rua Poeta António Boto, Trofa, NIF 901932027) — config em `packages/web/src/api/lib/condominio.ts`.
 
 **Arquivado (fora do `dev`):** `_archive/mobile`, `_archive/desktop`.
 

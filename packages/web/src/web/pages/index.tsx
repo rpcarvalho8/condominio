@@ -118,7 +118,7 @@ export default function DashboardPage() {
     return (
       <>
         <SyncBanner isSyncing={isSyncing} syncError={syncError} syncDone={syncDone} />
-        <PageHeader title="Dashboard" subtitle="Urbanização da Fonte" />
+        <PageHeader title="Dashboard" subtitle="Condomínio do Prédio Sito na Urbanização da Fonte" />
         <div className="flex flex-col items-center justify-center h-96 gap-4">
           <Building2 size={48} style={{ color: "var(--text-muted)" }} />
           <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>Sem dados ainda</p>
@@ -488,7 +488,7 @@ function Overview({ d, setSecao, onRefresh }: any) {
     <>
       <PageHeader
         title="Dashboard"
-        subtitle={`Urbanização da Fonte · ${mesNome} ${d.anoAtual}`}
+        subtitle={`Condomínio do Prédio Sito na Urbanização da Fonte · ${mesNome} ${d.anoAtual}`}
         actions={
           <Button
             variant="secondary"

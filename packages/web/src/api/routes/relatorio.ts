@@ -21,8 +21,8 @@ import { htmlToPdf } from "../lib/html-to-pdf";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 const CONDOMINIO = {
-  nome: "Condomínio Urbanização da Fonte",
-  morada: "Rua Poeta António Boto, n.ºs 21, 37 e 39",
+  nome: "Condomínio do Prédio Sito na Urbanização da Fonte",
+  morada: "Rua Poeta António Boto",
   localidade: "4785-390 Trofa",
   nif: "901932027",
   email: "urbanizacaofonte@gmail.com",

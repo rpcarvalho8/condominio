@@ -30,8 +30,8 @@ try {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 const CONDOMINIO = {
-  nome: "Condomínio Urbanização da Fonte",
-  morada: "Rua Poeta António Boto, 21, 37 e 39",
+  nome: "Condomínio do Prédio Sito na Urbanização da Fonte",
+  morada: "Rua Poeta António Boto",
   localidade: "4785-390 Trofa",
   nif: "901932027",
 };
@@ -81,7 +81,7 @@ function buildMoradaFracao(fracao: { numero: string; proprietarioMorada?: string
   // If stored morada exists, use it
   if (fracao.proprietarioMorada) return fracao.proprietarioMorada;
   // Fallback: generic condominio address
-  return `Rua Poeta António Boto, Urbanização da Fonte`;
+  return `Rua Poeta António Boto, Trofa`;
 }
 
 // ─── HTML template ────────────────────────────────────────────────────────────

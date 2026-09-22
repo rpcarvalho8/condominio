@@ -105,7 +105,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                 Gestão Condomínio
               </div>
               <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                Urb. da Fonte
+                Condomínio do Prédio Sito na Urbanização da Fonte
               </div>
             </div>
           </div>

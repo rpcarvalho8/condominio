@@ -68,8 +68,8 @@ async function getExtraDevedoresPorPagar(
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const CONDOMINIO = {
-  nome: "Condomínio Urbanização da Fonte",
-  morada: "Rua Poeta António Boto, 21, 37 e 39",
+  nome: "Condomínio do Prédio Sito na Urbanização da Fonte",
+  morada: "Rua Poeta António Boto",
   localidade: "4785-390 Trofa",
   nif: "901932027",
   iban: "PT50 0018 0003 4978 3806 0206 5",
@@ -530,7 +530,7 @@ export async function gerarAvisosCobranca(mes: number, ano: number, opts: {
       const total = linhas.reduce((s, l) => s + l.valor, 0);
 
       // Build HTML & PDF
-      const morada = fracao.proprietarioMorada ?? `Rua Poeta António Boto, Urbanização da Fonte, 4785-390 Trofa`;
+      const morada = fracao.proprietarioMorada ?? `Rua Poeta António Boto, Trofa`;
       const html = buildAvisoHtml({
         dataEmissao: dataEmissaoStr,
         fracao,
