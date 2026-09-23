@@ -813,6 +813,23 @@ Um mapa de dívidas, um saldo por fração, um extrato, um aviso de débito ou u
 
 ---
 
+## ADR-045 — Relação com administradoras = hipótese; ICP inicial = autogestão assistida
+
+**Estado:** ACEITE (estratégia comercial).
+
+**Decisão:**
+
+1. O **posicionamento inicial** do LUMEN é **autogestão assistida** (condómino-admin / órgãos do condomínio), não "substituição irrevogável de administradoras profissionais".
+2. A relação com administradoras profissionais — **concorrência, cliente, parceiro ou canal** — permanece uma **hipótese comercial a validar** no piloto e nos patamares 5 → 20 → 40. Não é decisão irrevogável.
+3. Até haver evidência medida (ver [PROOF-SHEET](PROOF-SHEET.md)), **não** modelar canais via administradoras nem imobiliárias com o mesmo conflito como premissa de CAC (continua ADR-019). Experiência institucional (APEGAC/ANACON) mantém-se fora do modelo financeiro.
+4. Linguagem comercial e documentos de negócio (`07`, `10`, `11`) usam a formulação de hipótese; não afirmam "compete e nunca é complementar" como facto demonstrado.
+
+**Justificação:** a formulação anterior em `07-BUSINESS-PLAN` v6.1 ("compete com empresas de gestão — não é complementar") misturava hipótese estratégica com decisão fechada. A arquitectura (memória operacional, Authority, Ledger) não depende dessa conclusão comercial. Fechar prematuramente o enquadramento impede aprender no piloto se algum segmento de administradoras pode ser cliente, parceiro ou canal sem contradizer o ICP inicial.
+
+**Impacto:** 07-BUSINESS-PLAN (v7), 10-MODELO-NEGOCIO, 11-ARQUITECTURA-NEGOCIO, PROOF-SHEET, 00-INDICE. Não altera 02-DOMINIO, fatias F0–F6, nem ADR-019 (exclusão de CAC institucional não testado).
+
+---
+
 ## Itens Tier 3 — Documentados como Visão Futura, Não Backlog Atual
 
 Não são ADRs (não há decisão de arquitetura a fixar agora), mas ficam registados para não se perderem nem serem reintroduzidos como scope creep prematuro:
