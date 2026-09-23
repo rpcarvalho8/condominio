@@ -96,11 +96,48 @@ export function extractEmbeddedTextFromBytes(bytes: Buffer): string {
   return chunks.join("\n");
 }
 
+function looksLikePdf(bytes: Buffer, filename?: string): boolean {
+  if (filename && f1FileExtension(filename) === ".pdf") return true;
+  return bytes.subarray(0, 5).toString("utf8") === "%PDF-";
+}
+
+/**
+ * Camada de texto PDF (FlateDecode / ToUnicode) via pdf.js local — sem OCR, sem HTTP.
+ * Devolve string vazia se não houver texto utilizável (ex.: PDF só imagem).
+ */
+export async function extractPdfTextLayer(bytes: Buffer): Promise<string> {
+  try {
+    const { extractText, getDocumentProxy } = await import("unpdf");
+    const pdf = await getDocumentProxy(new Uint8Array(bytes));
+    const { text } = await extractText(pdf, { mergePages: true });
+    if (Array.isArray(text)) return text.join("\n").trim();
+    return String(text ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Texto de ingestão para ficheiros visuais:
+ * 1) PDF com camada de texto → unpdf (local);
+ * 2) fallback → scrape embutido (fake PDF/JPEG de testes; PDFs digitalizados sem texto ficam fracos).
+ */
+export async function extractIngestTextFromBytes(
+  bytes: Buffer,
+  filename?: string,
+): Promise<string> {
+  if (looksLikePdf(bytes, filename)) {
+    const layer = await extractPdfTextLayer(bytes);
+    if (layer) return layer;
+  }
+  return extractEmbeddedTextFromBytes(bytes);
+}
+
 export function createStubOcrProvider(): OcrProvider {
   return {
     name: "stub",
     async recognize(input) {
-      const text = extractEmbeddedTextFromBytes(input.bytes).trim();
+      const text = (await extractIngestTextFromBytes(input.bytes, input.filename)).trim();
       const regions: OcrRegion[] = text
         ? text
             .split(/\n+/)

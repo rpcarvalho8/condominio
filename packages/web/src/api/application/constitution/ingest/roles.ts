@@ -70,8 +70,20 @@ export const LABEL_WORDS = new Set([
   "fraction",
 ]);
 
+/** Palavras de tipo/descrição — não são códigos de unidade. */
+const TYPE_WORDS = new Set([
+  "hab",
+  "habitacao",
+  "loja",
+  "garagem",
+  "lugar",
+  "bloco",
+  "zona",
+]);
+
 const STOP_WORDS = new Set([
   ...LABEL_WORDS,
+  ...TYPE_WORDS,
   "autonoma",
   "autonomo",
   "designada",
@@ -122,6 +134,9 @@ const STOP_WORDS = new Set([
   "valor",
   "quota",
   "preencher",
+  "total",
+  "predio",
+  "edificio",
 ]);
 
 export function fold(value: string): string {
@@ -193,7 +208,12 @@ export function bestNumber(text: string): { raw: string; value: number } | null 
   for (const match of text.matchAll(/‰|%|mil[eé]sim\w*|permil\w*|per\s*mille|percent\w*|thousandth\w*|por\s+mil/gi)) {
     anchors.push(match.index ?? 0);
   }
-  if (anchors.length === 0) return null;
+  if (anchors.length === 0) {
+    // Linha "código … valor": preferir o último número, sobretudo se tiver decimais.
+    const decimals = nums.filter((n) => /[.,]\d+/.test(n.raw));
+    if (decimals.length > 0) return decimals[decimals.length - 1]!;
+    return nums[nums.length - 1]!;
+  }
   let best = nums[0]!;
   let bestDist = Number.POSITIVE_INFINITY;
   for (const num of nums) {
@@ -224,12 +244,18 @@ export function isCodeToken(token: string): boolean {
   return /^[\p{L}\p{N}]+(?:\/[\p{L}\p{N}]+)?$/u.test(token) && /\p{L}/u.test(token);
 }
 
+/** Após «fracção»/«letra», o identificador é curto (A, AA) ou contém dígitos — não uma palavra corrente. */
+function isLabelBoundCode(token: string): boolean {
+  if (!isCodeToken(token)) return false;
+  return token.length <= 3 || /\d/.test(token);
+}
+
 export function selectCodigo(tokens: string[]): { codigo: string | null; ambiguous: boolean } {
   const labelHits: string[] = [];
   for (let i = 0; i < tokens.length - 1; i++) {
     if (!LABEL_WORDS.has(fold(tokens[i]!))) continue;
     const next = tokens[i + 1]!;
-    if (isCodeToken(next)) labelHits.push(next);
+    if (isLabelBoundCode(next)) labelHits.push(next);
   }
   if (labelHits.length > 0) {
     const distinct = new Set(labelHits.map((token) => fold(token)));
@@ -240,7 +266,16 @@ export function selectCodigo(tokens: string[]): { codigo: string | null; ambiguo
   const distinct = new Set(codes.map((token) => fold(token)));
   if (distinct.size === 1) return { codigo: codes[0]!, ambiguous: false };
   if (distinct.size === 0) return { codigo: null, ambiguous: false };
+  // Padrão genérico "ID descrição valor": o primeiro código curto costuma ser o identificador.
+  const first = codes[0]!;
+  if (first.length <= 3) return { codigo: first, ambiguous: false };
   return { codigo: null, ambiguous: true };
+}
+
+/** Cabeçalho de documento/coluna indica permilagem (‰) mesmo que a linha não traga o símbolo. */
+export function documentHasPermilleCue(text: string): boolean {
+  if (text.includes("‰")) return true;
+  return /permilagem/i.test(text) || /mil[eé]simas?/i.test(text);
 }
 
 export function parseLooseNumber(raw: string): number | null {

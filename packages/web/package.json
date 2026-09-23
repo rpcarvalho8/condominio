@@ -22,7 +22,7 @@
     "test:kernel": "bun test src/api/domain/roles.test.ts src/api/application/auth/legacy-user-role-adapter.test.ts src/api/kernel.integration.test.ts src/api/auth-password.test.ts scripts/create-admin.test.ts",
     "test:platform": "bun test src/api/platform.integration.test.ts",
     "test:f0": "bun test src/api/domain/roles.test.ts src/api/application/auth/legacy-user-role-adapter.test.ts src/api/kernel.integration.test.ts src/api/platform.integration.test.ts src/api/f0.integration.test.ts src/api/auth-password.test.ts scripts/create-admin.test.ts",
-    "test:f1": "bun test src/api/f1.integration.test.ts src/api/infra/content-blob-store.test.ts src/api/infra/object-storage.test.ts src/api/domain/tenant-id.test.ts src/api/application/constitution/f1-upload-guard.test.ts src/api/application/constitution/extractors/from-ocr.test.ts src/api/application/constitution/ingest/pipeline.test.ts src/api/application/constitution/ingest/budget-plan.contract.test.ts",
+    "test:f1": "bun test src/api/f1.integration.test.ts src/api/infra/content-blob-store.test.ts src/api/infra/object-storage.test.ts src/api/domain/tenant-id.test.ts src/api/application/constitution/f1-upload-guard.test.ts src/api/application/constitution/extractors/from-ocr.test.ts src/api/application/constitution/ingest/pipeline.test.ts src/api/application/constitution/ingest/anexo-regulamento-fonte.test.ts src/api/application/constitution/ingest/budget-plan.contract.test.ts",
     "test:f2": "bun test src/api/f2.integration.test.ts src/api/f2.adversarial.test.ts src/api/application/finance/enable-banking-adapter.test.ts",
     "test:f2-adversarial": "bun test src/api/f2.adversarial.test.ts",
     "test:f3": "bun test src/api/domain/invitation.test.ts src/api/domain/ticket.test.ts src/api/f3.integration.test.ts src/api/f3.portal.test.ts src/web/lib/pwa.test.ts",
@@ -63,6 +63,7 @@
     "react-icons": "^5.6.0",
     "recharts": "^3.8.1",
     "tailwind-merge": "^3.6.0",
+    "unpdf": "^1.8.1",
     "wouter": "^3.9.0",
     "xlsx": "^0.18.5",
     "zod": "^4.3.6"
