@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { DomainError } from "../../../domain/errors";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   assertExtractionStrongEnough,
   createOcrProviderFromEnv,
   createStubOcrProvider,
   extractEmbeddedTextFromBytes,
+  extractIngestTextFromBytes,
+  extractPdfTextLayer,
   extractStructuredFromVisual,
 } from "./from-ocr";
 import { extractContactosFromPlainText } from "./from-text";
@@ -41,6 +45,18 @@ describe("F1 OCR stub (deterministic, no API key)", () => {
     const sample = "Fração A — 600‰";
     expect(extractEmbeddedTextFromBytes(fakePdf(sample))).toContain("600‰");
     expect(extractEmbeddedTextFromBytes(fakeJpeg(sample))).toContain("600‰");
+  });
+
+  test("PDF real com FlateDecode: scrape embutido falha; unpdf recupera camada de texto", async () => {
+    const bytes = readFileSync(
+      join(import.meta.dir, "fixtures/anexo-regulamento-fonte.pdf"),
+    );
+    expect(/permilagem/i.test(extractEmbeddedTextFromBytes(bytes))).toBe(false);
+    const layer = await extractPdfTextLayer(bytes);
+    expect(/permilagem/i.test(layer)).toBe(true);
+    expect(layer).toContain("‰");
+    const ingest = await extractIngestTextFromBytes(bytes, "anexo.pdf");
+    expect(ingest).toContain("Total Prédio");
   });
 
   test("PDF with permilagens → StructuredExtraction pending-style lines with excerpt", async () => {

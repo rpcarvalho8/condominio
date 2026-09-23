@@ -59,6 +59,22 @@ F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` vi
 - Migração massiva de blobs locais já existentes (`data/content` → bucket)
 - UI nova, Enable Banking novo, F2/F3 feature work
 
+## Limitações conhecidas — `unit_share` / extracção semântica
+
+Estado do hardening `skipProseLine` / PDF textual: **F1/unit_share hardening — fechado com limite conhecido documentado** (não «F1 resolvida»).
+
+### `selectCodigo` com texto entre parênteses antes do código
+
+| Campo | Conteúdo |
+|---|---|
+| **Limitação** | `selectCodigo` (em `roles.ts`) pode seleccionar um código incorrecto quando a linha contém texto entre parênteses **antes** do identificador real de fracção. Exemplo sintético: `BT (British Telecom) A — 600‰` → selecciona `BT` em vez de `A`. |
+| **Estado** | Não corrigido. Não bloqueante para o caminho Fonte / regressão actual. |
+| **Evidência** | Teste sintético em `packages/web/src/api/application/constitution/ingest/pdf-marker-skip.test.ts` (caso «BT (British Telecom)…») — documenta o comportamento actual (`BT` + `B`) sem o esconder. |
+| **Âmbito real** | Não observado no documento Fonte (Anexo Regulamento): 33/33 códigos correctos na regressão. Risco desconhecido para documentos futuros ainda não testados — **não** generalizar. |
+| **Não é** | Um bug de `skipProseLine`. O filtro de prosa PDF ficou reduzido a `^%PDF-` / `^%%EOF` (suficiente para o falso positivo do fake PDF); a remoção de `BT (` / `endobj` eliminou o falso negativo por skip. O residual está em `selectCodigo`. |
+
+Não alterar `selectCodigo` só por este cenário sintético sem evidência num documento real.
+
 ## Ops staging / produção — S3
 
 CI e dev **permanecem** em `OBJECT_STORAGE_DRIVER=local` (omisso = local). Não forçar S3 no CI.

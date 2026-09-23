@@ -4,7 +4,7 @@
  */
 import * as XLSX from "xlsx";
 import { f1FileExtension } from "../f1-upload-guard";
-import { extractEmbeddedTextFromBytes, isVisualIngestFile } from "../extractors/from-ocr";
+import { extractIngestTextFromBytes, isVisualIngestFile } from "../extractors/from-ocr";
 import {
   classifyHeader,
   type ColumnRole,
@@ -254,11 +254,14 @@ function discoverWorkbook(bytes: Buffer): DiscoveredStructure {
   };
 }
 
-export function discoverDocument(input: { bytes: Buffer; filename: string }): DiscoveredStructure {
+export async function discoverDocument(input: {
+  bytes: Buffer;
+  filename: string;
+}): Promise<DiscoveredStructure> {
   const ext = f1FileExtension(input.filename);
   if (ext === ".xlsx" || ext === ".xls") return discoverWorkbook(input.bytes);
   const text = isVisualIngestFile(input.filename)
-    ? extractEmbeddedTextFromBytes(input.bytes)
+    ? await extractIngestTextFromBytes(input.bytes, input.filename)
     : input.bytes.toString("utf8");
   return discoverTextStructure(text);
 }

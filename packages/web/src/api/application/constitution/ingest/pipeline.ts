@@ -71,7 +71,7 @@ export async function runIngestPipeline(input: {
   documentId?: string | null;
   llm?: (text: string) => Promise<LlmHypothesis | null>;
 }): Promise<IngestPipelineResult> {
-  const structure = discoverDocument({ bytes: input.bytes, filename: input.filename });
+  const structure = await discoverDocument({ bytes: input.bytes, filename: input.filename });
   const observations = extractObservations(structure);
   const origem = structure.representation === "unknown" ? "prose" : structure.representation;
   const drafts = canonicalizeObservations({
