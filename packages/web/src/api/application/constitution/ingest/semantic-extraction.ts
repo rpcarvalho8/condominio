@@ -111,6 +111,8 @@ function fromKeyValue(rows: StructureRow[]): Observation[] {
 function skipProseLine(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
+  // Artefactos do scrape embutido / cabeçalho-rodapé PDF (não são linhas de quota).
+  if (/^%PDF-/i.test(trimmed) || /^%%EOF/i.test(trimmed)) return true;
   const folded = fold(trimmed);
   if (/^total\b/.test(folded) || /^sub[\s-]?total\b/.test(folded)) return true;
   if (/^zona\b/.test(folded) || /^documento\b/.test(folded)) return true;
