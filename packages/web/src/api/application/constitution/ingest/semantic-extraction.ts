@@ -132,7 +132,9 @@ function codigoFollowsLabel(tokens: string[], codigo: string): boolean {
     if (!LABEL_WORDS.has(foldToken(tokens[i]!))) continue;
     const next = tokens[i + 1]!;
     if (foldToken(next) !== target) continue;
-    if (next.length <= 3 || /\d/.test(next)) return true;
+    if (/^[A-Z]{1,3}\d*$/.test(next) || (/^[A-Za-z]+\d+$/.test(next) && next.length <= 8)) {
+      return true;
+    }
   }
   return false;
 }

@@ -244,10 +244,12 @@ export function isCodeToken(token: string): boolean {
   return /^[\p{L}\p{N}]+(?:\/[\p{L}\p{N}]+)?$/u.test(token) && /\p{L}/u.test(token);
 }
 
-/** Após «fracção»/«letra», o identificador é curto (A, AA) ou contém dígitos — não uma palavra corrente. */
+/** Após «fracção»/«letra», o identificador parece código (A, AA, 1A) — não «e»/«assim». */
 function isLabelBoundCode(token: string): boolean {
   if (!isCodeToken(token)) return false;
-  return token.length <= 3 || /\d/.test(token);
+  if (/^[A-Z]{1,3}\d*$/.test(token)) return true;
+  if (/^[A-Za-z]+\d+$/.test(token) && token.length <= 8) return true;
+  return false;
 }
 
 export function selectCodigo(tokens: string[]): { codigo: string | null; ambiguous: boolean } {
