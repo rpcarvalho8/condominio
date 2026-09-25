@@ -742,6 +742,19 @@ describe("F1 constituição", () => {
       expect(rows.map((row) => row.codigo).sort()).toEqual(["A", "B"]);
     } finally {
       client2.close();
+      // A transação libSQL fica com a ligação até ao GC. Sem isto, o DELETE
+      // do teste seguinte vê SQLITE_BUSY.
+      Bun.gc(true);
+      for (let attempt = 0; attempt < 40; attempt++) {
+        try {
+          await client.execute("BEGIN IMMEDIATE");
+          await client.execute("ROLLBACK");
+          break;
+        } catch (err) {
+          if (attempt === 39) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
     }
   });
 
