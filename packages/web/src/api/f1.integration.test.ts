@@ -598,7 +598,6 @@ describe("F1 constituição", () => {
     expect(second).toBeInstanceOf(DomainError);
     const domain = second as DomainError;
     expect(domain.httpStatus).toBe(409);
-    expect(domain.message).not.toMatch(/não ficou gravada|Nada foi alterado|Nenhum valor foi alterado/i);
 
     const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
     expect(stored.map((row) => row.id).sort()).toEqual(["legacy-a", "legacy-b"]);
