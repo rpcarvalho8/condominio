@@ -44,7 +44,7 @@ F1 pleno (OCR/PDF/foto + port `put/get/exists` + UI admin) está em `produto` vi
 | HUMAN REVIEW se extracção fraca | ✅ | Nunca auto-confirma; nunca envia convites (ADR-017) |
 | Object storage adapter | ✅ | Port `put/get/exists` inalterado; local default; S3-compatible **wired** via env |
 | S3 staging/prod | ✅ | `OBJECT_STORAGE_DRIVER=s3` + `S3_*`; Bun `S3Client`; fail-closed sem credenciais |
-| Confirmação linha a linha de frações | ✅ | Σ permilagens = 1000‰ |
+| Confirmação linha a linha de frações | ✅ | Σ permilagem_centesimas = 100000 |
 | Contactos (draft + confirmação) | ✅ | Sem convites |
 | Comprovativo IBAN | ✅ | `retention_class = personal_document` |
 | Orçamento anual + FCR ≥10% → obligations | ✅ | Rateio por permilagem |
