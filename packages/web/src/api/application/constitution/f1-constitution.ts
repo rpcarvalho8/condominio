@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   annualBudgetLines,
   annualBudgets,
@@ -16,13 +16,20 @@ import {
   INGEST_DOCUMENT_KINDS,
   INGEST_DOCUMENT_STATUS,
   OBLIGATION_STATUS,
-  PERMILAGEM_TOTAL,
   RETENTION_CLASS,
   type ContactExtractPayload,
   type FracaoExtractPayload,
   type StructuredExtraction,
 } from "../../domain/constitution";
 import { DomainError } from "../../domain/errors";
+import {
+  PERMILAGEM_CENTESIMAS_TOTAL,
+  centesimasFromStoredPayload,
+  formatPermilagemCentesimas,
+  legacyIntegerPermilagem,
+  positiveSafeInteger,
+  type PermilagemCentesimasRead,
+} from "../../domain/permilagem-centesimas";
 import { assertSha256ContentHash } from "../../infra/content-blob-store";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
@@ -35,17 +42,55 @@ type Actor = {
   requestId?: string | null;
 };
 
-function asFracaoPayload(raw: Record<string, unknown>): FracaoExtractPayload {
-  const codigo = String(raw.codigo ?? "").trim();
-  const permilagem = Number(raw.permilagem);
-  if (!codigo) throw new DomainError("invalid_fracao", "código de fração obrigatório", 400);
-  if (!Number.isFinite(permilagem) || permilagem <= 0) {
-    throw new DomainError("invalid_permilagem", "permilagem inválida", 400);
+type StoredFracaoPayload = {
+  codigo: string;
+  tipo: string;
+  permilagem: number | null;
+  permilagem_centesimas: number;
+};
+
+/** Centésimas: Number.isSafeInteger e ≤ 100000. Não aceita float. */
+function positiveInteger(value: unknown): number | null {
+  return positiveSafeInteger(value, PERMILAGEM_CENTESIMAS_TOTAL);
+}
+
+const REEXTRACT_MESSAGE =
+  "A permilagem inteira não recupera as centésimas. Re-extraia o regulamento para ler o token original; não se converte um inteiro arredondado.";
+
+function classifyPermilagem(raw: Record<string, unknown>): PermilagemCentesimasRead {
+  const directField = raw.permilagem_centesimas ?? raw.permilagemCentesimas;
+  if (directField != null) {
+    const direct = positiveInteger(directField);
+    return direct == null ? { ok: false, reason: "missing" } : { ok: true, centesimas: direct };
   }
+  return centesimasFromStoredPayload(raw);
+}
+
+/** Lê centésimas do payload. Inteiro ‰ exacto (sem casas) vale ×100 só sem evidência de arredondamento. */
+export function readPermilagemCentesimas(raw: Record<string, unknown>): number | null {
+  const read = classifyPermilagem(raw);
+  return read.ok ? read.centesimas : null;
+}
+
+function asFracaoPayload(raw: Record<string, unknown>): StoredFracaoPayload {
+  const codigo = String(raw.codigo ?? "").trim();
+  if (!codigo) throw new DomainError("invalid_fracao", "código de fração obrigatório", 400);
+  const read = classifyPermilagem(raw);
+  if (!read.ok) {
+    throw new DomainError(
+      read.reason === "reextract" ? "permilagem_reextract" : "invalid_permilagem",
+      read.reason === "reextract"
+        ? REEXTRACT_MESSAGE
+        : "permilagem_centesimas em falta ou com mais de 2 casas decimais no ‰",
+      400,
+    );
+  }
+  const centesimas = read.centesimas;
   return {
     codigo,
     tipo: raw.tipo ? String(raw.tipo) : "fracao",
-    permilagem: Math.round(permilagem),
+    permilagem: legacyIntegerPermilagem(centesimas),
+    permilagem_centesimas: centesimas,
   };
 }
 
@@ -72,6 +117,7 @@ async function writeAudit(
     entityType: string;
     entityId: string;
     actor?: Actor;
+    before?: Record<string, unknown> | null;
     after?: Record<string, unknown> | null;
     reason?: string | null;
   },
@@ -84,6 +130,7 @@ async function writeAudit(
     actorPersonId: input.actor?.personId ?? null,
     actorUserId: input.actor?.userId ?? null,
     requestId: input.actor?.requestId ?? null,
+    before: input.before ?? null,
     after: input.after ?? null,
     reason: input.reason ?? null,
     source: "f1",
@@ -166,9 +213,9 @@ async function refreshFracaoReviewState(deps: KernelDeps, documentId: string) {
   let sum = 0;
   for (const line of open) {
     if (line.status !== EXTRACT_LINE_STATUS.pendingReview) continue;
-    const payload = JSON.parse(line.editedPayloadJson ?? line.payloadJson) as { permilagem?: unknown };
-    const value = Number(payload.permilagem);
-    if (Number.isFinite(value) && value > 0) sum += Math.round(value);
+    const payload = JSON.parse(line.editedPayloadJson ?? line.payloadJson) as Record<string, unknown>;
+    const value = readPermilagemCentesimas(payload);
+    if (value != null) sum += value;
   }
   const blocking: Array<{ code: string; message: string }> = [];
   if (ambiguous.length > 0) {
@@ -176,10 +223,10 @@ async function refreshFracaoReviewState(deps: KernelDeps, documentId: string) {
       code: "needs_human_review",
       message: `${ambiguous.length} linha(s) precisam de decisão humana.`,
     });
-  } else if (open.length > 0 && sum !== PERMILAGEM_TOTAL) {
+  } else if (open.length > 0 && sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
     blocking.push({
       code: "permilagem_sum",
-      message: `Σ permilagens = ${sum}‰; exige ${PERMILAGEM_TOTAL}‰.`,
+      message: `Σ permilagem_centesimas = ${sum}; exige ${PERMILAGEM_CENTESIMAS_TOTAL}.`,
     });
   }
   const [doc] = await deps.db
@@ -390,6 +437,7 @@ export async function editExtractLine(
       codigo: fracao.codigo,
       tipo: fracao.tipo ?? "fracao",
       permilagem: fracao.permilagem,
+      permilagem_centesimas: fracao.permilagem_centesimas,
       review: EXTRACT_LINE_STATUS.pendingReview,
       evidence: [
         ...evidence,
@@ -401,7 +449,10 @@ export async function editExtractLine(
           line: line.lineNo,
           cell: null,
           region: null,
-          originalText: String(input.payload.permilagem ?? ""),
+          originalText:
+            fracao.permilagem == null
+              ? formatPermilagemCentesimas(fracao.permilagem_centesimas)
+              : String(fracao.permilagem),
           transform: "human_edit",
         },
       ],
@@ -441,6 +492,40 @@ export async function editExtractLine(
   return { document, line: updated! };
 }
 
+/**
+ * Drizzle embrulha o libSQL em DrizzleQueryError ("Failed query: insert into …").
+ * UNIQUE / SQLITE_CONSTRAINT ficam em `cause` (code, extendedCode, rawCode).
+ * NOT NULL (SQLITE_CONSTRAINT_NOTNULL / 1299) não é conflito de código.
+ */
+export function isUniqueCodigoConstraint(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current != null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const anyErr = current as {
+      message?: unknown;
+      code?: unknown;
+      extendedCode?: unknown;
+      rawCode?: unknown;
+      cause?: unknown;
+    };
+    const codes = [anyErr.code, anyErr.extendedCode, anyErr.rawCode]
+      .filter((value) => value != null)
+      .map((value) => String(value).toUpperCase());
+    const msg = String(anyErr.message ?? "").toLowerCase();
+    if (codes.some((code) => code.includes("SQLITE_CONSTRAINT_UNIQUE") || code === "2067")) {
+      return true;
+    }
+    const bareConstraint = codes.some((code) => code === "SQLITE_CONSTRAINT" || code === "19");
+    if (bareConstraint && msg.includes("unique")) return true;
+    if (msg.includes("unique") && (msg.includes("codigo") || msg.includes("constitution_fracoes"))) {
+      return true;
+    }
+    current = anyErr.cause;
+  }
+  return false;
+}
+
 export async function confirmFracaoLines(
   deps: KernelDeps,
   input: {
@@ -460,7 +545,8 @@ export async function confirmFracaoLines(
   }
 
   const now = kernelNow(deps);
-  const batch: Array<{ lineId: string; payload: FracaoExtractPayload; excerpt: string }> = [];
+  const batch: Array<{ lineId: string; payload: StoredFracaoPayload; excerpt: string }> = [];
+  const rejectedLineIds: string[] = [];
   const rejectedIds = new Set(
     input.confirmations.filter((item) => item.reject).map((item) => item.lineId),
   );
@@ -492,10 +578,7 @@ export async function confirmFracaoLines(
       );
     }
     if (c.reject) {
-      await deps.db
-        .update(extractLines)
-        .set({ status: EXTRACT_LINE_STATUS.rejected })
-        .where(eq(extractLines.id, line.id));
+      rejectedLineIds.push(line.id);
       continue;
     }
     if (line.kind !== EXTRACT_LINE_KINDS.fracao) {
@@ -511,7 +594,7 @@ export async function confirmFracaoLines(
     batch.push({ lineId: line.id, payload, excerpt: line.sourceExcerpt });
   }
 
-  const sum = batch.reduce((acc, x) => acc + x.payload.permilagem, 0);
+  const sum = batch.reduce((acc, x) => acc + x.payload.permilagem_centesimas, 0);
   const codes = batch.map((item) => item.payload.codigo.trim().toUpperCase());
   const duplicate = codes.find((code, index) => codes.indexOf(code) !== index);
   if (duplicate) {
@@ -521,92 +604,186 @@ export async function confirmFracaoLines(
       400,
     );
   }
-  if (batch.length > 0 && sum !== PERMILAGEM_TOTAL) {
+  if (batch.length > 0 && sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
     throw new DomainError(
       "permilagem_sum",
-      `Σ permilagens do lote = ${sum}‰; tem de ser exactamente ${PERMILAGEM_TOTAL}‰`,
+      `Σ permilagem_centesimas do lote = ${sum}; tem de ser exactamente ${PERMILAGEM_CENTESIMAS_TOTAL}. Nenhum valor foi alterado.`,
       400,
     );
   }
 
-  const created = [];
-  for (const item of batch) {
-    const [fracao] = await deps.db
-      .insert(constitutionFracoes)
-      .values({
-        id: crypto.randomUUID(),
-        tenantId: input.tenantId,
-        codigo: item.payload.codigo,
-        tipo: item.payload.tipo ?? "fracao",
-        permilagem: item.payload.permilagem,
-        sourceDocumentId: document.id,
-        sourceLineId: item.lineId,
-        sourceExcerpt: item.excerpt,
-        status: "confirmed",
-        createdAt: now,
-        confirmedAt: now,
-        confirmedByPersonId: input.actor?.personId ?? null,
-      })
-      .returning();
-
+  for (const lineId of rejectedLineIds) {
     await deps.db
       .update(extractLines)
-      .set({
-        status: EXTRACT_LINE_STATUS.confirmed,
-        editedPayloadJson: JSON.stringify(item.payload),
-        confirmedAt: now,
-        confirmedByPersonId: input.actor?.personId ?? null,
-      })
-      .where(eq(extractLines.id, item.lineId));
-
-    created.push(fracao!);
+      .set({ status: EXTRACT_LINE_STATUS.rejected })
+      .where(eq(extractLines.id, lineId));
   }
 
-  const pending = await deps.db
+  const rows = [];
+  const existingRows = await deps.db
     .select()
-    .from(extractLines)
-    .where(
-      and(
-        eq(extractLines.documentId, document.id),
-        inArray(extractLines.status, [
-          EXTRACT_LINE_STATUS.pendingReview,
-          EXTRACT_LINE_STATUS.needsHumanReview,
-        ]),
-      ),
-    );
+    .from(constitutionFracoes)
+    .where(eq(constitutionFracoes.tenantId, input.tenantId));
+  const existingByCodigo = new Map(existingRows.map((row) => [row.codigo, row]));
+  for (const item of batch) {
+    const existing = existingByCodigo.get(item.payload.codigo);
+    if (existing && existing.permilagemCentesimas != null) {
+      throw new DomainError(
+        "duplicate_codigo",
+        `O código ${item.payload.codigo} já está confirmado com permilagem em centésimas. Não crie outra fração com o mesmo código.`,
+        409,
+      );
+    }
+  }
 
-  await deps.db
-    .update(ingestDocuments)
-    .set({
-      status:
-        pending.length === 0
-          ? INGEST_DOCUMENT_STATUS.confirmed
-          : INGEST_DOCUMENT_STATUS.partiallyConfirmed,
-    })
-    .where(eq(ingestDocuments.id, document.id));
+  for (const item of batch) {
+    const existing = existingByCodigo.get(item.payload.codigo);
+    const permilagem = item.payload.permilagem;
+    let fracao;
+    if (existing && existing.permilagemCentesimas == null) {
+      const [updated] = await deps.db
+        .update(constitutionFracoes)
+        .set({
+          permilagem,
+          permilagemCentesimas: item.payload.permilagem_centesimas,
+          confirmedAt: now,
+          confirmedByPersonId: input.actor?.personId ?? null,
+        })
+        .where(
+          and(
+            eq(constitutionFracoes.id, existing.id),
+            eq(constitutionFracoes.tenantId, input.tenantId),
+            isNull(constitutionFracoes.permilagemCentesimas),
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new DomainError(
+          "reconfirm_conflict",
+          `O código ${item.payload.codigo} já não tem centésimas vazias. O valor pedido não foi escrito nesta fração.`,
+          409,
+        );
+      }
+      fracao = updated;
+      await writeAudit(deps, {
+          tenantId: input.tenantId,
+          type: "constitution.fracao_centesimas_completed",
+          entityType: "constitution_fracao",
+          entityId: existing.id,
+          actor: input.actor,
+          before: {
+            id: existing.id,
+            codigo: existing.codigo,
+            permilagem: existing.permilagem,
+            permilagem_centesimas: null,
+          },
+          after: {
+            id: existing.id,
+            codigo: existing.codigo,
+            permilagem,
+            permilagem_centesimas: item.payload.permilagem_centesimas,
+            sourceDocumentId: document.id,
+            sourceLineId: item.lineId,
+          },
+          reason:
+            "Reconfirmação do regulamento: centésimas gravadas na fração existente. O id mantém-se para as obligations.",
+        });
+      } else {
+        try {
+          const [inserted] = await deps.db
+            .insert(constitutionFracoes)
+            .values({
+              id: crypto.randomUUID(),
+              tenantId: input.tenantId,
+              codigo: item.payload.codigo,
+              tipo: item.payload.tipo ?? "fracao",
+              permilagem,
+              permilagemCentesimas: item.payload.permilagem_centesimas,
+              sourceDocumentId: document.id,
+              sourceLineId: item.lineId,
+              sourceExcerpt: item.excerpt,
+              status: "confirmed",
+              createdAt: now,
+              confirmedAt: now,
+              confirmedByPersonId: input.actor?.personId ?? null,
+            })
+            .returning();
+          fracao = inserted!;
+        } catch (err) {
+          if (isUniqueCodigoConstraint(err)) {
+            throw new DomainError(
+              "duplicate_codigo",
+              `O código ${item.payload.codigo} já existe neste condomínio. Não crie outra fração com o mesmo código. Se a constituição é anterior a 0011 e as centésimas estão vazias, reconfirme o regulamento sobre a fração existente.`,
+              409,
+            );
+          }
+          throw err;
+        }
+      }
 
-  await writeAudit(deps, {
-    tenantId: input.tenantId,
-    type: "constitution.fracoes_confirmed",
-    entityType: "ingest_document",
-    entityId: document.id,
-    actor: input.actor,
-    after: {
-      created: created.map((f) => ({ id: f.id, codigo: f.codigo, permilagem: f.permilagem })),
-      sum,
-    },
-  });
+      await deps.db
+        .update(extractLines)
+        .set({
+          status: EXTRACT_LINE_STATUS.confirmed,
+          editedPayloadJson: JSON.stringify(item.payload),
+          confirmedAt: now,
+          confirmedByPersonId: input.actor?.personId ?? null,
+        })
+        .where(eq(extractLines.id, item.lineId));
 
-  await publishDomainEvent(deps, {
-    tenantId: input.tenantId,
-    type: "ConstitutionFracoesConfirmed",
-    aggregateType: "ingest_document",
-    aggregateId: document.id,
-    payload: { count: created.length, sum },
-    correlationId: input.actor?.requestId ?? null,
-  });
+      rows.push(fracao);
+    }
 
-  return { fracoes: created, permilagemSum: sum };
+    const pending = await deps.db
+      .select()
+      .from(extractLines)
+      .where(
+        and(
+          eq(extractLines.documentId, document.id),
+          inArray(extractLines.status, [
+            EXTRACT_LINE_STATUS.pendingReview,
+            EXTRACT_LINE_STATUS.needsHumanReview,
+          ]),
+        ),
+      );
+
+    await deps.db
+      .update(ingestDocuments)
+      .set({
+        status:
+          pending.length === 0
+            ? INGEST_DOCUMENT_STATUS.confirmed
+            : INGEST_DOCUMENT_STATUS.partiallyConfirmed,
+      })
+      .where(eq(ingestDocuments.id, document.id));
+
+    await writeAudit(deps, {
+      tenantId: input.tenantId,
+      type: "constitution.fracoes_confirmed",
+      entityType: "ingest_document",
+      entityId: document.id,
+      actor: input.actor,
+      after: {
+        created: rows.map((f) => ({
+          id: f.id,
+          codigo: f.codigo,
+          permilagem: f.permilagem,
+          permilagemCentesimas: f.permilagemCentesimas,
+        })),
+        sum,
+      },
+    });
+
+    await publishDomainEvent(deps, {
+      tenantId: input.tenantId,
+      type: "ConstitutionFracoesConfirmed",
+      aggregateType: "ingest_document",
+      aggregateId: document.id,
+      payload: { count: rows.length, sum },
+      correlationId: input.actor?.requestId ?? null,
+    });
+
+  return { fracoes: rows, permilagemSum: sum, permilagemCentesimasSum: sum };
 }
 
 export async function confirmContactLines(
@@ -845,16 +1022,26 @@ export async function approveBudgetAndCreateObligations(
   const fracoes = await deps.db
     .select()
     .from(constitutionFracoes)
-    .where(eq(constitutionFracoes.tenantId, input.tenantId));
+    .where(eq(constitutionFracoes.tenantId, input.tenantId))
+    .orderBy(asc(constitutionFracoes.codigo));
   if (fracoes.length === 0) {
     throw new DomainError("no_fracoes", "Confirme frações antes de aprovar o orçamento", 400);
   }
 
-  const sum = fracoes.reduce((a, f) => a + f.permilagem, 0);
-  if (sum !== PERMILAGEM_TOTAL) {
+  const missing = fracoes.filter((f) => f.permilagemCentesimas == null);
+  if (missing.length > 0) {
+    const codigos = missing.map((f) => f.codigo).join(", ");
+    throw new DomainError(
+      "permilagem_centesimas_missing",
+      `Faltam permilagem_centesimas nas frações ${codigos}. A constituição é anterior à migração 0011: reconfirme o regulamento para gravar as centésimas de ‰. Nada foi aprovado.`,
+      400,
+    );
+  }
+  const sum = fracoes.reduce((a, f) => a + (f.permilagemCentesimas ?? 0), 0);
+  if (sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
     throw new DomainError(
       "permilagem_sum",
-      `Σ permilagens do tenant = ${sum}‰; tem de ser ${PERMILAGEM_TOTAL}‰`,
+      `Σ permilagem_centesimas do tenant = ${sum}; tem de ser ${PERMILAGEM_CENTESIMAS_TOTAL}.`,
       400,
     );
   }
@@ -870,10 +1057,15 @@ export async function approveBudgetAndCreateObligations(
     let allocated = 0;
     for (let i = 0; i < fracoes.length; i++) {
       const fracao = fracoes[i]!;
+      // Resto F2, determinístico: ORDER BY codigo ASC (já aplicado no SELECT).
+      // Cada fracção excepto a última recebe floor(amountCents * permilagem_centesimas / 100000).
+      // O resto inteiro de cêntimos vai todo para a última fracção. Não é largest-remainder.
+      // A constituição não usa este resto: Σ ≠ 100000 falha antes, sem alterar valores.
       const isLast = i === fracoes.length - 1;
+      const share = fracao.permilagemCentesimas ?? 0;
       const amount = isLast
         ? line.amountCents - allocated
-        : Math.floor((line.amountCents * fracao.permilagem) / PERMILAGEM_TOTAL);
+        : Math.floor((line.amountCents * share) / PERMILAGEM_CENTESIMAS_TOTAL);
       allocated += amount;
       const [row] = await deps.db
         .insert(obligations)

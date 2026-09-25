@@ -21,6 +21,7 @@ import {
   assertF1UploadFile,
   F1_MAX_UPLOAD_BYTES,
 } from "../application/constitution/f1-upload-guard";
+import type { FracaoExtractPayload } from "../domain/constitution";
 import { DomainError } from "../domain/errors";
 import type { KernelDeps } from "../infra/kernel-deps";
 import {
@@ -215,7 +216,7 @@ export function createF1Routes(deps: KernelDeps) {
         const body = (await c.req.json().catch(() => ({}))) as {
           confirmations?: Array<{
             lineId: string;
-            payload?: { codigo: string; tipo?: string; permilagem: number };
+            payload?: FracaoExtractPayload;
             reject?: boolean;
           }>;
         };

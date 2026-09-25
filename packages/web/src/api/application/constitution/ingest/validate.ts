@@ -2,7 +2,7 @@
  * Validação determinística. A confiança sai destes checks, nunca de um score de LLM.
  * Não confirma linhas.
  */
-import { PERMILAGEM_TOTAL } from "../../../domain/constitution";
+import { PERMILAGEM_CENTESIMAS_TOTAL } from "../../../domain/permilagem-centesimas";
 import {
   INGEST_STAGES,
   REVIEW_STATE,
@@ -43,7 +43,7 @@ export function validateDrafts(input: {
         message: "Código repetido no documento.",
       });
     }
-    const quotaIdentified = draft.permilagem != null;
+    const quotaIdentified = draft.permilagemCentesimas != null;
     const checks: SystemCheck[] = [
       {
         id: "codigo_present",
@@ -81,7 +81,7 @@ export function validateDrafts(input: {
     };
   });
 
-  const withValue = units.filter((unit) => unit.permilagem != null);
+  const withValue = units.filter((unit) => unit.permilagemCentesimas != null);
   const blocking: IngestPipelineSummary["blocking"] = [];
   const humanLines = units.filter((unit) => unit.review === REVIEW_STATE.needsHumanReview).length;
   if (humanLines > 0) {
@@ -113,17 +113,17 @@ export function validateDrafts(input: {
       passed: true,
       detail: `${units.length} de ${units.length} unidades com permilagem`,
     });
-    const sum = withValue.reduce((acc, unit) => acc + (unit.permilagem ?? 0), 0);
-    const sumOk = sum === PERMILAGEM_TOTAL;
+    const sum = withValue.reduce((acc, unit) => acc + (unit.permilagemCentesimas ?? 0), 0);
+    const sumOk = sum === PERMILAGEM_CENTESIMAS_TOTAL;
     documentChecks.push({
       id: "permilagem_sum_1000",
       passed: sumOk,
-      detail: `Σ = ${sum}‰`,
+      detail: `Σ = ${sum} centésimas (1000,00‰ = ${PERMILAGEM_CENTESIMAS_TOTAL})`,
     });
     if (!sumOk) {
       blocking.push({
         code: "permilagem_sum",
-        message: `Σ permilagens = ${sum}‰; exige ${PERMILAGEM_TOTAL}‰.`,
+        message: `Σ permilagem_centesimas = ${sum}; exige ${PERMILAGEM_CENTESIMAS_TOTAL}. O valor de cada unidade mantém-se.`,
       });
     }
   }

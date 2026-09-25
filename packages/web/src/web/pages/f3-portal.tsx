@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { IosPushSpikeNote } from "../components/PwaInstallPrompt";
+import { formatPermilagemCentesimas } from "../../api/domain/permilagem-centesimas";
 import { authClient, clearToken, getToken } from "../lib/auth";
 import { probeNetworkOnline } from "../lib/pwa";
 
@@ -19,7 +20,8 @@ type FractionBalance = {
   source: "ledger";
   fracaoId: string;
   fracaoCodigo: string;
-  permilagem: number;
+  permilagem: number | null;
+  permilagemCentesimas?: number | null;
   originalCents: number;
   allocatedCents: number;
   openCents: number;
@@ -365,7 +367,11 @@ export default function F3PortalPage() {
             <div>
               <h2 className="font-semibold">Fração {fracao.fracaoCodigo}</h2>
               <p className="text-sm text-neutral-500">
-                Permilagem {fracao.permilagem}‰ · Original {formatCents(fracao.originalCents)} ·
+                Permilagem {fracao.permilagemCentesimas != null
+                  ? `${formatPermilagemCentesimas(fracao.permilagemCentesimas)}‰`
+                  : fracao.permilagem != null
+                    ? `${fracao.permilagem}‰ (legado)`
+                    : "—"} · Original {formatCents(fracao.originalCents)} ·
                 Alocado {formatCents(fracao.allocatedCents)}
               </p>
             </div>

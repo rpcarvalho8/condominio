@@ -4,7 +4,7 @@
 **Perfil:** `unit_share`. Outros perfis e falsos positivos (mapa de dívidas ≠ orçamento): [ADR-044](ADR-LOG.md), [F1-INGEST-CORPUS](F1-INGEST-CORPUS.md).  
 **Não é:** a cascata do PR #31 (delimitado → regex → Groq JSON). Esses padrões não são o contrato.
 
-Cada exemplo abaixo é uma representação diferente dos **mesmos** dois factos: a unidade A vale 600‰ e a unidade B vale 400‰. O resultado é sempre `CondominiumUnit`. A evidência e o `transform` mudam; `codigo` e `permilagem` não.
+Cada exemplo abaixo é uma representação diferente dos **mesmos** dois factos: a unidade A vale 600‰ e a unidade B vale 400‰. O valor canónico é `permilagem_centesimas` (centésimas de ‰): 600‰ = 60000 e 400‰ = 40000. O check `permilagem_sum_1000` exige Σ = 100000. Estes exemplos são ‰ inteiros, por isso `permilagem` coincide com o número em ‰. O resultado é sempre `CondominiumUnit`. A evidência e o `transform` mudam; `codigo` e a permilagem não.
 
 Nenhum exemplo cria frações. O estado das linhas coerentes é `pending_review`: o admin ainda confirma linha a linha (ADR-017).
 
@@ -18,6 +18,7 @@ Confiança, em todos os casos coerentes: checks do sistema todos verdadeiros (`s
     "codigo": "A",
     "designacao_original": "<texto original desta representação>",
     "permilagem": 600,
+    "permilagem_centesimas": 60000,
     "origem": "<table | key_value | prose>",
     "evidence": [
       {
@@ -37,6 +38,7 @@ Confiança, em todos os casos coerentes: checks do sistema todos verdadeiros (`s
   {
     "codigo": "B",
     "permilagem": 400,
+    "permilagem_centesimas": 40000,
     "review": "pending_review"
   }
 ]

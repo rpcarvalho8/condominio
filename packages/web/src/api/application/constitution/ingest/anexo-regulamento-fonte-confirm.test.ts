@@ -1,6 +1,7 @@
 /**
  * Regressão Fonte: pipeline + confirmação humana explícita.
- * M: 40→39 é DECISÃO DO OPERADOR no lote de confirmação — nunca regra automática.
+ * O valor documental de M (3950) confirma-se sem ajuste.
+ * Um valor inventado não fecha a soma e não grava frações.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
@@ -84,7 +85,7 @@ afterAll(() => {
 });
 
 describe("F1 Fonte — regressão com confirmação humana explícita", () => {
-  test("blocking Σ=1001‰; operador ajusta M 40→39; constitution Σ=1000‰", async () => {
+  test("Σ centésimas = 100000 com M = 3950; valor inventado não grava", async () => {
     const bytes = fs.readFileSync(FIXTURE);
 
     const pipeline = await runIngestPipeline({
@@ -95,16 +96,16 @@ describe("F1 Fonte — regressão com confirmação humana explícita", () => {
     expect(pipeline.units).toHaveLength(33);
     expect(pipeline.units.filter((unit) => unit.review === "pending_review")).toHaveLength(33);
     expect(pipeline.units.filter((unit) => unit.review === "needs_human_review")).toHaveLength(0);
-    const sumRound = pipeline.units.reduce((acc, unit) => acc + (unit.permilagem ?? 0), 0);
-    expect(sumRound).toBe(1001);
-    expect(pipeline.summary.blocking.some((item) => item.code === "permilagem_sum")).toBe(true);
+    const sum = pipeline.units.reduce((acc, unit) => acc + (unit.permilagemCentesimas ?? 0), 0);
+    expect(sum).toBe(100000);
+    expect(pipeline.summary.blocking.some((item) => item.code === "permilagem_sum")).toBe(false);
     expect(pipeline.summary.readyForConfirmation).toBe(33);
 
     const m = pipeline.units.find((unit) => unit.codigo === "M")!;
-    expect(m.permilagem).toBe(40);
+    expect(m.permilagemCentesimas).toBe(3950);
+    expect(m.permilagem).toBeNull();
     expect(m.evidence.find((item) => item.field === "permilagem")?.originalText).toBe("39,50");
 
-    // Fail-closed: confirmar o lote arredondado sem ajuste humano deve falhar.
     const { document } = await uploadIngestDocumentFile(deps, {
       tenantId: TENANT,
       kind: INGEST_DOCUMENT_KINDS.regulamento,
@@ -118,44 +119,55 @@ describe("F1 Fonte — regressão com confirmação humana explícita", () => {
       actor: { personId, userId: ADMIN },
     });
     expect(extracted.lines).toHaveLength(33);
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(0);
 
-    await expect(
-      confirmFracaoLines(deps, {
-        tenantId: TENANT,
-        documentId: document.id,
-        confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
-        actor: { personId, userId: ADMIN },
-      }),
-    ).rejects.toMatchObject({ code: "permilagem_sum" });
-
-    // Decisão humana explícita (não regra automática): M 40 → 39.
-    const confirmations = extracted.lines.map((line) => {
+    const invented = extracted.lines.map((line) => {
       const payload = JSON.parse(line.payloadJson) as {
         codigo: string;
-        permilagem: number;
         tipo?: string;
+        permilagem_centesimas: number;
       };
       if (payload.codigo === "M") {
         return {
           lineId: line.id,
-          payload: { codigo: "M", tipo: payload.tipo ?? "fracao", permilagem: 39 },
+          payload: {
+            codigo: "M",
+            tipo: payload.tipo ?? "fracao",
+            permilagem: null,
+            permilagem_centesimas: 3951,
+          },
         };
       }
       return { lineId: line.id };
     });
+    await expect(
+      confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: document.id,
+        confirmations: invented,
+        actor: { personId, userId: ADMIN },
+      }),
+    ).rejects.toMatchObject({ code: "permilagem_sum" });
+    expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(0);
 
     const confirmed = await confirmFracaoLines(deps, {
       tenantId: TENANT,
       documentId: document.id,
-      confirmations,
+      confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
       actor: { personId, userId: ADMIN },
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemCentesimasSum).toBe(100000);
     expect(confirmed.fracoes).toHaveLength(33);
 
     const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
     expect(fracoes).toHaveLength(33);
-    expect(fracoes.reduce((acc, row) => acc + row.permilagem, 0)).toBe(1000);
-    expect(fracoes.find((row) => row.codigo === "M")?.permilagem).toBe(39);
+    expect(fracoes.reduce((acc, row) => acc + (row.permilagemCentesimas ?? 0), 0)).toBe(100000);
+    const storedM = fracoes.find((row) => row.codigo === "M");
+    expect(storedM?.permilagemCentesimas).toBe(3950);
+    expect(storedM?.permilagem).toBeNull();
+    for (const row of fracoes) {
+      const source = pipeline.units.find((unit) => unit.codigo === row.codigo);
+      expect(row.permilagemCentesimas).toBe(source?.permilagemCentesimas ?? null);
+    }
   });
 });

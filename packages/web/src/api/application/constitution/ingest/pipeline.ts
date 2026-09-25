@@ -3,6 +3,7 @@
  * Documentos de orçamento não entram aqui.
  */
 import { EXTRACT_LINE_KINDS, type StructuredExtraction } from "../../../domain/constitution";
+import { formatPermilagemCentesimas } from "../../../domain/permilagem-centesimas";
 import { canonicalizeObservations } from "./canonicalize";
 import type { IngestPipelineResult, LlmHypothesis } from "./contracts";
 import { discoverDocument } from "./intake";
@@ -31,14 +32,15 @@ export function evidenceExcerpt(unit: IngestPipelineResult["units"][number]): st
     .filter(Boolean)
     .join(", ");
   const original = perm?.originalText ?? unit.designacaoOriginal;
-  if (unit.permilagem == null) {
+  if (unit.permilagemCentesimas == null) {
     const why = unit.warnings.map((warning) => warning.message).join(" ");
     return `${unit.codigo || "?"} sem permilagem confirmável (${where}). ${why} Original: «${original}». ${unit.designacaoOriginal}`;
   }
+  const shown = `${formatPermilagemCentesimas(unit.permilagemCentesimas)}‰`;
   if (perm?.transform === "percent_to_permille:*10") {
-    return `${unit.codigo} → ${unit.permilagem}‰ porque «${original}» está em percentagem e a soma das percentagens do documento é 100 (${where}); transform=percent_to_permille:*10. Original: «${unit.designacaoOriginal}»`;
+    return `${unit.codigo} → ${shown} porque «${original}» está em percentagem e a soma das percentagens do documento é 100 (${where}); transform=percent_to_permille:*10. Original: «${unit.designacaoOriginal}»`;
   }
-  return `${unit.codigo} → ${unit.permilagem}‰ porque coluna=${perm?.cell ?? "—"}, valor=${original}, unidade=‰ (${where}); transform=${perm?.transform ?? "identity_permille"}. Original: «${unit.designacaoOriginal}»`;
+  return `${unit.codigo} → ${shown} porque coluna=${perm?.cell ?? "—"}, valor=${original}, unidade=‰ (${where}); transform=${perm?.transform ?? "identity_permille"}. Original: «${unit.designacaoOriginal}»`;
 }
 
 export function pipelineToStructuredExtraction(result: IngestPipelineResult): StructuredExtraction {
@@ -50,6 +52,7 @@ export function pipelineToStructuredExtraction(result: IngestPipelineResult): St
         codigo: unit.codigo,
         tipo: "fracao",
         permilagem: unit.permilagem,
+        permilagem_centesimas: unit.permilagemCentesimas,
         designacao_original: unit.designacaoOriginal,
         origem: unit.origem,
         evidence: unit.evidence,

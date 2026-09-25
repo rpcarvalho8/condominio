@@ -1,6 +1,6 @@
 /**
  * F1 — Ingestão + Constituição (vertical slice).
- * Prova: upload ≠ definitivo; confirmação linha a linha; Σ=1000‰; obligations do orçamento.
+ * Prova: upload ≠ definitivo; confirmação linha a linha; Σ permilagem_centesimas = 100000; obligations do orçamento.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
@@ -16,6 +16,7 @@ import {
   confirmFracaoLines,
   createAnnualBudget,
   editExtractLine,
+  isUniqueCodigoConstraint,
   extractDocumentLines,
   listConstitutionFracoes,
   listExtractLines,
@@ -192,7 +193,7 @@ describe("F1 constituição", () => {
     ).rejects.toBeInstanceOf(DomainError);
   });
 
-  test("confirmação exige Σ permilagens = 1000‰", async () => {
+  test("confirmação exige Σ permilagem_centesimas = 100000", async () => {
     const doc = await registerIngestDocument(deps, {
       tenantId: TENANT,
       kind: INGEST_DOCUMENT_KINDS.regulamento,
@@ -257,7 +258,7 @@ describe("F1 constituição", () => {
       documentId: doc.id,
       confirmations: lines.map((l) => ({ lineId: l.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
     expect(confirmed.fracoes).toHaveLength(2);
 
     const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
@@ -299,6 +300,533 @@ describe("F1 constituição", () => {
     });
     expect(again.idempotent).toBe(true);
     expect(again.obligations.length).toBe(approved.obligations.length);
+  });
+
+  test("resto F2 é determinístico na colação BINARY, com uma fracção e com resto zero", async () => {
+    // ORDER BY codigo ASC, colação BINARY: 10, 1A, 9, AA, B, a. O resto vai para "a".
+    const codes = ["10", "9", "1A", "AA", "B", "a"];
+    const shares: Record<string, number> = {
+      "10": 1,
+      "1A": 10,
+      "9": 100,
+      AA: 1000,
+      B: 10000,
+      a: 88889,
+    };
+
+    async function centsByCodigo(
+      insertOrder: string[],
+      quota: Record<string, number>,
+      amountCents: number,
+    ): Promise<Record<string, number>> {
+      for (const table of [
+        "obligations",
+        "annual_budget_lines",
+        "annual_budgets",
+        "constitution_fracoes",
+        "extract_lines",
+        "ingest_documents",
+      ]) {
+        await client.execute(`DELETE FROM ${table}`);
+      }
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename: "resto.pdf",
+      });
+      const { lines } = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: insertOrder.map((codigo) => ({
+            kind: "fracao",
+            payload: { codigo, permilagem_centesimas: quota[codigo] },
+            sourceExcerpt: `${codigo} — quota`,
+          })),
+        },
+      });
+      const lineIdByCodigo = new Map(
+        lines.map((line) => {
+          const payload = JSON.parse(line.payloadJson) as { codigo: string };
+          return [payload.codigo, line.id] as const;
+        }),
+      );
+      await confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        confirmations: insertOrder.map((codigo) => ({ lineId: lineIdByCodigo.get(codigo)! })),
+      });
+      const fcr = Math.max(1, Math.ceil(amountCents * 0.1));
+      const budget = await createAnnualBudget(deps, {
+        tenantId: TENANT,
+        year: 2027,
+        title: "Resto",
+        lines: [
+          { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents },
+          { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: fcr },
+        ],
+      });
+      const approved = await approveBudgetAndCreateObligations(deps, {
+        tenantId: TENANT,
+        budgetId: budget.budget.id,
+      });
+      const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
+      const idToCodigo = new Map(fracoes.map((f) => [f.id, f.codigo]));
+      const out: Record<string, number> = {};
+      for (const obligation of approved.obligations) {
+        if (obligation.kind !== BUDGET_LINE_KINDS.quotaCorrente) continue;
+        const codigo = idToCodigo.get(obligation.fracaoId);
+        if (codigo) out[codigo] = obligation.amountCents;
+      }
+      return out;
+    }
+
+    const expected = { "10": 0, "1A": 0, "9": 0, AA: 0, B: 1, a: 9 };
+    const firstOrder = await centsByCodigo(codes, shares, 10);
+    const reversed = await centsByCodigo([...codes].reverse(), shares, 10);
+    expect(firstOrder).toEqual(expected);
+    expect(reversed).toEqual(firstOrder);
+
+    const alone = await centsByCodigo(["Z"], { Z: 100000 }, 12345);
+    expect(alone).toEqual({ Z: 12345 });
+
+    const even = { A: 50000, B: 50000 };
+    const zeroA = await centsByCodigo(["B", "A"], even, 100);
+    const zeroB = await centsByCodigo(["A", "B"], even, 100);
+    expect(zeroA).toEqual({ A: 50, B: 50 });
+    expect(zeroB).toEqual(zeroA);
+  });
+
+  async function insertLegacyFracao(id: string, codigo: string, permilagem: number) {
+    await client.execute({
+      sql: `INSERT INTO constitution_fracoes (
+        id, tenant_id, codigo, tipo, permilagem, permilagem_centesimas,
+        source_excerpt, status, created_at, confirmed_at
+      ) VALUES (?, ?, ?, 'fracao', ?, NULL, 'legado', 'confirmed', 1, 1)`,
+      args: [id, TENANT, codigo, permilagem],
+    });
+  }
+
+  test("constituição anterior a 0011: aprovar sem centésimas pede reconfirmação", async () => {
+    await insertLegacyFracao("legacy-e", "E", 3);
+    await insertLegacyFracao("legacy-m", "M", 40);
+    const budget = await createAnnualBudget(deps, {
+      tenantId: TENANT,
+      year: 2026,
+      title: "Legado",
+      lines: [
+        { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents: 10_000 },
+        { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: 1_000 },
+      ],
+    });
+    const failed = await approveBudgetAndCreateObligations(deps, {
+      tenantId: TENANT,
+      budgetId: budget.budget.id,
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(DomainError);
+    const domain = failed as DomainError;
+    expect(domain.code).toBe("permilagem_centesimas_missing");
+    expect(domain.message).toContain("E");
+    expect(domain.message).toContain("M");
+    expect(domain.message).toMatch(/0011/);
+    expect(domain.message.toLowerCase()).toMatch(/reconfirm/);
+    expect(domain.message.toLowerCase()).toMatch(/regulamento/);
+    const still = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(still.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
+    expect(still.every((f) => f.permilagemCentesimas == null)).toBe(true);
+  });
+
+  test("reconfirmação completa centésimas no mesmo id e o orçamento aprova", async () => {
+    await insertLegacyFracao("legacy-e", "E", 961);
+    await insertLegacyFracao("legacy-m", "M", 40);
+    const doc = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "reconfirmacao.pdf",
+    });
+    const { lines } = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: {
+              codigo: "M",
+              permilagem: 39,
+              evidence: [
+                { field: "permilagem", originalText: "38,80", transform: "identity_permille" },
+              ],
+            },
+            sourceExcerpt: "M — 38,80",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "E", permilagem_centesimas: 96120 },
+            sourceExcerpt: "E — 961,20",
+          },
+        ],
+      },
+    });
+    const confirmed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      confirmations: lines.map((line) => ({ lineId: line.id })),
+    });
+    expect(confirmed.permilagemCentesimasSum).toBe(100000);
+    const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(fracoes.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
+    const storedM = fracoes.find((f) => f.codigo === "M")!;
+    const storedE = fracoes.find((f) => f.codigo === "E")!;
+    expect(storedM.permilagemCentesimas).toBe(3880);
+    expect(storedM.permilagem).toBeNull();
+    expect(storedE.permilagemCentesimas).toBe(96120);
+    expect(storedE.permilagem).toBeNull();
+
+    const audit = await client.execute(
+      "SELECT entity_id, before_json, after_json FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
+    );
+    expect(audit.rows.map((row) => String(row.entity_id)).sort()).toEqual(["legacy-e", "legacy-m"]);
+
+    const budget = await createAnnualBudget(deps, {
+      tenantId: TENANT,
+      year: 2028,
+      title: "Depois da reconfirmação",
+      lines: [
+        { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents: 10_000 },
+        { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: 1_000 },
+      ],
+    });
+    const approved = await approveBudgetAndCreateObligations(deps, {
+      tenantId: TENANT,
+      budgetId: budget.budget.id,
+    });
+    expect(approved.idempotent).toBe(false);
+    expect(new Set(approved.obligations.map((row) => row.fracaoId))).toEqual(
+      new Set(["legacy-e", "legacy-m"]),
+    );
+
+    const again = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "duplicado.pdf",
+    });
+    const second = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: again.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "M", permilagem_centesimas: 3950 },
+            sourceExcerpt: "M",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "E", permilagem_centesimas: 96050 },
+            sourceExcerpt: "E",
+          },
+        ],
+      },
+    });
+    const conflict = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: again.id,
+      confirmations: second.lines.map((line) => ({ lineId: line.id })),
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(conflict).toBeInstanceOf(DomainError);
+    const domain = conflict as DomainError;
+    expect(domain.code).toBe("duplicate_codigo");
+    expect(domain.httpStatus).toBe(409);
+    expect(domain.message).not.toMatch(/UNIQUE constraint|SQLITE/i);
+    expect(domain.message.toLowerCase()).toMatch(/não crie outra fração/);
+    const afterConflict = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(afterConflict.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
+  });
+
+  test("M1-race: reconfirmações concorrentes, um 200 e um 409 reconfirm_conflict, sem mistura", async () => {
+    await insertLegacyFracao("legacy-a", "A", 600);
+    await insertLegacyFracao("legacy-b", "B", 400);
+
+    async function readyPair(filename: string, a: number, b: number) {
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename,
+      });
+      const extracted = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: [
+            {
+              kind: "fracao",
+              payload: { codigo: "A", permilagem_centesimas: a },
+              sourceExcerpt: "A",
+            },
+            {
+              kind: "fracao",
+              payload: { codigo: "B", permilagem_centesimas: b },
+              sourceExcerpt: "B",
+            },
+          ],
+        },
+      });
+      return () =>
+        confirmFracaoLines(deps, {
+          tenantId: TENANT,
+          documentId: doc.id,
+          confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
+        });
+    }
+
+    const confirmSixty = await readyPair("reconfirm-60000.pdf", 60000, 40000);
+    const confirmFifty = await readyPair("reconfirm-55000.pdf", 55000, 45000);
+    const results = await Promise.allSettled([confirmSixty(), confirmFifty()]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    const err = rejected[0]?.status === "rejected" ? rejected[0].reason : null;
+    expect(err).toBeInstanceOf(DomainError);
+    const domain = err as DomainError;
+    expect(domain.code).toBe("reconfirm_conflict");
+    expect(domain.httpStatus).toBe(409);
+
+    const winnerIsSixty = results[0]?.status === "fulfilled";
+    const winnerA = winnerIsSixty ? 60000 : 55000;
+    const winnerB = winnerIsSixty ? 40000 : 45000;
+    const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(stored.map((row) => row.id).sort()).toEqual(["legacy-a", "legacy-b"]);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(winnerA);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(winnerB);
+
+    const audits = await client.execute(
+      "SELECT entity_id, after_json FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
+    );
+    expect(audits.rows).toHaveLength(2);
+    const byId = new Map(stored.map((row) => [row.id, row.codigo]));
+    const audited = new Map(
+      audits.rows.map((row) => {
+        const after = JSON.parse(String(row.after_json)) as { permilagem_centesimas?: number };
+        return [byId.get(String(row.entity_id)), after.permilagem_centesimas];
+      }),
+    );
+    expect(audited.get("A")).toBe(winnerA);
+    expect(audited.get("B")).toBe(winnerB);
+    const confirmedDocs = await client.execute(
+      "SELECT COUNT(*) AS n FROM audit_events WHERE type = 'constitution.fracoes_confirmed'",
+    );
+    expect(Number(confirmedDocs.rows[0]!.n)).toBe(1);
+  });
+
+  test("edição humana sem inteiro grava originalText formatado", async () => {
+    const doc = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "edicao.pdf",
+    });
+    const { lines } = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "M", permilagem: null, permilagem_centesimas: 3950 },
+            sourceExcerpt: "M 39,50",
+          },
+        ],
+      },
+    });
+    const edited = await editExtractLine(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      lineId: lines[0]!.id,
+      payload: { codigo: "M", permilagem: null, permilagem_centesimas: 3950 },
+    });
+    const stored = JSON.parse(edited.line.editedPayloadJson!) as {
+      evidence?: Array<{ transform?: string; originalText?: string }>;
+    };
+    const human = stored.evidence?.find((item) => item.transform === "human_edit");
+    expect(human?.originalText).toBe("39,50");
+  });
+
+  test("troca humana legada A/B fica gravada; unidade rejeitada pede re-extração", async () => {
+    const doc = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "troca-humana.pdf",
+    });
+    const { lines } = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: {
+              codigo: "A",
+              permilagem: 400,
+              evidence: [
+                { field: "permilagem", originalText: "600,00", transform: "identity_permille" },
+                { field: "permilagem", originalText: "400", transform: "human_edit" },
+              ],
+            },
+            sourceExcerpt: "A 400",
+          },
+          {
+            kind: "fracao",
+            payload: {
+              codigo: "B",
+              permilagem: 600,
+              evidence: [
+                { field: "permilagem", originalText: "400,00", transform: "identity_permille" },
+                { field: "permilagem", originalText: "600", transform: "human_edit" },
+              ],
+            },
+            sourceExcerpt: "B 600",
+          },
+        ],
+      },
+    });
+    const confirmed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      confirmations: lines.map((line) => ({ lineId: line.id })),
+    });
+    expect(confirmed.permilagemCentesimasSum).toBe(100000);
+    const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(fracoes.find((row) => row.codigo === "A")?.permilagemCentesimas).toBe(40000);
+    expect(fracoes.find((row) => row.codigo === "B")?.permilagemCentesimas).toBe(60000);
+
+    const ambiguous = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "unidade-rejeitada.pdf",
+    });
+    const rejected = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: ambiguous.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: {
+              codigo: "J",
+              permilagem: null,
+              permilagem_centesimas: null,
+              warnings: [{ code: "ambiguous_unit" }],
+              evidence: [{ field: "permilagem", originalText: "38,80", transform: null }],
+            },
+            sourceExcerpt: "J 38,80",
+          },
+          {
+            kind: "fracao",
+            payload: {
+              codigo: "K",
+              permilagem: null,
+              permilagem_centesimas: null,
+              warnings: [{ code: "mixed_units" }],
+              evidence: [{ field: "permilagem", originalText: "3,88%", transform: null }],
+            },
+            sourceExcerpt: "K 3,88%",
+          },
+        ],
+      },
+    });
+    const failed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: ambiguous.id,
+      confirmations: [{ lineId: rejected.lines[0]!.id }],
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(DomainError);
+    const domain = failed as DomainError;
+    expect(domain.code).toBe("permilagem_reextract");
+    expect(domain.httpStatus).toBe(400);
+    const still = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(still.map((row) => row.codigo).sort()).toEqual(["A", "B"]);
+  });
+
+  test("Σ inválida não grava a rejeição pedida no mesmo lote", async () => {
+    const doc = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "rejeicao-soma.pdf",
+    });
+    const extracted = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "A", permilagem_centesimas: 60000 },
+            sourceExcerpt: "A",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "B", permilagem_centesimas: 40000 },
+            sourceExcerpt: "B",
+          },
+        ],
+      },
+    });
+    const failed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      confirmations: [
+        { lineId: extracted.lines[0]!.id, reject: true },
+        { lineId: extracted.lines[1]!.id },
+      ],
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(DomainError);
+    const domain = failed as DomainError;
+    expect(domain.code).toBe("permilagem_sum");
+    expect(domain.message).toMatch(/Nenhum valor foi alterado/);
+    const after = await listExtractLines(deps, { tenantId: TENANT, documentId: doc.id });
+    expect(after.lines.map((line) => line.status)).toEqual(["pending_review", "pending_review"]);
+    const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(fracoes).toHaveLength(0);
+  });
+
+  test("UNIQUE embrulhado pelo Drizzle conta como duplicate_codigo; NOT NULL não", () => {
+    const cause = Object.assign(
+      new Error(
+        "UNIQUE constraint failed: constitution_fracoes.tenant_id, constitution_fracoes.codigo",
+      ),
+      {
+        code: "SQLITE_CONSTRAINT",
+        extendedCode: "SQLITE_CONSTRAINT_UNIQUE",
+        rawCode: 2067,
+      },
+    );
+    const wrapped = new Error(
+      "Failed query: insert into constitution_fracoes (id, tenant_id, codigo) values (?, ?, ?)",
+    );
+    (wrapped as Error & { cause?: unknown }).cause = cause;
+    expect(isUniqueCodigoConstraint(wrapped)).toBe(true);
+    expect(String(wrapped.message)).not.toMatch(/UNIQUE constraint/);
+
+    const notNull = Object.assign(
+      new Error("NOT NULL constraint failed: constitution_fracoes.codigo"),
+      { code: "SQLITE_CONSTRAINT", extendedCode: "SQLITE_CONSTRAINT_NOTNULL", rawCode: 1299 },
+    );
+    const wrappedNull = new Error("Failed query: insert into constitution_fracoes");
+    (wrappedNull as Error & { cause?: unknown }).cause = notNull;
+    expect(isUniqueCodigoConstraint(wrappedNull)).toBe(false);
   });
 
   test("FCR < 10% da quota é rejeitado", async () => {
@@ -343,7 +871,7 @@ describe("F1 constituição", () => {
       documentId: document.id,
       confirmations: extracted.lines.map((l) => ({ lineId: l.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
 
     const budget = await createAnnualBudget(deps, {
       tenantId: TENANT,
@@ -464,7 +992,7 @@ describe("F1 constituição", () => {
       documentId: document.id,
       confirmations: extracted.lines.map((l) => ({ lineId: l.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
   });
 
   test("OCR fraco marca HUMAN REVIEW e não confirma", async () => {
@@ -698,7 +1226,7 @@ describe("F1 HTTP upload guards", () => {
       permilagemSum: number;
       fracoes: Array<{ codigo: string; permilagem: number }>;
     };
-    expect(confirmedBody.permilagemSum).toBe(1000);
+    expect(confirmedBody.permilagemSum).toBe(100000);
     expect(confirmedBody.fracoes).toHaveLength(2);
     expect(confirmedBody.fracoes.every((f) => f.codigo !== "C")).toBe(true);
     expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(2);
@@ -737,7 +1265,7 @@ describe("F1 pipeline ADR-043 no fluxo /f1", () => {
       documentId: document.id,
       confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
   });
 
   test("cobertura incompleta não confirma o subconjunto", async () => {
@@ -781,7 +1309,7 @@ describe("F1 pipeline ADR-043 no fluxo /f1", () => {
         { lineId: gap.id, reject: true },
       ],
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
     expect(confirmed.fracoes).toHaveLength(2);
   });
 
@@ -841,6 +1369,6 @@ describe("F1 pipeline ADR-043 no fluxo /f1", () => {
       documentId: document.id,
       confirmations: listed.lines.map((line) => ({ lineId: line.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
   });
 });

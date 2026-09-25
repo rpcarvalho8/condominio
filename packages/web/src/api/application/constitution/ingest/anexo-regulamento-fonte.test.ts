@@ -1,6 +1,6 @@
 /**
- * Regressão: PDF textual real (Anexo Regulamento) → unit_share → Σ arredondada
- * e confirmação humana a fechar 1000‰. Sem OCR, sem parser da Fonte.
+ * Regressão: PDF textual real (Anexo Regulamento) → unit_share → Σ centésimas
+ * = 100000 sem ajuste. Sem OCR, sem parser da Fonte.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -9,6 +9,7 @@ import {
   extractEmbeddedTextFromBytes,
   extractIngestTextFromBytes,
 } from "../extractors/from-ocr";
+import { centesimasFromQuotaToken, legacyIntegerPermilagem } from "../../../domain/permilagem-centesimas";
 import { runIngestPipeline } from "./pipeline";
 
 const FIXTURE = join(
@@ -71,7 +72,7 @@ describe("F1 PDF textual — Anexo Regulamento Fonte", () => {
     expect(text).toContain("38,80");
   });
 
-  test("pipeline unit_share: 33 candidatos = valores da fonte; readyForConfirmation; Σ round=1001", async () => {
+  test("pipeline unit_share: 33 candidatos = valores da fonte; Σ centésimas = 100000", async () => {
     const bytes = readFileSync(FIXTURE);
     const result = await runIngestPipeline({
       bytes,
@@ -83,7 +84,7 @@ describe("F1 PDF textual — Anexo Regulamento Fonte", () => {
     expect(result.summary.profile).toBe("unit_share");
     expect(result.summary.representation).toBe("prose");
     expect(result.summary.readyForConfirmation).toBe(33);
-    expect(result.summary.needsHumanDecision).toBe(1);
+    expect(result.summary.needsHumanDecision).toBe(0);
     expect(result.units.every((unit) => unit.review === "pending_review")).toBe(true);
     expect(result.units.every((unit) => unit.warnings.length === 0)).toBe(true);
 
@@ -92,17 +93,23 @@ describe("F1 PDF textual — Anexo Regulamento Fonte", () => {
       expect(expected).toBeDefined();
       const original = unit.evidence.find((item) => item.field === "permilagem")?.originalText;
       expect(Number(String(original).replace(",", "."))).toBeCloseTo(expected!, 5);
-      expect(unit.permilagem).toBe(Math.round(expected!));
+      const parsed = centesimasFromQuotaToken(String(original), "permille");
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) continue;
+      expect(unit.permilagemCentesimas).toBe(parsed.centesimas);
+      expect(unit.permilagem).toBe(legacyIntegerPermilagem(parsed.centesimas));
       expect(unit.evidence.find((item) => item.field === "permilagem")?.transform).toBe(
         "identity_permille",
       );
     }
 
-    const sum = result.units.reduce((acc, unit) => acc + (unit.permilagem ?? 0), 0);
-    expect(sum).toBe(1001);
-    expect(result.summary.blocking.some((item) => item.code === "permilagem_sum")).toBe(true);
+    const sum = result.units.reduce((acc, unit) => acc + (unit.permilagemCentesimas ?? 0), 0);
+    expect(sum).toBe(100000);
+    expect(result.units.find((unit) => unit.codigo === "M")?.permilagemCentesimas).toBe(3950);
+    expect(result.units.find((unit) => unit.codigo === "M")?.permilagem).toBeNull();
+    expect(result.summary.blocking.some((item) => item.code === "permilagem_sum")).toBe(false);
     expect(result.summary.checks.find((check) => check.id === "permilagem_sum_1000")?.passed).toBe(
-      false,
+      true,
     );
   });
 });
