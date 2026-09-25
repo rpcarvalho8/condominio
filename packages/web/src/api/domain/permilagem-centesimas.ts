@@ -24,7 +24,11 @@ function pow10(n: number): number {
  * Mais de 2 casas no ‰ → too_many_decimals (a linha não é confirmável).
  */
 export function centesimasFromQuotaToken(raw: string, unit: QuotaUnit): CentesimasParse {
-  const trimmed = raw.trim().replace(/[‰%\s\u00a0]/g, "");
+  const original = raw.trim();
+  if (unit === "permille" && original.includes("%")) {
+    return { ok: false, reason: "invalid" };
+  }
+  const trimmed = original.replace(/[‰%\s\u00a0]/g, "");
   const match = /^(\d+)(?:[.,](\d+))?$/.exec(trimmed);
   if (!match) return { ok: false, reason: "invalid" };
   const whole = match[1]!;

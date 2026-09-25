@@ -22,6 +22,8 @@ describe("permilagem_centesimas", () => {
     });
     expect(centesimasFromQuotaToken("38,80", "permille")).toMatchObject({ centesimas: 3880 });
     expect(centesimasFromQuotaToken("600", "permille")).toMatchObject({ centesimas: 60000 });
+    expect(centesimasFromQuotaToken("3,88%", "permille")).toEqual({ ok: false, reason: "invalid" });
+    expect(centesimasFromQuotaToken("3,88%", "percent")).toMatchObject({ centesimas: 3880 });
     expect(formatPermilagemCentesimas(3950)).toBe("39,50");
     expect(legacyIntegerPermilagem(3950)).toBeNull();
     expect(legacyIntegerPermilagem(60000)).toBe(600);

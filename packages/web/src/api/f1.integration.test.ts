@@ -71,6 +71,26 @@ function buildF1App() {
     .route("/f1", createF1Routes(deps));
 }
 
+async function immediateWrite(handle: {
+  execute: (stmt: string | { sql: string; args?: unknown[] }) => Promise<unknown>;
+}) {
+  await handle.execute("BEGIN IMMEDIATE");
+  try {
+    await handle.execute({
+      sql: "UPDATE constitution_fracoes SET status = status WHERE tenant_id = ?",
+      args: [TENANT],
+    });
+    await handle.execute("COMMIT");
+  } catch (err) {
+    try {
+      await handle.execute("ROLLBACK");
+    } catch {
+      /* a ligação já não tem transacção */
+    }
+    throw err;
+  }
+}
+
 function xlsxFracoes(rows: Array<[string, number]>): Buffer {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([["codigo", "permilagem"], ...rows]);
@@ -740,22 +760,136 @@ describe("F1 constituição", () => {
       const rows = await listConstitutionFracoes(deps, { tenantId: TENANT });
       expect(rows).toHaveLength(2);
       expect(rows.map((row) => row.codigo).sort()).toEqual(["A", "B"]);
+      await immediateWrite(client);
+      await immediateWrite(client2);
     } finally {
       client2.close();
-      // A transação libSQL fica com a ligação até ao GC. Sem isto, o DELETE
-      // do teste seguinte vê SQLITE_BUSY.
-      Bun.gc(true);
-      for (let attempt = 0; attempt < 40; attempt++) {
-        try {
-          await client.execute("BEGIN IMMEDIATE");
-          await client.execute("ROLLBACK");
-          break;
-        } catch (err) {
-          if (attempt === 39) throw err;
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-      }
     }
+  });
+
+  test("duas confirmações sem conflito gravam as duas, no mesmo cliente e em clientes diferentes", async () => {
+    async function documentWith(
+      filename: string,
+      rows: Array<[string, number]>,
+    ) {
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename,
+      });
+      const extracted = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: rows.map(([codigo, centesimas]) => ({
+            kind: "fracao",
+            payload: { codigo, permilagem_centesimas: centesimas },
+            sourceExcerpt: codigo,
+          })),
+        },
+      });
+      return { doc, lines: extracted.lines };
+    }
+
+    const sameA = await documentWith("mesmo-cliente-a.pdf", [
+      ["A", 60000],
+      ["B", 40000],
+    ]);
+    const sameB = await documentWith("mesmo-cliente-b.pdf", [
+      ["C", 70000],
+      ["D", 30000],
+    ]);
+    const sameClient = await Promise.all([
+      confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: sameA.doc.id,
+        confirmations: sameA.lines.map((line) => ({ lineId: line.id })),
+      }),
+      confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: sameB.doc.id,
+        confirmations: sameB.lines.map((line) => ({ lineId: line.id })),
+      }),
+    ]);
+    expect(sameClient).toHaveLength(2);
+
+    const otherA = await documentWith("outro-cliente-a.pdf", [
+      ["E", 55000],
+      ["F", 45000],
+    ]);
+    const otherB = await documentWith("outro-cliente-b.pdf", [
+      ["G", 25000],
+      ["H", 75000],
+    ]);
+    const client2 = createClient({ url: `file:${DB_PATH}` });
+    const deps2: KernelDeps = { db: drizzle(client2, { schema }), getTenantId: () => TENANT };
+    try {
+      const both = await Promise.all([
+        confirmFracaoLines(deps, {
+          tenantId: TENANT,
+          documentId: otherA.doc.id,
+          confirmations: otherA.lines.map((line) => ({ lineId: line.id })),
+        }),
+        confirmFracaoLines(deps2, {
+          tenantId: TENANT,
+          documentId: otherB.doc.id,
+          confirmations: otherB.lines.map((line) => ({ lineId: line.id })),
+        }),
+      ]);
+      expect(both).toHaveLength(2);
+      await immediateWrite(client);
+      await immediateWrite(client2);
+    } finally {
+      client2.close();
+    }
+
+    const rows = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(rows.map((row) => row.codigo).sort()).toEqual(["A", "B", "C", "D", "E", "F", "G", "H"]);
+  });
+
+  test("Σ inválida não grava a rejeição pedida no mesmo lote", async () => {
+    const doc = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "rejeicao-soma.pdf",
+    });
+    const extracted = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "A", permilagem_centesimas: 60000 },
+            sourceExcerpt: "A",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "B", permilagem_centesimas: 40000 },
+            sourceExcerpt: "B",
+          },
+        ],
+      },
+    });
+    const failed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      confirmations: [
+        { lineId: extracted.lines[0]!.id, reject: true },
+        { lineId: extracted.lines[1]!.id },
+      ],
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(DomainError);
+    const domain = failed as DomainError;
+    expect(domain.code).toBe("permilagem_sum");
+    expect(domain.message).toMatch(/Nenhum valor foi alterado/);
+    const after = await listExtractLines(deps, { tenantId: TENANT, documentId: doc.id });
+    expect(after.lines.map((line) => line.status)).toEqual(["pending_review", "pending_review"]);
+    const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(fracoes).toHaveLength(0);
   });
 
   test("UNIQUE embrulhado pelo Drizzle conta como duplicate_codigo; NOT NULL não", () => {
