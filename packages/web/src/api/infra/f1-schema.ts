@@ -172,7 +172,7 @@ const CONSTITUTION_COLUMNS = [
   "confirmed_by_person_id",
 ] as const;
 
-const PRE_0011_COLUMNS = new Set(
+const PRE_0011_COLUMNS = new Set<string>(
   CONSTITUTION_COLUMNS.filter((name) => name !== "permilagem_centesimas"),
 );
 

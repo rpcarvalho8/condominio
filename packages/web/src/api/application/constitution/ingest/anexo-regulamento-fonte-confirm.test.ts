@@ -133,6 +133,7 @@ describe("F1 Fonte — regressão com confirmação humana explícita", () => {
           payload: {
             codigo: "M",
             tipo: payload.tipo ?? "fracao",
+            permilagem: null,
             permilagem_centesimas: 3951,
           },
         };
@@ -166,7 +167,7 @@ describe("F1 Fonte — regressão com confirmação humana explícita", () => {
     expect(storedM?.permilagem).toBeNull();
     for (const row of fracoes) {
       const source = pipeline.units.find((unit) => unit.codigo === row.codigo);
-      expect(row.permilagemCentesimas).toBe(source?.permilagemCentesimas);
+      expect(row.permilagemCentesimas).toBe(source?.permilagemCentesimas ?? null);
     }
   });
 });
