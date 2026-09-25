@@ -1,6 +1,6 @@
 /**
  * F1 — Ingestão + Constituição (vertical slice).
- * Prova: upload ≠ definitivo; confirmação linha a linha; Σ=1000‰; obligations do orçamento.
+ * Prova: upload ≠ definitivo; confirmação linha a linha; Σ permilagem_centesimas = 100000; obligations do orçamento.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createClient } from "@libsql/client";
@@ -192,7 +192,7 @@ describe("F1 constituição", () => {
     ).rejects.toBeInstanceOf(DomainError);
   });
 
-  test("confirmação exige Σ permilagens = 1000‰", async () => {
+  test("confirmação exige Σ permilagem_centesimas = 100000", async () => {
     const doc = await registerIngestDocument(deps, {
       tenantId: TENANT,
       kind: INGEST_DOCUMENT_KINDS.regulamento,
@@ -257,7 +257,7 @@ describe("F1 constituição", () => {
       documentId: doc.id,
       confirmations: lines.map((l) => ({ lineId: l.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
     expect(confirmed.fracoes).toHaveLength(2);
 
     const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
@@ -299,6 +299,77 @@ describe("F1 constituição", () => {
     });
     expect(again.idempotent).toBe(true);
     expect(again.obligations.length).toBe(approved.obligations.length);
+  });
+
+  test("resto F2 vai todo para o último codigo, nas duas ordens de inserção", async () => {
+    const shares: Record<string, number> = { A: 20000, M: 30000, Z: 50000 };
+
+    async function centsByCodigo(insertOrder: string[]): Promise<Record<string, number>> {
+      for (const table of [
+        "obligations",
+        "annual_budget_lines",
+        "annual_budgets",
+        "constitution_fracoes",
+        "extract_lines",
+        "ingest_documents",
+      ]) {
+        await client.execute(`DELETE FROM ${table}`);
+      }
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename: "resto.pdf",
+      });
+      const { lines } = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: insertOrder.map((codigo) => ({
+            kind: "fracao",
+            payload: { codigo, permilagem_centesimas: shares[codigo] },
+            sourceExcerpt: `${codigo} — quota`,
+          })),
+        },
+      });
+      const lineIdByCodigo = new Map(
+        lines.map((line) => {
+          const payload = JSON.parse(line.payloadJson) as { codigo: string };
+          return [payload.codigo, line.id] as const;
+        }),
+      );
+      await confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        confirmations: insertOrder.map((codigo) => ({ lineId: lineIdByCodigo.get(codigo)! })),
+      });
+      const budget = await createAnnualBudget(deps, {
+        tenantId: TENANT,
+        year: 2027,
+        title: "Resto",
+        lines: [
+          { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents: 3 },
+          { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: 1 },
+        ],
+      });
+      const approved = await approveBudgetAndCreateObligations(deps, {
+        tenantId: TENANT,
+        budgetId: budget.budget.id,
+      });
+      const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
+      const idToCodigo = new Map(fracoes.map((f) => [f.id, f.codigo]));
+      const out: Record<string, number> = {};
+      for (const obligation of approved.obligations) {
+        if (obligation.kind !== BUDGET_LINE_KINDS.quotaCorrente) continue;
+        const codigo = idToCodigo.get(obligation.fracaoId);
+        if (codigo) out[codigo] = obligation.amountCents;
+      }
+      return out;
+    }
+
+    const insertedLast = await centsByCodigo(["Z", "M", "A"]);
+    const insertedFirst = await centsByCodigo(["A", "M", "Z"]);
+    expect(insertedLast).toEqual({ A: 0, M: 0, Z: 3 });
+    expect(insertedFirst).toEqual(insertedLast);
   });
 
   test("FCR < 10% da quota é rejeitado", async () => {
@@ -343,7 +414,7 @@ describe("F1 constituição", () => {
       documentId: document.id,
       confirmations: extracted.lines.map((l) => ({ lineId: l.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
 
     const budget = await createAnnualBudget(deps, {
       tenantId: TENANT,
@@ -464,7 +535,7 @@ describe("F1 constituição", () => {
       documentId: document.id,
       confirmations: extracted.lines.map((l) => ({ lineId: l.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
   });
 
   test("OCR fraco marca HUMAN REVIEW e não confirma", async () => {
@@ -698,7 +769,7 @@ describe("F1 HTTP upload guards", () => {
       permilagemSum: number;
       fracoes: Array<{ codigo: string; permilagem: number }>;
     };
-    expect(confirmedBody.permilagemSum).toBe(1000);
+    expect(confirmedBody.permilagemSum).toBe(100000);
     expect(confirmedBody.fracoes).toHaveLength(2);
     expect(confirmedBody.fracoes.every((f) => f.codigo !== "C")).toBe(true);
     expect(await listConstitutionFracoes(deps, { tenantId: TENANT })).toHaveLength(2);
@@ -737,7 +808,7 @@ describe("F1 pipeline ADR-043 no fluxo /f1", () => {
       documentId: document.id,
       confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
   });
 
   test("cobertura incompleta não confirma o subconjunto", async () => {
@@ -781,7 +852,7 @@ describe("F1 pipeline ADR-043 no fluxo /f1", () => {
         { lineId: gap.id, reject: true },
       ],
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
     expect(confirmed.fracoes).toHaveLength(2);
   });
 
@@ -841,6 +912,6 @@ describe("F1 pipeline ADR-043 no fluxo /f1", () => {
       documentId: document.id,
       confirmations: listed.lines.map((line) => ({ lineId: line.id })),
     });
-    expect(confirmed.permilagemSum).toBe(1000);
+    expect(confirmed.permilagemSum).toBe(100000);
   });
 });

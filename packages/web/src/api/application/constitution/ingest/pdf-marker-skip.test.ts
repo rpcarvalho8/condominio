@@ -71,7 +71,7 @@ describe("F1 skipProseLine — marcadores PDF (mínimo %PDF-/%%EOF)", () => {
     expect(result.units.map((unit) => unit.permilagem)).toEqual([600, 400]);
   });
 
-  test("fixture Fonte mantém 33 candidatos; Σ round = 1001‰", async () => {
+  test("fixture Fonte mantém 33 candidatos; Σ centésimas = 100000", async () => {
     const bytes = readFileSync(
       join(import.meta.dir, "../extractors/fixtures/anexo-regulamento-fonte.pdf"),
     );
@@ -118,7 +118,8 @@ describe("F1 skipProseLine — marcadores PDF (mínimo %PDF-/%%EOF)", () => {
         "Z",
       ].sort(),
     );
-    const sum = result.units.reduce((acc, unit) => acc + (unit.permilagem ?? 0), 0);
-    expect(sum).toBe(1001);
+    const sum = result.units.reduce((acc, unit) => acc + (unit.permilagemCentesimas ?? 0), 0);
+    expect(sum).toBe(100000);
+    expect(result.units.find((unit) => unit.codigo === "M")?.permilagemCentesimas).toBe(3950);
   });
 });

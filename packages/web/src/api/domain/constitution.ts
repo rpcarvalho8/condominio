@@ -5,7 +5,7 @@
  * - Upload ≠ processamento definitivo
  * - Extração LLM/OCR é consultiva
  * - Nada definitivo sem confirmação linha a linha com excerto de origem
- * - Σ permilagens = 1000‰
+ * - Σ permilagem_centesimas = 100000 (1000,00‰)
  * - Obligations só a partir de orçamento aprovado (nunca algoritmo solto)
  */
 
@@ -61,12 +61,15 @@ export const RETENTION_CLASS = {
   personalDocument: "personal_document",
 } as const;
 
+/** Escala antiga em ‰ inteiros. Não é gate de soma nem entra no rateio. */
 export const PERMILAGEM_TOTAL = 1000;
 
 export type FracaoExtractPayload = {
   codigo: string;
   tipo?: string;
-  permilagem: number;
+  /** ‰ inteiro exacto, ou null quando o valor tem centésimos. */
+  permilagem: number | null;
+  permilagem_centesimas?: number | null;
 };
 
 export type ContactExtractPayload = {

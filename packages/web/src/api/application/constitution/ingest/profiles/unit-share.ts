@@ -69,6 +69,7 @@ export type CanonicalUnit = {
   codigo: string;
   designacaoOriginal: string;
   permilagem: number | null;
+  permilagemCentesimas: number | null;
   origem: CanonicalOrigin;
   evidence: Array<FieldEvidence<EvidenceField>>;
   confidence: {

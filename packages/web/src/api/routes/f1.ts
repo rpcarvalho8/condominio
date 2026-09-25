@@ -215,7 +215,12 @@ export function createF1Routes(deps: KernelDeps) {
         const body = (await c.req.json().catch(() => ({}))) as {
           confirmations?: Array<{
             lineId: string;
-            payload?: { codigo: string; tipo?: string; permilagem: number };
+            payload?: {
+              codigo: string;
+              tipo?: string;
+              permilagem?: number | null;
+              permilagem_centesimas?: number;
+            };
             reject?: boolean;
           }>;
         };

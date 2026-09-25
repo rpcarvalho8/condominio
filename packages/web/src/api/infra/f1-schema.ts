@@ -54,7 +54,8 @@ const DDL = [
     tenant_id TEXT NOT NULL,
     codigo TEXT NOT NULL,
     tipo TEXT NOT NULL DEFAULT 'fracao',
-    permilagem INTEGER NOT NULL,
+    permilagem INTEGER,
+    permilagem_centesimas INTEGER,
     source_document_id TEXT,
     source_line_id TEXT,
     source_excerpt TEXT,
@@ -153,9 +154,196 @@ async function execSafe(client: SqlExecutor, stmt: string): Promise<void> {
   }
 }
 
+const REBUILD_TABLE = "constitution_fracoes__centesimas_rebuild";
+
+const CONSTITUTION_COLUMNS = [
+  "id",
+  "tenant_id",
+  "codigo",
+  "tipo",
+  "permilagem",
+  "permilagem_centesimas",
+  "source_document_id",
+  "source_line_id",
+  "source_excerpt",
+  "status",
+  "created_at",
+  "confirmed_at",
+  "confirmed_by_person_id",
+] as const;
+
+const PRE_0011_COLUMNS = new Set(
+  CONSTITUTION_COLUMNS.filter((name) => name !== "permilagem_centesimas"),
+);
+
+type TableColumn = { name: string; notnull: number };
+
+type QueryRow = Record<string, unknown>;
+
+async function queryRows(client: SqlExecutor, sql: string): Promise<QueryRow[]> {
+  const result = (await client.execute(sql)) as { rows?: unknown[] };
+  return (result.rows ?? []).map((row) => {
+    if (row != null && typeof row === "object" && !Array.isArray(row)) {
+      return row as QueryRow;
+    }
+    throw new Error("Migração 0011: resultado SQL inesperado.");
+  });
+}
+
+function cell(row: QueryRow, key: string): unknown {
+  if (key in row) return row[key];
+  const lower = key.toLowerCase();
+  for (const [name, value] of Object.entries(row)) {
+    if (name.toLowerCase() === lower) return value;
+  }
+  return undefined;
+}
+
+async function tableExists(client: SqlExecutor, name: string): Promise<boolean> {
+  const rows = await queryRows(
+    client,
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = '${name}'`,
+  );
+  return rows.length > 0;
+}
+
+async function constitutionColumns(client: SqlExecutor): Promise<TableColumn[]> {
+  const rows = await queryRows(client, "PRAGMA table_info(constitution_fracoes)");
+  return rows.map((row) => ({
+    name: String(cell(row, "name") ?? ""),
+    notnull: Number(cell(row, "notnull") ?? 0),
+  }));
+}
+
+async function scalarCount(client: SqlExecutor, table: string): Promise<number> {
+  const rows = await queryRows(client, `SELECT COUNT(*) AS n FROM ${table}`);
+  return Number(cell(rows[0] ?? {}, "n") ?? 0);
+}
+
+async function recreateConstitutionIndexes(client: SqlExecutor): Promise<void> {
+  await client.execute(
+    `CREATE UNIQUE INDEX IF NOT EXISTS constitution_fracoes_tenant_codigo_uq
+      ON constitution_fracoes (tenant_id, codigo)`,
+  );
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS constitution_fracoes_tenant_idx
+      ON constitution_fracoes (tenant_id)`,
+  );
+}
+
+function isTargetShape(columns: TableColumn[]): boolean {
+  const perm = columns.find((column) => column.name === "permilagem");
+  const cent = columns.find((column) => column.name === "permilagem_centesimas");
+  return Boolean(perm && perm.notnull === 0 && cent);
+}
+
+/**
+ * Migration 0011, idempotente.
+ * Reconstrói constitution_fracoes para permilagem NULL e permilagem_centesimas.
+ * Copia todas as linhas. Não preenche centésimas a partir do inteiro antigo.
+ * Coluna desconhecida → erro, tabela original intacta.
+ */
+export async function migrateConstitutionFracoesPermilagem(client: SqlExecutor): Promise<void> {
+  const hasLive = await tableExists(client, "constitution_fracoes");
+  const hasRebuild = await tableExists(client, REBUILD_TABLE);
+
+  if (!hasLive && hasRebuild) {
+    await client.execute(`ALTER TABLE ${REBUILD_TABLE} RENAME TO constitution_fracoes`);
+    await recreateConstitutionIndexes(client);
+    return;
+  }
+  if (!hasLive) return;
+
+  const columns = await constitutionColumns(client);
+  if (isTargetShape(columns)) {
+    if (hasRebuild) await client.execute(`DROP TABLE ${REBUILD_TABLE}`);
+    await recreateConstitutionIndexes(client);
+    return;
+  }
+
+  const unknown = columns
+    .map((column) => column.name)
+    .filter((name) => name !== "permilagem_centesimas" && !PRE_0011_COLUMNS.has(name));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Migração 0011 interrompida: constitution_fracoes tem colunas não previstas (${unknown.join(", ")}). Nada foi apagado.`,
+    );
+  }
+
+  const hasCentesimas = columns.some((column) => column.name === "permilagem_centesimas");
+  const before = await scalarCount(client, "constitution_fracoes");
+
+  if (hasRebuild) await client.execute(`DROP TABLE ${REBUILD_TABLE}`);
+  await client.execute(`CREATE TABLE ${REBUILD_TABLE} (
+    id TEXT PRIMARY KEY NOT NULL,
+    tenant_id TEXT NOT NULL,
+    codigo TEXT NOT NULL,
+    tipo TEXT NOT NULL DEFAULT 'fracao',
+    permilagem INTEGER,
+    permilagem_centesimas INTEGER,
+    source_document_id TEXT,
+    source_line_id TEXT,
+    source_excerpt TEXT,
+    status TEXT NOT NULL DEFAULT 'confirmed',
+    created_at INTEGER NOT NULL,
+    confirmed_at INTEGER NOT NULL,
+    confirmed_by_person_id TEXT
+  )`);
+
+  const centesimasSelect = hasCentesimas ? "permilagem_centesimas" : "NULL";
+  await client.execute(`INSERT INTO ${REBUILD_TABLE} (
+    id, tenant_id, codigo, tipo, permilagem, permilagem_centesimas,
+    source_document_id, source_line_id, source_excerpt, status,
+    created_at, confirmed_at, confirmed_by_person_id
+  )
+  SELECT
+    id, tenant_id, codigo, tipo, permilagem, ${centesimasSelect},
+    source_document_id, source_line_id, source_excerpt, status,
+    created_at, confirmed_at, confirmed_by_person_id
+  FROM constitution_fracoes`);
+
+  const copied = await scalarCount(client, REBUILD_TABLE);
+  const matchedRows = await queryRows(
+    client,
+    `SELECT COUNT(*) AS n
+     FROM constitution_fracoes AS a
+     INNER JOIN ${REBUILD_TABLE} AS b ON a.id = b.id
+     WHERE a.codigo = b.codigo
+       AND a.tenant_id = b.tenant_id
+       AND a.tipo = b.tipo
+       AND a.permilagem IS b.permilagem
+       AND a.status = b.status
+       AND a.created_at = b.created_at
+       AND a.confirmed_at = b.confirmed_at
+       AND a.source_document_id IS b.source_document_id
+       AND a.source_line_id IS b.source_line_id
+       AND a.source_excerpt IS b.source_excerpt
+       AND a.confirmed_by_person_id IS b.confirmed_by_person_id`,
+  );
+  const matched = Number(cell(matchedRows[0] ?? {}, "n") ?? 0);
+  if (copied !== before || matched !== before) {
+    await client.execute(`DROP TABLE ${REBUILD_TABLE}`);
+    throw new Error(
+      `Migração 0011 interrompida: cópia ${copied}/${before}, linhas iguais ${matched}. Tabela original intacta.`,
+    );
+  }
+
+  await client.execute("DROP TABLE constitution_fracoes");
+  await client.execute(`ALTER TABLE ${REBUILD_TABLE} RENAME TO constitution_fracoes`);
+  await recreateConstitutionIndexes(client);
+
+  const after = await scalarCount(client, "constitution_fracoes");
+  if (after !== before) {
+    throw new Error(
+      `Migração 0011: contagem depois do rename ${after} ≠ ${before}. A cópia está na tabela constitution_fracoes.`,
+    );
+  }
+}
+
 /** F1 — Ingestão + Constituição (após Domain Kernel F0). */
 export async function applyF1ConstitutionSchema(client: SqlExecutor): Promise<void> {
   for (const stmt of DDL) {
     await execSafe(client, stmt);
   }
+  await migrateConstitutionFracoesPermilagem(client);
 }

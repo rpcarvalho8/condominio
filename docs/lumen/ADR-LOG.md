@@ -692,7 +692,8 @@ Modelo canónico (pequeno):
 |---|---|
 | `codigo` | Identificador da unidade |
 | `designacao_original` | Texto tal como aparece |
-| `permilagem` | Valor em ‰ quando a unidade é conhecida; vazio quando não se pode afirmar |
+| `permilagem_centesimas` | Valor canónico em centésimas de ‰ (100000 = 1000,00‰), lido do token documental sem arredondamento. Vazio quando não se pode afirmar, incluindo mais de 2 casas decimais no ‰ |
+| `permilagem` | ‰ inteiro exacto (`centesimas % 100 === 0`); vazio caso contrário. Não entra na soma nem no rateio |
 | `origem` | Representação descoberta (`table`, `key_value`, `prose`) — não o nome de um regex |
 | `evidence` | Por campo, quando possível: documento, página / linha / célula / região, texto original, transform |
 | `confidence` | Score e lista de checks do sistema (`source: system_checks`) |
@@ -713,7 +714,7 @@ Verificações determinísticas obrigatórias:
 - normalização de unidade só com contexto (todas as pistas são percentagem e a soma é 100 → `percent_to_permille:*10`);
 - unicidade de `codigo`;
 - cobertura: uma unidade aparente sem valor entra no resultado com `permilagem` vazia e `needs_human_review`;
-- Σ permilagens = 1000‰ quando todas as unidades têm valor em ‰;
+- Σ `permilagem_centesimas` = 100000 (1000,00‰) quando todas as unidades têm valor canónico. O id do check mantém-se `permilagem_sum_1000`. Não se reparte resto para fechar a soma nem se altera o valor de uma unidade;
 - unidade ambígua (`valor`, `quota`, mistura de ‰ e % no mesmo documento) → `needs_human_review`. Não se adivinha.
 
 Métrica de F1: quantas decisões humanas restam depois da análise (por exemplo 2 linhas prontas com evidência, 1 decisão de unidade em aberto). «Pronta» não escreve frações. Não há auto-confirmação silenciosa.
@@ -723,6 +724,8 @@ LLM (`F1_LLM_EXTRACT=1` e chave Groq) pode anexar uma hipótese de estrutura. Es
 **O que isto não é.** A cascata do PR #31 (tabela delimitada → padrões regex → Groq JSON → revisão humana) é um parser mais tolerante com fallback de LLM. Não é o fecho de F1. Não responde primeiro a «que informação existe?». Não separa extracção, interpretação, validação e confirmação. Não constrói confiança a partir de evidência verificável. **Não fundir o #31. Não acrescentar regex de formato. Não introduzir arquitectura de agentes.** Extractores já existentes podem servir de fonte de texto bruto (OCR stub, grelha Excel); não crescem como catálogo de padrões.
 
 Dez representações que caem no mesmo modelo estão em [F1-INGEST-EXEMPLOS](F1-INGEST-EXEMPLOS.md).
+
+**Em aberto:** antes da escala em centésimas, o resto em cêntimos do rateio F2 seguia a ordem das linhas na base de dados (dinheiro não determinístico). A regra actual é determinística (`ORDER BY codigo`, floor, resto todo na última fracção). Uma alternativa mais justa — largest-remainder com desempate por `codigo` — fica por decidir pelo owner e não está implementada.
 
 **Justificação:** trocar permilagens ou importar um subconjunto mantém uma soma plausível e vicia a cobrança (invariante 1). Um score de modelo não é essa verificação. O admin tem de ver a origem de cada valor e decidir só o que o sistema não conseguiu verificar.
 
@@ -734,7 +737,7 @@ Dez representações que caem no mesmo modelo estão em [F1-INGEST-EXEMPLOS](F1-
 
 **Estado:** ACEITE como arquitectura de Fase B (2026-09-22). O perfil `unit_share` é o único executado. O perfil `budget_plan` fica em contratos e no corpus — não há extracção, confirmação, nem escrita de orçamento a partir de documento. Não funde o PR #31. Não implementa Orçamento.
 
-**Contexto:** o ADR-043 fixa a sequência para unidades e permilagem. F1 também prevê orçamento anual (06-FATIAS), e o domínio já separa orçamento previsto, `Obligation`, `Payment`, `Allocation` e saldo (ADR-003, 02-DOMINIO). A escrita que existe hoje é `createAnnualBudget` (draft, rubricas `quota_corrente` / `fcr` / `extraordinaria`) e `approveBudgetAndCreateObligations` (só com frações confirmadas e Σ = 1000‰). Um segundo pipeline, ou ligar `kind=orcamento` ao extractor de permilagem, apagava essa separação.
+**Contexto:** o ADR-043 fixa a sequência para unidades e permilagem. F1 também prevê orçamento anual (06-FATIAS), e o domínio já separa orçamento previsto, `Obligation`, `Payment`, `Allocation` e saldo (ADR-003, 02-DOMINIO). A escrita que existe hoje é `createAnnualBudget` (draft, rubricas `quota_corrente` / `fcr` / `extraordinaria`) e `approveBudgetAndCreateObligations` (só com frações confirmadas e Σ permilagem_centesimas = 100000). Um segundo pipeline, ou ligar `kind=orcamento` ao extractor de permilagem, apagava essa separação.
 
 **Decisão:**
 
@@ -769,7 +772,7 @@ LLM (`F1_LLM_EXTRACT=1` e chave Groq) pode anexar uma hipótese com `authoritati
 
 ### Perfil `unit_share` — actual
 
-Frações e permilagem. `runIngestPipeline` executa só este perfil, e o fluxo `/f1` só o chama para `kind=regulamento`. O modelo canónico, os checks (`semantic_quota_identified`, `unit_context_justifies`, `codigo_unique`, `coverage_complete`, `permilagem_sum_1000`) e os estados são os do ADR-043. Confirmar continua a ser linha a linha em `confirmFracaoLines`. Este ADR não altera essa semântica.
+Frações e permilagem. `runIngestPipeline` executa só este perfil, e o fluxo `/f1` só o chama para `kind=regulamento`. O modelo canónico, os checks (`semantic_quota_identified`, `unit_context_justifies`, `codigo_unique`, `coverage_complete`, `permilagem_sum_1000` = Σ 100000 centésimas) e os estados são os do ADR-043. Confirmar continua a ser linha a linha em `confirmFracaoLines`. Este ADR não altera essa semântica.
 
 ### Perfil `budget_plan` — futuro, só contratos
 

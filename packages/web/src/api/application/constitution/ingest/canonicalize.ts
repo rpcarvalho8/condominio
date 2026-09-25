@@ -2,6 +2,10 @@
  * Canonicalization — leva observações ao modelo CondominiumUnit.
  * Normaliza unidade só quando o contexto do documento o justifica.
  */
+import {
+  centesimasFromQuotaToken,
+  legacyIntegerPermilagem,
+} from "../../../domain/permilagem-centesimas";
 import type { CanonicalOrigin, CanonicalWarning, FieldEvidence } from "./contracts";
 import { fieldEvidenceFromObservation, toDocumentObservation } from "./profiles/unit-share";
 import type { Observation } from "./semantic-extraction";
@@ -9,7 +13,10 @@ import type { Observation } from "./semantic-extraction";
 export type DraftUnit = {
   codigo: string;
   designacaoOriginal: string;
+  /** ‰ inteiro exacto, ou null quando há centésimos. Não é o valor canónico. */
   permilagem: number | null;
+  /** Centésimas de ‰. Null quando o token tem mais de 2 casas no ‰ ou não é legível. */
+  permilagemCentesimas: number | null;
   origem: CanonicalOrigin;
   evidence: FieldEvidence[];
   warnings: CanonicalWarning[];
@@ -53,6 +60,7 @@ export function canonicalizeObservations(input: {
   return input.observations.map((observation) => {
     const warnings: CanonicalWarning[] = [];
     let permilagem: number | null = null;
+    let permilagemCentesimas: number | null = null;
     let transform: string | null = null;
 
     if (observation.ambiguousIdentifier) {
@@ -68,17 +76,31 @@ export function canonicalizeObservations(input: {
       });
     }
 
-    if (observation.valueNumber == null) {
+    const token = observation.valueRaw ?? "";
+    if (observation.valueNumber == null || !token.trim()) {
       warnings.push({
         code: "missing_quota",
         message: "Unidade aparente sem valor de quota.",
       });
-    } else if (observation.unitCue === "permille") {
-      permilagem = Math.round(observation.valueNumber);
-      transform = "identity_permille";
-    } else if (observation.unitCue === "percent" && percentJustified) {
-      permilagem = Math.round(observation.valueNumber * 10);
-      transform = "percent_to_permille:*10";
+    } else if (observation.unitCue === "permille" || (observation.unitCue === "percent" && percentJustified)) {
+      const unit = observation.unitCue === "percent" ? "percent" : "permille";
+      const parsed = centesimasFromQuotaToken(token, unit);
+      if (!parsed.ok && parsed.reason === "too_many_decimals") {
+        warnings.push({
+          code: "excess_decimal_places",
+          message:
+            "O valor em ‰ tem mais de 2 casas decimais. A linha não é confirmável e a centésima fica vazia.",
+        });
+      } else if (!parsed.ok || parsed.centesimas <= 0) {
+        warnings.push({
+          code: "missing_quota",
+          message: "O valor de quota não é um número exacto utilizável.",
+        });
+      } else {
+        permilagemCentesimas = parsed.centesimas;
+        permilagem = legacyIntegerPermilagem(parsed.centesimas);
+        transform = unit === "percent" ? "percent_to_permille:*10" : "identity_permille";
+      }
     } else if (observation.unitCue === "percent") {
       warnings.push({
         code: cueSet.size > 1 ? "mixed_units" : "unit_context_inconsistent",
@@ -128,6 +150,7 @@ export function canonicalizeObservations(input: {
       codigo: observation.codigo ?? "",
       designacaoOriginal: observation.designation,
       permilagem,
+      permilagemCentesimas,
       origem: input.origem,
       evidence: fields,
       warnings,

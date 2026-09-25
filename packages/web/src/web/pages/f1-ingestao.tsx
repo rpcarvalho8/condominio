@@ -5,6 +5,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card"
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { getToken } from "../lib/auth";
+import {
+  PERMILAGEM_CENTESIMAS_TOTAL,
+  centesimasFromQuotaToken,
+  formatPermilagemCentesimas,
+  legacyIntegerPermilagem,
+} from "../../api/domain/permilagem-centesimas";
 
 type IngestDocument = {
   id: string;
@@ -33,7 +39,39 @@ type ExtractLine = {
   status: string;
 };
 
-type FracaoRow = { id: string; codigo: string; permilagem: number };
+type FracaoRow = {
+  id: string;
+  codigo: string;
+  permilagem: number | null;
+  permilagemCentesimas: number | null;
+};
+
+function payloadOf(line: ExtractLine): Record<string, unknown> {
+  try {
+    return JSON.parse(line.editedPayloadJson ?? line.payloadJson) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function centesimasFromPayload(payload: Record<string, unknown>): number | null {
+  const direct = payload.permilagem_centesimas ?? payload.permilagemCentesimas;
+  if (typeof direct === "number" && Number.isInteger(direct) && direct > 0) return direct;
+  if (typeof direct === "string" && /^\d+$/.test(direct)) return Number(direct);
+  const perm = payload.permilagem;
+  if (typeof perm === "number" && Number.isInteger(perm) && perm > 0) return perm * 100;
+  if (typeof perm === "string") {
+    const parsed = centesimasFromQuotaToken(perm, "permille");
+    return parsed.ok && parsed.centesimas > 0 ? parsed.centesimas : null;
+  }
+  return null;
+}
+
+function permilagemLabel(row: { permilagem: number | null; permilagemCentesimas: number | null }): string {
+  if (row.permilagemCentesimas != null) return `${formatPermilagemCentesimas(row.permilagemCentesimas)}‰`;
+  if (row.permilagem != null) return `${row.permilagem}‰`;
+  return "—";
+}
 
 const SEVILLA_RED = "#D0021B";
 
@@ -133,14 +171,26 @@ export default function F1IngestaoPage() {
     decisionCount === 1 ? "1 decisão humana em aberto" : `${decisionCount} decisões humanas em aberto`;
   const editable = (status: string) => status === "pending_review" || status === "needs_human_review";
 
+  function lineCentesimas(line: ExtractLine): number | null {
+    const edited = edits[line.id]?.permilagem_display;
+    if (edited != null) {
+      const parsed = centesimasFromQuotaToken(edited, "permille");
+      return parsed.ok && parsed.centesimas > 0 ? parsed.centesimas : null;
+    }
+    return centesimasFromPayload(payloadOf(line));
+  }
+
+  function permilagemField(line: ExtractLine): string {
+    const edited = edits[line.id]?.permilagem_display;
+    if (edited != null) return edited;
+    const cents = centesimasFromPayload(payloadOf(line));
+    return cents == null ? "" : formatPermilagemCentesimas(cents);
+  }
+
   const permilagemSum = useMemo(() => {
     return pending
       .filter((l) => l.kind === "fracao")
-      .reduce((acc, line) => {
-        const payload = { ...parsePayload(line), ...(edits[line.id] ?? {}) };
-        const n = Number(payload.permilagem);
-        return acc + (Number.isFinite(n) ? Math.round(n) : 0);
-      }, 0);
+      .reduce((acc, line) => acc + (lineCentesimas(line) ?? 0), 0);
   }, [pending, edits]);
 
   function field(line: ExtractLine, key: string): string {
@@ -193,8 +243,12 @@ export default function F1IngestaoPage() {
   const saveLine = useMutation({
     mutationFn: async (line: ExtractLine) => {
       const payload = { ...parsePayload(line), ...(edits[line.id] ?? {}) };
-      if (line.kind === "fracao" && payload.permilagem != null) {
-        payload.permilagem = Number(payload.permilagem);
+      if (line.kind === "fracao") {
+        const cents = lineCentesimas(line);
+        if (cents == null) throw new Error("Permilagem inválida (máximo 2 casas decimais no ‰)");
+        payload.permilagem_centesimas = cents;
+        payload.permilagem = legacyIntegerPermilagem(cents);
+        delete payload.permilagem_display;
       }
       return f1Fetch(`/documents/${selectedId}/lines/${line.id}`, {
         method: "POST",
@@ -237,7 +291,7 @@ export default function F1IngestaoPage() {
             payload: {
               codigo: String(payload.codigo ?? ""),
               tipo: String(payload.tipo ?? "fracao"),
-              permilagem: Number(payload.permilagem),
+              permilagem_centesimas: lineCentesimas(line),
             },
           };
         });
@@ -488,10 +542,10 @@ export default function F1IngestaoPage() {
                                 <input
                                   className="w-24 rounded-md px-2 py-1 text-sm border"
                                   style={{ background: "var(--bg-elevated)", borderColor: "var(--border-strong)" }}
-                                  value={field(line, "permilagem")}
+                                  value={permilagemField(line)}
                                   disabled={!editable(line.status)}
-                                  onChange={(e) => setField(line.id, "permilagem", e.target.value)}
-                                  placeholder="‰"
+                                  onChange={(e) => setField(line.id, "permilagem_display", e.target.value)}
+                                  placeholder="39,50"
                                 />
                               </>
                             )}
@@ -566,13 +620,13 @@ export default function F1IngestaoPage() {
                     </p>
                   ))}
                   <div className="flex flex-wrap items-center gap-3">
-                    <p className="text-sm" style={{ color: permilagemSum === 1000 && needsDecision.length === 0 ? "var(--green)" : SEVILLA_RED }}>
-                      Σ permilagens = {permilagemSum}‰ (exige 1000‰)
+                    <p className="text-sm" style={{ color: permilagemSum === PERMILAGEM_CENTESIMAS_TOTAL && needsDecision.length === 0 ? "var(--green)" : SEVILLA_RED }}>
+                      Σ permilagens = {formatPermilagemCentesimas(permilagemSum)}‰ ({permilagemSum} centésimas; exige {PERMILAGEM_CENTESIMAS_TOTAL})
                     </p>
                     <Button
                       onClick={() => confirmFracoes.mutate()}
                       disabled={
-                        permilagemSum !== 1000 ||
+                        permilagemSum !== PERMILAGEM_CENTESIMAS_TOTAL ||
                         needsDecision.length > 0 ||
                         reviewDocument?.status === "needs_human_review" ||
                         rejectFracaoLine.isPending ||
@@ -639,7 +693,7 @@ export default function F1IngestaoPage() {
                 {(fracoes.data ?? []).map((f) => (
                   <li key={f.id} className="flex justify-between font-mono">
                     <span>{f.codigo}</span>
-                    <span>{f.permilagem}‰</span>
+                    <span>{permilagemLabel(f)}</span>
                   </li>
                 ))}
               </ul>

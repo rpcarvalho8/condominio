@@ -152,20 +152,7 @@ step("1b_extract", {
   documentStatus: extracted.document.status,
 });
 
-const confirmations = extracted.lines.map((line) => {
-  const payload = JSON.parse(line.payloadJson) as {
-    codigo: string;
-    permilagem: number;
-    tipo?: string;
-  };
-  if (payload.codigo === "M") {
-    return {
-      lineId: line.id,
-      payload: { codigo: "M", tipo: payload.tipo ?? "fracao", permilagem: 39 },
-    };
-  }
-  return { lineId: line.id };
-});
+const confirmations = extracted.lines.map((line) => ({ lineId: line.id }));
 const confirmed = await confirmFracaoLines(deps, {
   tenantId: TENANT,
   documentId: uploaded.document.id,
@@ -174,13 +161,27 @@ const confirmed = await confirmFracaoLines(deps, {
 });
 const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
 const target = fracoes.find((f) => f.codigo === TARGET_CODIGO)!;
+const fracaoM = fracoes.find((f) => f.codigo === "M");
 step("1c_confirm_fracoes", {
   endpoint: "POST /f1/documents/:id/confirm-fracoes",
   N: fracoes.length,
-  sum: confirmed.permilagemSum,
-  target: { codigo: target.codigo, id: target.id, permilagem: target.permilagem },
-  humanAdjustment: "M 40→39",
-  ok: confirmed.permilagemSum === 1000 && fracoes.length === 33,
+  sum: confirmed.permilagemCentesimasSum,
+  target: {
+    codigo: target.codigo,
+    id: target.id,
+    permilagem: target.permilagem,
+    permilagemCentesimas: target.permilagemCentesimas,
+  },
+  M: {
+    permilagemCentesimas: fracaoM?.permilagemCentesimas ?? null,
+    permilagem: fracaoM?.permilagem ?? null,
+  },
+  humanAdjustment: null,
+  ok:
+    confirmed.permilagemCentesimasSum === 100000 &&
+    fracoes.length === 33 &&
+    fracaoM?.permilagemCentesimas === 3950 &&
+    fracaoM?.permilagem == null,
 });
 
 // ========== 2. Membership via Invitation ==========
@@ -363,7 +364,7 @@ const summary = {
   tenant: TENANT,
   targetCodigo: TARGET_CODIGO,
   chainOk: log.every((s) => s.ok !== false),
-  permilagemSum: confirmed.permilagemSum,
+  permilagemCentesimasSum: confirmed.permilagemCentesimasSum,
   Nfracoes: fracoes.length,
   targetDebtCents,
   paymentId: payment.id,

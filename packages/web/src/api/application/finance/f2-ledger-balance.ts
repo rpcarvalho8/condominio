@@ -28,7 +28,10 @@ export type FracaoLedgerBalance = {
   tenantId: string;
   fracaoId: string;
   fracaoCodigo: string;
-  permilagem: number;
+  /** ‰ inteiro exacto, ou null. Não entra no saldo. */
+  permilagem: number | null;
+  /** Centésimas de ‰. O ecrã formata daqui quando o inteiro é null. */
+  permilagemCentesimas: number | null;
   originalCents: number;
   allocatedCents: number;
   adjustmentCents: number;
@@ -117,6 +120,7 @@ export async function reconstructFracaoBalance(
     fracaoId: fracao.id,
     fracaoCodigo: fracao.codigo,
     permilagem: fracao.permilagem,
+    permilagemCentesimas: fracao.permilagemCentesimas,
     originalCents,
     allocatedCents,
     adjustmentCents,

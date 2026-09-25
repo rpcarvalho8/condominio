@@ -22,7 +22,8 @@ describe("F1 unit_share — robustez (falsos positivos)", () => {
     );
     const j = result.units.find((unit) => unit.codigo === "J");
     expect(j).toBeDefined();
-    expect(j!.permilagem).toBe(39);
+    expect(j!.permilagemCentesimas).toBe(3880);
+    expect(j!.permilagem).toBeNull();
     expect(j!.evidence.find((item) => item.field === "permilagem")?.originalText).toBe("38,80");
   });
 
@@ -62,7 +63,40 @@ describe("F1 unit_share — robustez (falsos positivos)", () => {
     );
     expect(result.units.map((unit) => unit.codigo)).toEqual(["A", "B"]);
     expect(result.units.map((unit) => unit.permilagem)).toEqual([600, 400]);
+    expect(result.units.map((unit) => unit.permilagemCentesimas)).toEqual([60000, 40000]);
     expect(result.summary.readyForConfirmation).toBe(2);
     expect(result.summary.blocking).toEqual([]);
+  });
+
+  test("mais de 2 casas decimais no ‰ não inventa quota", async () => {
+    const result = await runText(
+      "excesso.txt",
+      ["Permilagem ‰", "J 38,801", "K 961,199", ""].join("\n"),
+    );
+    expect(result.units.length).toBeGreaterThan(0);
+    expect(result.units.every((unit) => unit.permilagemCentesimas == null)).toBe(true);
+    expect(result.units.every((unit) => unit.permilagem == null)).toBe(true);
+    expect(result.units.every((unit) => unit.review === "needs_human_review")).toBe(true);
+    expect(result.summary.blocking.some((item) => item.code === "needs_human_review")).toBe(true);
+  });
+
+  test("percentagem: casas decimais contam-se no ‰ depois de ×10", async () => {
+    const ok = await runText(
+      "percent-ok.csv",
+      "Unidade,Percentagem\nA,6.25\nB,93.75\n",
+    );
+    const byCode = Object.fromEntries(ok.units.map((unit) => [unit.codigo, unit]));
+    expect(byCode.A?.permilagemCentesimas).toBe(6250);
+    expect(byCode.B?.permilagemCentesimas).toBe(93750);
+    expect(byCode.A?.permilagem).toBeNull();
+    expect(ok.units.reduce((acc, unit) => acc + (unit.permilagemCentesimas ?? 0), 0)).toBe(100000);
+    expect(ok.summary.blocking).toEqual([]);
+
+    const excess = await runText(
+      "percent-excesso.csv",
+      "Unidade,Percentagem\nA,6.2555\nB,93.7445\n",
+    );
+    expect(excess.units.every((unit) => unit.permilagemCentesimas == null)).toBe(true);
+    expect(excess.units.every((unit) => unit.review === "needs_human_review")).toBe(true);
   });
 });

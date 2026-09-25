@@ -777,7 +777,10 @@ export const constitutionFracoes = sqliteTable(
     tenantId: text("tenant_id").notNull(),
     codigo: text("codigo").notNull(),
     tipo: text("tipo").notNull().default("fracao"),
-    permilagem: integer("permilagem").notNull(),
+    /** ‰ inteiro exacto, só quando centesimas % 100 === 0. Não entra na soma nem no rateio. */
+    permilagem: integer("permilagem"),
+    /** Canónico: centésimas de ‰. NULL em linhas anteriores a 0011 (não se reconstrói do arredondamento). */
+    permilagemCentesimas: integer("permilagem_centesimas"),
     sourceDocumentId: text("source_document_id"),
     sourceLineId: text("source_line_id"),
     sourceExcerpt: text("source_excerpt"),

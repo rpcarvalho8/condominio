@@ -16,13 +16,17 @@ import {
   INGEST_DOCUMENT_KINDS,
   INGEST_DOCUMENT_STATUS,
   OBLIGATION_STATUS,
-  PERMILAGEM_TOTAL,
   RETENTION_CLASS,
   type ContactExtractPayload,
   type FracaoExtractPayload,
   type StructuredExtraction,
 } from "../../domain/constitution";
 import { DomainError } from "../../domain/errors";
+import {
+  PERMILAGEM_CENTESIMAS_TOTAL,
+  centesimasFromQuotaToken,
+  legacyIntegerPermilagem,
+} from "../../domain/permilagem-centesimas";
 import { assertSha256ContentHash } from "../../infra/content-blob-store";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
@@ -35,17 +39,52 @@ type Actor = {
   requestId?: string | null;
 };
 
-function asFracaoPayload(raw: Record<string, unknown>): FracaoExtractPayload {
+type StoredFracaoPayload = {
+  codigo: string;
+  tipo: string;
+  permilagem: number | null;
+  permilagem_centesimas: number;
+};
+
+function positiveInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+/** Lê centésimas do payload. Inteiro ‰ exacto (sem casas) vale ×100. Não arredonda. */
+export function readPermilagemCentesimas(raw: Record<string, unknown>): number | null {
+  const direct = positiveInteger(raw.permilagem_centesimas ?? raw.permilagemCentesimas);
+  if (direct != null) return direct;
+  const perm = raw.permilagem;
+  if (typeof perm === "string" && /[.,]/.test(perm)) {
+    const parsed = centesimasFromQuotaToken(perm, "permille");
+    return parsed.ok && parsed.centesimas > 0 ? parsed.centesimas : null;
+  }
+  const asInt = positiveInteger(perm);
+  if (asInt != null) return asInt * 100;
+  return null;
+}
+
+function asFracaoPayload(raw: Record<string, unknown>): StoredFracaoPayload {
   const codigo = String(raw.codigo ?? "").trim();
-  const permilagem = Number(raw.permilagem);
   if (!codigo) throw new DomainError("invalid_fracao", "código de fração obrigatório", 400);
-  if (!Number.isFinite(permilagem) || permilagem <= 0) {
-    throw new DomainError("invalid_permilagem", "permilagem inválida", 400);
+  const centesimas = readPermilagemCentesimas(raw);
+  if (centesimas == null) {
+    throw new DomainError(
+      "invalid_permilagem",
+      "permilagem_centesimas em falta ou com mais de 2 casas decimais no ‰",
+      400,
+    );
   }
   return {
     codigo,
     tipo: raw.tipo ? String(raw.tipo) : "fracao",
-    permilagem: Math.round(permilagem),
+    permilagem: legacyIntegerPermilagem(centesimas),
+    permilagem_centesimas: centesimas,
   };
 }
 
@@ -166,9 +205,9 @@ async function refreshFracaoReviewState(deps: KernelDeps, documentId: string) {
   let sum = 0;
   for (const line of open) {
     if (line.status !== EXTRACT_LINE_STATUS.pendingReview) continue;
-    const payload = JSON.parse(line.editedPayloadJson ?? line.payloadJson) as { permilagem?: unknown };
-    const value = Number(payload.permilagem);
-    if (Number.isFinite(value) && value > 0) sum += Math.round(value);
+    const payload = JSON.parse(line.editedPayloadJson ?? line.payloadJson) as Record<string, unknown>;
+    const value = readPermilagemCentesimas(payload);
+    if (value != null) sum += value;
   }
   const blocking: Array<{ code: string; message: string }> = [];
   if (ambiguous.length > 0) {
@@ -176,10 +215,10 @@ async function refreshFracaoReviewState(deps: KernelDeps, documentId: string) {
       code: "needs_human_review",
       message: `${ambiguous.length} linha(s) precisam de decisão humana.`,
     });
-  } else if (open.length > 0 && sum !== PERMILAGEM_TOTAL) {
+  } else if (open.length > 0 && sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
     blocking.push({
       code: "permilagem_sum",
-      message: `Σ permilagens = ${sum}‰; exige ${PERMILAGEM_TOTAL}‰.`,
+      message: `Σ permilagem_centesimas = ${sum}; exige ${PERMILAGEM_CENTESIMAS_TOTAL}.`,
     });
   }
   const [doc] = await deps.db
@@ -390,6 +429,7 @@ export async function editExtractLine(
       codigo: fracao.codigo,
       tipo: fracao.tipo ?? "fracao",
       permilagem: fracao.permilagem,
+      permilagem_centesimas: fracao.permilagem_centesimas,
       review: EXTRACT_LINE_STATUS.pendingReview,
       evidence: [
         ...evidence,
@@ -460,7 +500,7 @@ export async function confirmFracaoLines(
   }
 
   const now = kernelNow(deps);
-  const batch: Array<{ lineId: string; payload: FracaoExtractPayload; excerpt: string }> = [];
+  const batch: Array<{ lineId: string; payload: StoredFracaoPayload; excerpt: string }> = [];
   const rejectedIds = new Set(
     input.confirmations.filter((item) => item.reject).map((item) => item.lineId),
   );
@@ -511,7 +551,7 @@ export async function confirmFracaoLines(
     batch.push({ lineId: line.id, payload, excerpt: line.sourceExcerpt });
   }
 
-  const sum = batch.reduce((acc, x) => acc + x.payload.permilagem, 0);
+  const sum = batch.reduce((acc, x) => acc + x.payload.permilagem_centesimas, 0);
   const codes = batch.map((item) => item.payload.codigo.trim().toUpperCase());
   const duplicate = codes.find((code, index) => codes.indexOf(code) !== index);
   if (duplicate) {
@@ -521,10 +561,10 @@ export async function confirmFracaoLines(
       400,
     );
   }
-  if (batch.length > 0 && sum !== PERMILAGEM_TOTAL) {
+  if (batch.length > 0 && sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
     throw new DomainError(
       "permilagem_sum",
-      `Σ permilagens do lote = ${sum}‰; tem de ser exactamente ${PERMILAGEM_TOTAL}‰`,
+      `Σ permilagem_centesimas do lote = ${sum}; tem de ser exactamente ${PERMILAGEM_CENTESIMAS_TOTAL}. Nenhum valor foi alterado.`,
       400,
     );
   }
@@ -539,6 +579,7 @@ export async function confirmFracaoLines(
         codigo: item.payload.codigo,
         tipo: item.payload.tipo ?? "fracao",
         permilagem: item.payload.permilagem,
+        permilagemCentesimas: item.payload.permilagem_centesimas,
         sourceDocumentId: document.id,
         sourceLineId: item.lineId,
         sourceExcerpt: item.excerpt,
@@ -592,7 +633,12 @@ export async function confirmFracaoLines(
     entityId: document.id,
     actor: input.actor,
     after: {
-      created: created.map((f) => ({ id: f.id, codigo: f.codigo, permilagem: f.permilagem })),
+      created: created.map((f) => ({
+        id: f.id,
+        codigo: f.codigo,
+        permilagem: f.permilagem,
+        permilagemCentesimas: f.permilagemCentesimas,
+      })),
       sum,
     },
   });
@@ -606,7 +652,7 @@ export async function confirmFracaoLines(
     correlationId: input.actor?.requestId ?? null,
   });
 
-  return { fracoes: created, permilagemSum: sum };
+  return { fracoes: created, permilagemSum: sum, permilagemCentesimasSum: sum };
 }
 
 export async function confirmContactLines(
@@ -845,16 +891,18 @@ export async function approveBudgetAndCreateObligations(
   const fracoes = await deps.db
     .select()
     .from(constitutionFracoes)
-    .where(eq(constitutionFracoes.tenantId, input.tenantId));
+    .where(eq(constitutionFracoes.tenantId, input.tenantId))
+    .orderBy(asc(constitutionFracoes.codigo));
   if (fracoes.length === 0) {
     throw new DomainError("no_fracoes", "Confirme frações antes de aprovar o orçamento", 400);
   }
 
-  const sum = fracoes.reduce((a, f) => a + f.permilagem, 0);
-  if (sum !== PERMILAGEM_TOTAL) {
+  const missing = fracoes.filter((f) => f.permilagemCentesimas == null);
+  const sum = fracoes.reduce((a, f) => a + (f.permilagemCentesimas ?? 0), 0);
+  if (missing.length > 0 || sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
     throw new DomainError(
       "permilagem_sum",
-      `Σ permilagens do tenant = ${sum}‰; tem de ser ${PERMILAGEM_TOTAL}‰`,
+      `Σ permilagem_centesimas do tenant = ${sum}; tem de ser ${PERMILAGEM_CENTESIMAS_TOTAL}.`,
       400,
     );
   }
@@ -870,10 +918,15 @@ export async function approveBudgetAndCreateObligations(
     let allocated = 0;
     for (let i = 0; i < fracoes.length; i++) {
       const fracao = fracoes[i]!;
+      // Resto F2, determinístico: ORDER BY codigo ASC (já aplicado no SELECT).
+      // Cada fracção excepto a última recebe floor(amountCents * permilagem_centesimas / 100000).
+      // O resto inteiro de cêntimos vai todo para a última fracção. Não é largest-remainder.
+      // A constituição não usa este resto: Σ ≠ 100000 falha antes, sem alterar valores.
       const isLast = i === fracoes.length - 1;
+      const share = fracao.permilagemCentesimas ?? 0;
       const amount = isLast
         ? line.amountCents - allocated
-        : Math.floor((line.amountCents * fracao.permilagem) / PERMILAGEM_TOTAL);
+        : Math.floor((line.amountCents * share) / PERMILAGEM_CENTESIMAS_TOTAL);
       allocated += amount;
       const [row] = await deps.db
         .insert(obligations)
