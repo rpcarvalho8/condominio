@@ -615,7 +615,7 @@ describe("F1 constituição", () => {
     expect(err).toBeInstanceOf(DomainError);
     const domain = err as DomainError;
     expect(domain.httpStatus).toBe(409);
-    expect(domain.code === "duplicate_codigo" || domain.code === "reconfirm_conflict").toBe(true);
+    expect(domain.code).toBe("duplicate_codigo");
 
     const winnerIsSixty = results[0]?.status === "fulfilled";
     const winnerA = winnerIsSixty ? 60000 : 55000;
@@ -642,6 +642,180 @@ describe("F1 constituição", () => {
       "SELECT COUNT(*) AS n FROM audit_events WHERE type = 'constitution.fracoes_confirmed'",
     );
     expect(Number(confirmedDocs.rows[0]!.n)).toBe(1);
+  });
+
+  test("M39-T: ordem inversa concorrente, um 200 e um 409, sem mistura nem escrita parcial", async () => {
+    async function prepared(filename: string, rows: Array<[string, number]>) {
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename,
+      });
+      const extracted = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: rows.map(([codigo, centesimas]) => ({
+            kind: "fracao",
+            payload: { codigo, permilagem_centesimas: centesimas },
+            sourceExcerpt: codigo,
+          })),
+        },
+      });
+      const idByCodigo = new Map<string, string>();
+      for (const line of extracted.lines) {
+        const payload = JSON.parse(line.payloadJson) as { codigo?: string };
+        if (payload.codigo) idByCodigo.set(payload.codigo, line.id);
+      }
+      return { documentId: doc.id, idByCodigo };
+    }
+
+    function confirmInOrder(
+      prep: { documentId: string; idByCodigo: Map<string, string> },
+      order: string[],
+    ) {
+      return confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: prep.documentId,
+        confirmations: order.map((codigo) => {
+          const lineId = prep.idByCodigo.get(codigo);
+          if (!lineId) throw new Error(`linha ${codigo} em falta`);
+          return { lineId };
+        }),
+      });
+    }
+
+    const ab = await prepared("ordem-ab.pdf", [
+      ["A", 60000],
+      ["B", 40000],
+    ]);
+    const ba = await prepared("ordem-ba.pdf", [
+      ["B", 45000],
+      ["A", 55000],
+    ]);
+    const results = await Promise.allSettled([
+      confirmInOrder(ab, ["A", "B"]),
+      confirmInOrder(ba, ["B", "A"]),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    const err = rejected[0]?.status === "rejected" ? rejected[0].reason : null;
+    expect(err).toBeInstanceOf(DomainError);
+    const domain = err as DomainError;
+    expect(domain.httpStatus).toBe(409);
+    expect(domain.code).toBe("duplicate_codigo");
+
+    const winnerIsAb = results[0]?.status === "fulfilled";
+    const winnerA = winnerIsAb ? 60000 : 55000;
+    const winnerB = winnerIsAb ? 40000 : 45000;
+    const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(stored).toHaveLength(2);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(winnerA);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(winnerB);
+
+    const loserId = winnerIsAb ? ba.documentId : ab.documentId;
+    const winnerId = winnerIsAb ? ab.documentId : ba.documentId;
+    const loserLines = await listExtractLines(deps, { tenantId: TENANT, documentId: loserId });
+    const winnerLines = await listExtractLines(deps, { tenantId: TENANT, documentId: winnerId });
+    expect(loserLines.lines.map((line) => line.status)).toEqual(["pending_review", "pending_review"]);
+    expect(winnerLines.lines.map((line) => line.status)).toEqual(["confirmed", "confirmed"]);
+  });
+
+  test("M39-T: B2-atómica, 409 com rejeição no lote deixa a linha em pending_review", async () => {
+    const first = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "b2-atomica-base.pdf",
+    });
+    const seeded = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: first.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "A", permilagem_centesimas: 60000 },
+            sourceExcerpt: "A",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "B", permilagem_centesimas: 40000 },
+            sourceExcerpt: "B",
+          },
+        ],
+      },
+    });
+    await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: first.id,
+      confirmations: seeded.lines.map((line) => ({ lineId: line.id })),
+    });
+
+    const second = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "b2-atomica-409.pdf",
+    });
+    const extracted = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: second.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "R", permilagem_centesimas: 1 },
+            sourceExcerpt: "R",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "A", permilagem_centesimas: 55000 },
+            sourceExcerpt: "A",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "B", permilagem_centesimas: 45000 },
+            sourceExcerpt: "B",
+          },
+        ],
+      },
+    });
+    const rejectedLineId = extracted.lines[0]!.id;
+    const auditsBefore = await client.execute("SELECT COUNT(*) AS n FROM audit_events");
+    const failed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: second.id,
+      confirmations: [
+        { lineId: rejectedLineId, reject: true },
+        { lineId: extracted.lines[1]!.id },
+        { lineId: extracted.lines[2]!.id },
+      ],
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(DomainError);
+    const domain = failed as DomainError;
+    expect(domain.httpStatus).toBe(409);
+    expect(domain.code).toBe("duplicate_codigo");
+    expect(domain.message).toMatch(/não ficou gravada/);
+
+    const after = await listExtractLines(deps, { tenantId: TENANT, documentId: second.id });
+    const rejectedLine = after.lines.find((line) => line.id === rejectedLineId);
+    expect(rejectedLine?.status).toBe("pending_review");
+    const rejectionAudits = await client.execute({
+      sql: "SELECT COUNT(*) AS n FROM audit_events WHERE entity_id = ?",
+      args: [rejectedLineId],
+    });
+    expect(Number(rejectionAudits.rows[0]!.n)).toBe(0);
+    const auditsAfter = await client.execute("SELECT COUNT(*) AS n FROM audit_events");
+    expect(Number(auditsAfter.rows[0]!.n)).toBe(Number(auditsBefore.rows[0]!.n));
+
+    const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(stored).toHaveLength(2);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(60000);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(40000);
   });
 
   test("edição humana sem inteiro grava originalText formatado", async () => {
