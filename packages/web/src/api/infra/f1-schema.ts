@@ -401,12 +401,6 @@ export async function migrateConstitutionFracoesPermilagem(client: SqlExecutor):
 
   const columns = await constitutionColumns(client);
   if (isTargetShape(columns)) {
-    // O applier antigo criava aqui uma tabela viva vazia e apagava o rebuild.
-    // Com linhas no rebuild e zero na viva, promove-se; nunca se faz DROP do rebuild.
-    if (hasRebuild && rebuildRows > 0 && liveRows === 0) {
-      await promoteRebuild(client, true);
-      return;
-    }
     if (hasRebuild) await client.execute(`DROP TABLE ${REBUILD_TABLE}`);
     await recreateConstitutionIndexes(client);
     return;

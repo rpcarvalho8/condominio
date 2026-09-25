@@ -55,6 +55,7 @@ function payloadOf(line: ExtractLine): Record<string, unknown> {
   }
 }
 
+/** Pré-preenchimento: o mesmo leitor do servidor. Transform nulo ou desconhecido fica vazio. */
 function centesimasFromPayload(payload: Record<string, unknown>): number | null {
   const read = centesimasFromStoredPayload(payload);
   return read.ok ? read.centesimas : null;

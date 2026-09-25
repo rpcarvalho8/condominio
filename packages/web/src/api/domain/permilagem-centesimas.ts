@@ -73,31 +73,82 @@ const PIPELINE_MARKERS = [
   "confidenceSource",
 ] as const;
 
+type PermilagemEvidenceEntry = {
+  field?: unknown;
+  originalText?: unknown;
+  transform?: unknown;
+};
+
+function isPermilagemEvidence(entry: unknown): entry is PermilagemEvidenceEntry {
+  return (
+    entry != null &&
+    typeof entry === "object" &&
+    !Array.isArray(entry) &&
+    (entry as PermilagemEvidenceEntry).field === "permilagem"
+  );
+}
+
+/** `human_edit` e ‰; percentagem só com o transform que o pipeline aceitou. */
+function unitFromAcceptedTransform(transform: string): QuotaUnit | null {
+  if (transform === "human_edit" || transform === "identity_permille") return "permille";
+  if (transform.startsWith("percent_to_permille")) return "percent";
+  return null;
+}
+
+function usableEvidenceText(
+  entry: PermilagemEvidenceEntry,
+): { text: string; unit: QuotaUnit } | null {
+  const transform = typeof entry.transform === "string" ? entry.transform : "";
+  const unit = unitFromAcceptedTransform(transform);
+  if (!unit) return null;
+  if (typeof entry.originalText !== "string" || entry.originalText.trim() === "") return null;
+  return { text: entry.originalText, unit };
+}
+
+/**
+ * A edição humana mais recente ganha à evidência do pipeline.
+ * Sem `human_edit`, só entra transform `identity_permille` ou `percent_to_permille:*`.
+ * Transform nulo ou desconhecido (ambiguous_unit, mixed_units, …) não se lê como ‰.
+ */
 function permilagemEvidence(
   raw: Record<string, unknown>,
 ): { kind: "absent" } | { kind: "refuse" } | { kind: "text"; text: string; unit: QuotaUnit } {
   if (!Array.isArray(raw.evidence)) return { kind: "absent" };
-  const perm = raw.evidence.find(
-    (entry): entry is { field?: unknown; originalText?: unknown; transform?: unknown } =>
-      entry != null &&
-      typeof entry === "object" &&
-      !Array.isArray(entry) &&
-      (entry as { field?: unknown }).field === "permilagem",
-  );
-  if (!perm) return { kind: "refuse" };
-  if (typeof perm.originalText !== "string" || perm.originalText.trim() === "") {
-    return { kind: "refuse" };
-  }
-  const transform = typeof perm.transform === "string" ? perm.transform : "";
-  const unit: QuotaUnit = transform.startsWith("percent_to_permille") ? "percent" : "permille";
-  return { kind: "text", text: perm.originalText, unit };
+  const entries = raw.evidence.filter(isPermilagemEvidence);
+  if (entries.length === 0) return { kind: "refuse" };
+
+  const human = [...entries].reverse().find((entry) => entry.transform === "human_edit");
+  const chosen =
+    (human ? usableEvidenceText(human) : null) ??
+    (() => {
+      const pipeline = [...entries]
+        .reverse()
+        .find((entry) => entry.transform !== "human_edit" && usableEvidenceText(entry) != null);
+      return pipeline ? usableEvidenceText(pipeline) : null;
+    })();
+  if (!chosen) return { kind: "refuse" };
+  return { kind: "text", text: chosen.text, unit: chosen.unit };
+}
+
+/**
+ * O inteiro gravado tem de ser o arredondamento do token.
+ * 38,80 → 3880 arredonda a 39. 600,00 com inteiro 400 não se adivinha.
+ */
+function agreesWithStoredInteger(perm: unknown, centesimas: number): boolean {
+  if (perm == null) return true;
+  if (typeof perm === "string" && perm.trim() === "") return true;
+  if (typeof perm === "number" && !Number.isSafeInteger(perm)) return false;
+  const asInt = positiveSafeInteger(perm, PERMILAGEM_CENTESIMAS_TOTAL);
+  if (asInt == null) return false;
+  return Math.round(centesimas / 100) === asInt;
 }
 
 /**
  * Centésimas a partir de um payload já gravado.
- * Com evidência do pipeline, o token `originalText` ganha ao inteiro arredondado.
+ * `human_edit` mais recente ganha ao pipeline. O pipeline só conta com
+ * `identity_permille` ou `percent_to_permille:*`. Se o token arredondado
+ * não bate com o inteiro gravado, re-extrair — não se escolhe um dos dois.
  * Sem evidência, inteiro×100 só para entrada manual ou CSV inteira.
- * Caso contrário: re-extrair. Nunca se fabrica centésimas a partir de um arredondamento.
  */
 export function centesimasFromStoredPayload(raw: Record<string, unknown>): PermilagemCentesimasRead {
   const directField = raw.permilagem_centesimas ?? raw.permilagemCentesimas;
@@ -113,7 +164,8 @@ export function centesimasFromStoredPayload(raw: Record<string, unknown>): Permi
       parsed.ok &&
       parsed.centesimas > 0 &&
       parsed.centesimas <= PERMILAGEM_CENTESIMAS_TOTAL &&
-      Number.isSafeInteger(parsed.centesimas)
+      Number.isSafeInteger(parsed.centesimas) &&
+      agreesWithStoredInteger(raw.permilagem, parsed.centesimas)
     ) {
       return { ok: true, centesimas: parsed.centesimas };
     }

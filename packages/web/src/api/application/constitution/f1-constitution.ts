@@ -31,7 +31,7 @@ import {
   type PermilagemCentesimasRead,
 } from "../../domain/permilagem-centesimas";
 import { assertSha256ContentHash } from "../../infra/content-blob-store";
-import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
+import { kernelNow, type KernelDb, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
 import { UNIT_SHARE_PROFILE_ID, type IngestPipelineSummary } from "./ingest/contracts";
@@ -492,9 +492,87 @@ export async function editExtractLine(
   return { document, line: updated! };
 }
 
-function isUniqueCodigoConstraint(err: unknown): boolean {
-  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
-  return msg.includes("unique") && msg.includes("codigo");
+/**
+ * Drizzle embrulha o libSQL em DrizzleQueryError ("Failed query: insert into …").
+ * UNIQUE / SQLITE_CONSTRAINT ficam em `cause` (code, extendedCode, rawCode).
+ * NOT NULL (SQLITE_CONSTRAINT_NOTNULL / 1299) não é conflito de código.
+ */
+export function isUniqueCodigoConstraint(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current != null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const anyErr = current as {
+      message?: unknown;
+      code?: unknown;
+      extendedCode?: unknown;
+      rawCode?: unknown;
+      cause?: unknown;
+    };
+    const codes = [anyErr.code, anyErr.extendedCode, anyErr.rawCode]
+      .filter((value) => value != null)
+      .map((value) => String(value).toUpperCase());
+    const msg = String(anyErr.message ?? "").toLowerCase();
+    if (codes.some((code) => code.includes("SQLITE_CONSTRAINT_UNIQUE") || code === "2067")) {
+      return true;
+    }
+    const bareConstraint = codes.some((code) => code === "SQLITE_CONSTRAINT" || code === "19");
+    if (bareConstraint && msg.includes("unique")) return true;
+    if (msg.includes("unique") && (msg.includes("codigo") || msg.includes("constitution_fracoes"))) {
+      return true;
+    }
+    current = anyErr.cause;
+  }
+  return false;
+}
+
+function isSqliteBusy(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current != null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const anyErr = current as {
+      message?: unknown;
+      code?: unknown;
+      extendedCode?: unknown;
+      rawCode?: unknown;
+      cause?: unknown;
+    };
+    const codes = [anyErr.code, anyErr.extendedCode, anyErr.rawCode]
+      .filter((value) => value != null)
+      .map((value) => String(value).toUpperCase());
+    const msg = String(anyErr.message ?? "").toLowerCase();
+    if (
+      codes.some((code) => code.includes("SQLITE_BUSY") || code === "5") ||
+      msg.includes("database is locked") ||
+      msg.includes("sqlite_busy")
+    ) {
+      return true;
+    }
+    current = anyErr.cause;
+  }
+  return false;
+}
+
+/**
+ * BEGIN IMMEDIATE com busy_timeout alto bloqueia os dois escritores.
+ * BUSY volta logo; espera-se e tenta de novo até o outro COMMIT.
+ */
+async function withConfirmTransaction<T>(
+  deps: KernelDeps,
+  fn: (txDeps: KernelDeps) => Promise<T>,
+): Promise<T> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      return await deps.db.transaction(async (tx) => fn({ ...deps, db: tx as unknown as KernelDb }));
+    } catch (err) {
+      last = err;
+      if (err instanceof DomainError || !isSqliteBusy(err) || attempt === 7) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 30 * (attempt + 1)));
+    }
+  }
+  throw last;
 }
 
 export async function confirmFracaoLines(
@@ -585,155 +663,164 @@ export async function confirmFracaoLines(
     );
   }
 
-  const existingRows = await deps.db
-    .select()
-    .from(constitutionFracoes)
-    .where(eq(constitutionFracoes.tenantId, input.tenantId));
-  const existingByCodigo = new Map(existingRows.map((row) => [row.codigo, row]));
-  for (const item of batch) {
-    const existing = existingByCodigo.get(item.payload.codigo);
-    if (existing && existing.permilagemCentesimas != null) {
-      throw new DomainError(
-        "duplicate_codigo",
-        `O código ${item.payload.codigo} já está confirmado com permilagem em centésimas. Não crie outra fração com o mesmo código. Nada foi alterado.`,
-        409,
-      );
-    }
-  }
-
-  const created = [];
-  for (const item of batch) {
-    const existing = existingByCodigo.get(item.payload.codigo);
-    const permilagem = item.payload.permilagem;
-    let fracao;
-    if (existing && existing.permilagemCentesimas == null) {
-      const [updated] = await deps.db
-        .update(constitutionFracoes)
-        .set({
-          permilagem,
-          permilagemCentesimas: item.payload.permilagem_centesimas,
-          confirmedAt: now,
-          confirmedByPersonId: input.actor?.personId ?? null,
-        })
-        .where(eq(constitutionFracoes.id, existing.id))
-        .returning();
-      fracao = updated!;
-      await writeAudit(deps, {
-        tenantId: input.tenantId,
-        type: "constitution.fracao_centesimas_completed",
-        entityType: "constitution_fracao",
-        entityId: existing.id,
-        actor: input.actor,
-        before: {
-          id: existing.id,
-          codigo: existing.codigo,
-          permilagem: existing.permilagem,
-          permilagem_centesimas: null,
-        },
-        after: {
-          id: existing.id,
-          codigo: existing.codigo,
-          permilagem,
-          permilagem_centesimas: item.payload.permilagem_centesimas,
-          sourceDocumentId: document.id,
-          sourceLineId: item.lineId,
-        },
-        reason:
-          "Reconfirmação do regulamento: centésimas gravadas na fração existente. O id mantém-se para as obligations.",
-      });
-    } else {
-      try {
-        const [inserted] = await deps.db
-          .insert(constitutionFracoes)
-          .values({
-            id: crypto.randomUUID(),
-            tenantId: input.tenantId,
-            codigo: item.payload.codigo,
-            tipo: item.payload.tipo ?? "fracao",
-            permilagem,
-            permilagemCentesimas: item.payload.permilagem_centesimas,
-            sourceDocumentId: document.id,
-            sourceLineId: item.lineId,
-            sourceExcerpt: item.excerpt,
-            status: "confirmed",
-            createdAt: now,
-            confirmedAt: now,
-            confirmedByPersonId: input.actor?.personId ?? null,
-          })
-          .returning();
-        fracao = inserted!;
-      } catch (err) {
-        if (isUniqueCodigoConstraint(err)) {
-          throw new DomainError(
-            "duplicate_codigo",
-            `O código ${item.payload.codigo} já existe neste condomínio. Não crie outra fração com o mesmo código. Se a constituição é anterior a 0011 e as centésimas estão vazias, reconfirme o regulamento sobre a fração existente. Nada foi alterado.`,
-            409,
-          );
-        }
-        throw err;
+  const created = await withConfirmTransaction(deps, async (txDeps) => {
+    const rows = [];
+    const existingRows = await txDeps.db
+      .select()
+      .from(constitutionFracoes)
+      .where(eq(constitutionFracoes.tenantId, input.tenantId));
+    const existingByCodigo = new Map(existingRows.map((row) => [row.codigo, row]));
+    for (const item of batch) {
+      const existing = existingByCodigo.get(item.payload.codigo);
+      if (existing && existing.permilagemCentesimas != null) {
+        throw new DomainError(
+          "duplicate_codigo",
+          `O código ${item.payload.codigo} já está confirmado com permilagem em centésimas. Não crie outra fração com o mesmo código. Esta confirmação não ficou gravada.`,
+          409,
+        );
       }
     }
 
-    await deps.db
-      .update(extractLines)
+    for (const item of batch) {
+      const existing = existingByCodigo.get(item.payload.codigo);
+      const permilagem = item.payload.permilagem;
+      let fracao;
+      if (existing && existing.permilagemCentesimas == null) {
+        const [updated] = await txDeps.db
+          .update(constitutionFracoes)
+          .set({
+            permilagem,
+            permilagemCentesimas: item.payload.permilagem_centesimas,
+            confirmedAt: now,
+            confirmedByPersonId: input.actor?.personId ?? null,
+          })
+          .where(
+            and(
+              eq(constitutionFracoes.id, existing.id),
+              eq(constitutionFracoes.tenantId, input.tenantId),
+            ),
+          )
+          .returning();
+        fracao = updated!;
+        await writeAudit(txDeps, {
+          tenantId: input.tenantId,
+          type: "constitution.fracao_centesimas_completed",
+          entityType: "constitution_fracao",
+          entityId: existing.id,
+          actor: input.actor,
+          before: {
+            id: existing.id,
+            codigo: existing.codigo,
+            permilagem: existing.permilagem,
+            permilagem_centesimas: null,
+          },
+          after: {
+            id: existing.id,
+            codigo: existing.codigo,
+            permilagem,
+            permilagem_centesimas: item.payload.permilagem_centesimas,
+            sourceDocumentId: document.id,
+            sourceLineId: item.lineId,
+          },
+          reason:
+            "Reconfirmação do regulamento: centésimas gravadas na fração existente. O id mantém-se para as obligations.",
+        });
+      } else {
+        try {
+          const [inserted] = await txDeps.db
+            .insert(constitutionFracoes)
+            .values({
+              id: crypto.randomUUID(),
+              tenantId: input.tenantId,
+              codigo: item.payload.codigo,
+              tipo: item.payload.tipo ?? "fracao",
+              permilagem,
+              permilagemCentesimas: item.payload.permilagem_centesimas,
+              sourceDocumentId: document.id,
+              sourceLineId: item.lineId,
+              sourceExcerpt: item.excerpt,
+              status: "confirmed",
+              createdAt: now,
+              confirmedAt: now,
+              confirmedByPersonId: input.actor?.personId ?? null,
+            })
+            .returning();
+          fracao = inserted!;
+        } catch (err) {
+          if (isUniqueCodigoConstraint(err)) {
+            throw new DomainError(
+              "duplicate_codigo",
+              `O código ${item.payload.codigo} já existe neste condomínio. Não crie outra fração com o mesmo código. Se a constituição é anterior a 0011 e as centésimas estão vazias, reconfirme o regulamento sobre a fração existente. Esta confirmação não ficou gravada.`,
+              409,
+            );
+          }
+          throw err;
+        }
+      }
+
+      await txDeps.db
+        .update(extractLines)
+        .set({
+          status: EXTRACT_LINE_STATUS.confirmed,
+          editedPayloadJson: JSON.stringify(item.payload),
+          confirmedAt: now,
+          confirmedByPersonId: input.actor?.personId ?? null,
+        })
+        .where(eq(extractLines.id, item.lineId));
+
+      rows.push(fracao);
+    }
+
+    const pending = await txDeps.db
+      .select()
+      .from(extractLines)
+      .where(
+        and(
+          eq(extractLines.documentId, document.id),
+          inArray(extractLines.status, [
+            EXTRACT_LINE_STATUS.pendingReview,
+            EXTRACT_LINE_STATUS.needsHumanReview,
+          ]),
+        ),
+      );
+
+    await txDeps.db
+      .update(ingestDocuments)
       .set({
-        status: EXTRACT_LINE_STATUS.confirmed,
-        editedPayloadJson: JSON.stringify(item.payload),
-        confirmedAt: now,
-        confirmedByPersonId: input.actor?.personId ?? null,
+        status:
+          pending.length === 0
+            ? INGEST_DOCUMENT_STATUS.confirmed
+            : INGEST_DOCUMENT_STATUS.partiallyConfirmed,
       })
-      .where(eq(extractLines.id, item.lineId));
+      .where(eq(ingestDocuments.id, document.id));
 
-    created.push(fracao);
-  }
+    await writeAudit(txDeps, {
+      tenantId: input.tenantId,
+      type: "constitution.fracoes_confirmed",
+      entityType: "ingest_document",
+      entityId: document.id,
+      actor: input.actor,
+      after: {
+        created: rows.map((f) => ({
+          id: f.id,
+          codigo: f.codigo,
+          permilagem: f.permilagem,
+          permilagemCentesimas: f.permilagemCentesimas,
+        })),
+        sum,
+      },
+    });
 
-  const pending = await deps.db
-    .select()
-    .from(extractLines)
-    .where(
-      and(
-        eq(extractLines.documentId, document.id),
-        inArray(extractLines.status, [
-          EXTRACT_LINE_STATUS.pendingReview,
-          EXTRACT_LINE_STATUS.needsHumanReview,
-        ]),
-      ),
-    );
+    await publishDomainEvent(txDeps, {
+      tenantId: input.tenantId,
+      type: "ConstitutionFracoesConfirmed",
+      aggregateType: "ingest_document",
+      aggregateId: document.id,
+      payload: { count: rows.length, sum },
+      correlationId: input.actor?.requestId ?? null,
+    });
 
-  await deps.db
-    .update(ingestDocuments)
-    .set({
-      status:
-        pending.length === 0
-          ? INGEST_DOCUMENT_STATUS.confirmed
-          : INGEST_DOCUMENT_STATUS.partiallyConfirmed,
-    })
-    .where(eq(ingestDocuments.id, document.id));
-
-  await writeAudit(deps, {
-    tenantId: input.tenantId,
-    type: "constitution.fracoes_confirmed",
-    entityType: "ingest_document",
-    entityId: document.id,
-    actor: input.actor,
-    after: {
-      created: created.map((f) => ({
-        id: f.id,
-        codigo: f.codigo,
-        permilagem: f.permilagem,
-        permilagemCentesimas: f.permilagemCentesimas,
-      })),
-      sum,
-    },
-  });
-
-  await publishDomainEvent(deps, {
-    tenantId: input.tenantId,
-    type: "ConstitutionFracoesConfirmed",
-    aggregateType: "ingest_document",
-    aggregateId: document.id,
-    payload: { count: created.length, sum },
-    correlationId: input.actor?.requestId ?? null,
+    return rows;
   });
 
   return { fracoes: created, permilagemSum: sum, permilagemCentesimasSum: sum };
