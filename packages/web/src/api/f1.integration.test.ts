@@ -599,11 +599,13 @@ describe("F1 constituição", () => {
     expect(domain.code).toBe("reconfirm_conflict");
     expect(domain.httpStatus).toBe(409);
 
-    const winner = results[0]?.status === "fulfilled" ? [60000, 40000] : [55000, 45000];
+    const winnerIsSixty = results[0]?.status === "fulfilled";
+    const winnerA = winnerIsSixty ? 60000 : 55000;
+    const winnerB = winnerIsSixty ? 40000 : 45000;
     const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
     expect(stored.map((row) => row.id).sort()).toEqual(["legacy-a", "legacy-b"]);
-    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(winner[0]);
-    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(winner[1]);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(winnerA);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(winnerB);
 
     const audits = await client.execute(
       "SELECT entity_id, after_json FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
@@ -616,8 +618,8 @@ describe("F1 constituição", () => {
         return [byId.get(String(row.entity_id)), after.permilagem_centesimas];
       }),
     );
-    expect(audited.get("A")).toBe(winner[0]);
-    expect(audited.get("B")).toBe(winner[1]);
+    expect(audited.get("A")).toBe(winnerA);
+    expect(audited.get("B")).toBe(winnerB);
     const confirmedDocs = await client.execute(
       "SELECT COUNT(*) AS n FROM audit_events WHERE type = 'constitution.fracoes_confirmed'",
     );
