@@ -8,6 +8,7 @@ import { getToken } from "../lib/auth";
 import {
   PERMILAGEM_CENTESIMAS_TOTAL,
   centesimasFromQuotaToken,
+  centesimasFromStoredPayload,
   formatPermilagemCentesimas,
   legacyIntegerPermilagem,
 } from "../../api/domain/permilagem-centesimas";
@@ -55,21 +56,18 @@ function payloadOf(line: ExtractLine): Record<string, unknown> {
 }
 
 function centesimasFromPayload(payload: Record<string, unknown>): number | null {
-  const direct = payload.permilagem_centesimas ?? payload.permilagemCentesimas;
-  if (typeof direct === "number" && Number.isInteger(direct) && direct > 0) return direct;
-  if (typeof direct === "string" && /^\d+$/.test(direct)) return Number(direct);
-  const perm = payload.permilagem;
-  if (typeof perm === "number" && Number.isInteger(perm) && perm > 0) return perm * 100;
-  if (typeof perm === "string") {
-    const parsed = centesimasFromQuotaToken(perm, "permille");
-    return parsed.ok && parsed.centesimas > 0 ? parsed.centesimas : null;
-  }
-  return null;
+  const read = centesimasFromStoredPayload(payload);
+  return read.ok ? read.centesimas : null;
+}
+
+function payloadNeedsReextract(payload: Record<string, unknown>): boolean {
+  const read = centesimasFromStoredPayload(payload);
+  return !read.ok && read.reason === "reextract";
 }
 
 function permilagemLabel(row: { permilagem: number | null; permilagemCentesimas: number | null }): string {
   if (row.permilagemCentesimas != null) return `${formatPermilagemCentesimas(row.permilagemCentesimas)}‰`;
-  if (row.permilagem != null) return `${row.permilagem}‰`;
+  if (row.permilagem != null) return `${row.permilagem}‰ · legado — por reconfirmar`;
   return "—";
 }
 
@@ -547,6 +545,11 @@ export default function F1IngestaoPage() {
                                   onChange={(e) => setField(line.id, "permilagem_display", e.target.value)}
                                   placeholder="39,50"
                                 />
+                                {payloadNeedsReextract(payloadOf(line)) && edits[line.id]?.permilagem_display == null && (
+                                  <p className="text-xs" style={{ color: SEVILLA_RED }}>
+                                    Re-extraia o regulamento: a permilagem inteira não recupera as centésimas.
+                                  </p>
+                                )}
                               </>
                             )}
                             {line.kind === "contacto" && (

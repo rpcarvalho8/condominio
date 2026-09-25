@@ -48,6 +48,107 @@ export function centesimasFromQuotaToken(raw: string, unit: QuotaUnit): Centesim
   return { ok: true, centesimas, permilleDecimals };
 }
 
+/** Inteiro positivo dentro de um tecto. Rejeita floats e inteiros fora de Number.isSafeInteger. */
+export function positiveSafeInteger(value: unknown, max: number): number | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 && value <= max ? value : null;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= max ? parsed : null;
+  }
+  return null;
+}
+
+export type PermilagemCentesimasRead =
+  | { ok: true; centesimas: number }
+  | { ok: false; reason: "missing" | "reextract" };
+
+const PIPELINE_MARKERS = [
+  "origem",
+  "designacao_original",
+  "warnings",
+  "review",
+  "confidenceChecks",
+  "confidenceSource",
+] as const;
+
+function permilagemEvidence(
+  raw: Record<string, unknown>,
+): { kind: "absent" } | { kind: "refuse" } | { kind: "text"; text: string; unit: QuotaUnit } {
+  if (!Array.isArray(raw.evidence)) return { kind: "absent" };
+  const perm = raw.evidence.find(
+    (entry): entry is { field?: unknown; originalText?: unknown; transform?: unknown } =>
+      entry != null &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      (entry as { field?: unknown }).field === "permilagem",
+  );
+  if (!perm) return { kind: "refuse" };
+  if (typeof perm.originalText !== "string" || perm.originalText.trim() === "") {
+    return { kind: "refuse" };
+  }
+  const transform = typeof perm.transform === "string" ? perm.transform : "";
+  const unit: QuotaUnit = transform.startsWith("percent_to_permille") ? "percent" : "permille";
+  return { kind: "text", text: perm.originalText, unit };
+}
+
+/**
+ * Centésimas a partir de um payload já gravado.
+ * Com evidência do pipeline, o token `originalText` ganha ao inteiro arredondado.
+ * Sem evidência, inteiro×100 só para entrada manual ou CSV inteira.
+ * Caso contrário: re-extrair. Nunca se fabrica centésimas a partir de um arredondamento.
+ */
+export function centesimasFromStoredPayload(raw: Record<string, unknown>): PermilagemCentesimasRead {
+  const directField = raw.permilagem_centesimas ?? raw.permilagemCentesimas;
+  if (directField != null) {
+    const direct = positiveSafeInteger(directField, PERMILAGEM_CENTESIMAS_TOTAL);
+    return direct == null ? { ok: false, reason: "missing" } : { ok: true, centesimas: direct };
+  }
+
+  const evidence = permilagemEvidence(raw);
+  if (evidence.kind === "text") {
+    const parsed = centesimasFromQuotaToken(evidence.text, evidence.unit);
+    if (
+      parsed.ok &&
+      parsed.centesimas > 0 &&
+      parsed.centesimas <= PERMILAGEM_CENTESIMAS_TOTAL &&
+      Number.isSafeInteger(parsed.centesimas)
+    ) {
+      return { ok: true, centesimas: parsed.centesimas };
+    }
+    return { ok: false, reason: "reextract" };
+  }
+  if (evidence.kind === "refuse") return { ok: false, reason: "reextract" };
+
+  const looksPipeline = PIPELINE_MARKERS.some((key) => raw[key] != null);
+  const perm = raw.permilagem;
+  if (typeof perm === "string" && /[.,]/.test(perm)) {
+    const parsed = centesimasFromQuotaToken(perm, "permille");
+    if (
+      parsed.ok &&
+      parsed.centesimas > 0 &&
+      parsed.centesimas <= PERMILAGEM_CENTESIMAS_TOTAL &&
+      Number.isSafeInteger(parsed.centesimas)
+    ) {
+      return { ok: true, centesimas: parsed.centesimas };
+    }
+    return { ok: false, reason: looksPipeline ? "reextract" : "missing" };
+  }
+  if (typeof perm === "number" && !Number.isSafeInteger(perm)) {
+    return { ok: false, reason: "reextract" };
+  }
+  if (looksPipeline) return { ok: false, reason: "reextract" };
+
+  const asInt = positiveSafeInteger(perm, PERMILAGEM_CENTESIMAS_TOTAL);
+  if (asInt == null) return { ok: false, reason: "missing" };
+  const centesimas = asInt * 100;
+  if (!Number.isSafeInteger(centesimas) || centesimas <= 0 || centesimas > PERMILAGEM_CENTESIMAS_TOTAL) {
+    return { ok: false, reason: "missing" };
+  }
+  return { ok: true, centesimas };
+}
+
 /** Inteiro ‰ só quando não há centésimos. Caso contrário NULL — não se arredonda. */
 export function legacyIntegerPermilagem(centesimas: number): number | null {
   if (!Number.isInteger(centesimas) || centesimas % 100 !== 0) return null;

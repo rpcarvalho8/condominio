@@ -301,10 +301,23 @@ describe("F1 constituição", () => {
     expect(again.obligations.length).toBe(approved.obligations.length);
   });
 
-  test("resto F2 vai todo para o último codigo, nas duas ordens de inserção", async () => {
-    const shares: Record<string, number> = { A: 20000, M: 30000, Z: 50000 };
+  test("resto F2 é determinístico na colação BINARY, com uma fracção e com resto zero", async () => {
+    // ORDER BY codigo ASC, colação BINARY: 10, 1A, 9, AA, B, a. O resto vai para "a".
+    const codes = ["10", "9", "1A", "AA", "B", "a"];
+    const shares: Record<string, number> = {
+      "10": 1,
+      "1A": 10,
+      "9": 100,
+      AA: 1000,
+      B: 10000,
+      a: 88889,
+    };
 
-    async function centsByCodigo(insertOrder: string[]): Promise<Record<string, number>> {
+    async function centsByCodigo(
+      insertOrder: string[],
+      quota: Record<string, number>,
+      amountCents: number,
+    ): Promise<Record<string, number>> {
       for (const table of [
         "obligations",
         "annual_budget_lines",
@@ -326,7 +339,7 @@ describe("F1 constituição", () => {
         extraction: {
           lines: insertOrder.map((codigo) => ({
             kind: "fracao",
-            payload: { codigo, permilagem_centesimas: shares[codigo] },
+            payload: { codigo, permilagem_centesimas: quota[codigo] },
             sourceExcerpt: `${codigo} — quota`,
           })),
         },
@@ -342,13 +355,14 @@ describe("F1 constituição", () => {
         documentId: doc.id,
         confirmations: insertOrder.map((codigo) => ({ lineId: lineIdByCodigo.get(codigo)! })),
       });
+      const fcr = Math.max(1, Math.ceil(amountCents * 0.1));
       const budget = await createAnnualBudget(deps, {
         tenantId: TENANT,
         year: 2027,
         title: "Resto",
         lines: [
-          { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents: 3 },
-          { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: 1 },
+          { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents },
+          { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: fcr },
         ],
       });
       const approved = await approveBudgetAndCreateObligations(deps, {
@@ -366,10 +380,203 @@ describe("F1 constituição", () => {
       return out;
     }
 
-    const insertedLast = await centsByCodigo(["Z", "M", "A"]);
-    const insertedFirst = await centsByCodigo(["A", "M", "Z"]);
-    expect(insertedLast).toEqual({ A: 0, M: 0, Z: 3 });
-    expect(insertedFirst).toEqual(insertedLast);
+    const expected = { "10": 0, "1A": 0, "9": 0, AA: 0, B: 1, a: 9 };
+    const firstOrder = await centsByCodigo(codes, shares, 10);
+    const reversed = await centsByCodigo([...codes].reverse(), shares, 10);
+    expect(firstOrder).toEqual(expected);
+    expect(reversed).toEqual(firstOrder);
+
+    const alone = await centsByCodigo(["Z"], { Z: 100000 }, 12345);
+    expect(alone).toEqual({ Z: 12345 });
+
+    const even = { A: 50000, B: 50000 };
+    const zeroA = await centsByCodigo(["B", "A"], even, 100);
+    const zeroB = await centsByCodigo(["A", "B"], even, 100);
+    expect(zeroA).toEqual({ A: 50, B: 50 });
+    expect(zeroB).toEqual(zeroA);
+  });
+
+  async function insertLegacyFracao(id: string, codigo: string, permilagem: number) {
+    await client.execute({
+      sql: `INSERT INTO constitution_fracoes (
+        id, tenant_id, codigo, tipo, permilagem, permilagem_centesimas,
+        source_excerpt, status, created_at, confirmed_at
+      ) VALUES (?, ?, ?, 'fracao', ?, NULL, 'legado', 'confirmed', 1, 1)`,
+      args: [id, TENANT, codigo, permilagem],
+    });
+  }
+
+  test("constituição anterior a 0011: aprovar sem centésimas pede reconfirmação", async () => {
+    await insertLegacyFracao("legacy-e", "E", 3);
+    await insertLegacyFracao("legacy-m", "M", 40);
+    const budget = await createAnnualBudget(deps, {
+      tenantId: TENANT,
+      year: 2026,
+      title: "Legado",
+      lines: [
+        { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents: 10_000 },
+        { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: 1_000 },
+      ],
+    });
+    const failed = await approveBudgetAndCreateObligations(deps, {
+      tenantId: TENANT,
+      budgetId: budget.budget.id,
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(DomainError);
+    const domain = failed as DomainError;
+    expect(domain.code).toBe("permilagem_centesimas_missing");
+    expect(domain.message).toContain("E");
+    expect(domain.message).toContain("M");
+    expect(domain.message).toMatch(/0011/);
+    expect(domain.message.toLowerCase()).toMatch(/reconfirm/);
+    expect(domain.message.toLowerCase()).toMatch(/regulamento/);
+    const still = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(still.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
+    expect(still.every((f) => f.permilagemCentesimas == null)).toBe(true);
+  });
+
+  test("reconfirmação completa centésimas no mesmo id e o orçamento aprova", async () => {
+    await insertLegacyFracao("legacy-e", "E", 961);
+    await insertLegacyFracao("legacy-m", "M", 40);
+    const doc = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "reconfirmacao.pdf",
+    });
+    const { lines } = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: {
+              codigo: "M",
+              permilagem: 39,
+              evidence: [{ field: "permilagem", originalText: "39,50" }],
+            },
+            sourceExcerpt: "M — 39,50",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "E", permilagem_centesimas: 96050 },
+            sourceExcerpt: "E — 960,50",
+          },
+        ],
+      },
+    });
+    const confirmed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      confirmations: lines.map((line) => ({ lineId: line.id })),
+    });
+    expect(confirmed.permilagemCentesimasSum).toBe(100000);
+    const fracoes = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(fracoes.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
+    const storedM = fracoes.find((f) => f.codigo === "M")!;
+    const storedE = fracoes.find((f) => f.codigo === "E")!;
+    expect(storedM.permilagemCentesimas).toBe(3950);
+    expect(storedM.permilagem).toBeNull();
+    expect(storedE.permilagemCentesimas).toBe(96050);
+    expect(storedE.permilagem).toBeNull();
+
+    const audit = await client.execute(
+      "SELECT entity_id, before_json, after_json FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
+    );
+    expect(audit.rows.map((row) => String(row.entity_id)).sort()).toEqual(["legacy-e", "legacy-m"]);
+
+    const budget = await createAnnualBudget(deps, {
+      tenantId: TENANT,
+      year: 2028,
+      title: "Depois da reconfirmação",
+      lines: [
+        { kind: BUDGET_LINE_KINDS.quotaCorrente, label: "Q", amountCents: 10_000 },
+        { kind: BUDGET_LINE_KINDS.fcr, label: "F", amountCents: 1_000 },
+      ],
+    });
+    const approved = await approveBudgetAndCreateObligations(deps, {
+      tenantId: TENANT,
+      budgetId: budget.budget.id,
+    });
+    expect(approved.idempotent).toBe(false);
+    expect(new Set(approved.obligations.map((row) => row.fracaoId))).toEqual(
+      new Set(["legacy-e", "legacy-m"]),
+    );
+
+    const again = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "duplicado.pdf",
+    });
+    const second = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: again.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "M", permilagem_centesimas: 3950 },
+            sourceExcerpt: "M",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "E", permilagem_centesimas: 96050 },
+            sourceExcerpt: "E",
+          },
+        ],
+      },
+    });
+    const conflict = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: again.id,
+      confirmations: second.lines.map((line) => ({ lineId: line.id })),
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(conflict).toBeInstanceOf(DomainError);
+    const domain = conflict as DomainError;
+    expect(domain.code).toBe("duplicate_codigo");
+    expect(domain.httpStatus).toBe(409);
+    expect(domain.message).not.toMatch(/UNIQUE constraint|SQLITE/i);
+    expect(domain.message.toLowerCase()).toMatch(/não crie outra fração/);
+    const afterConflict = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(afterConflict.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
+  });
+
+  test("edição humana sem inteiro grava originalText formatado", async () => {
+    const doc = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "edicao.pdf",
+    });
+    const { lines } = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "M", permilagem: null, permilagem_centesimas: 3950 },
+            sourceExcerpt: "M 39,50",
+          },
+        ],
+      },
+    });
+    const edited = await editExtractLine(deps, {
+      tenantId: TENANT,
+      documentId: doc.id,
+      lineId: lines[0]!.id,
+      payload: { codigo: "M", permilagem: null, permilagem_centesimas: 3950 },
+    });
+    const stored = JSON.parse(edited.line.editedPayloadJson!) as {
+      evidence?: Array<{ transform?: string; originalText?: string }>;
+    };
+    const human = stored.evidence?.find((item) => item.transform === "human_edit");
+    expect(human?.originalText).toBe("39,50");
   });
 
   test("FCR < 10% da quota é rejeitado", async () => {

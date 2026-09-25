@@ -370,7 +370,7 @@ export default function F3PortalPage() {
                 Permilagem {fracao.permilagemCentesimas != null
                   ? `${formatPermilagemCentesimas(fracao.permilagemCentesimas)}‰`
                   : fracao.permilagem != null
-                    ? `${fracao.permilagem}‰`
+                    ? `${fracao.permilagem}‰ · legado — por reconfirmar`
                     : "—"} · Original {formatCents(fracao.originalCents)} ·
                 Alocado {formatCents(fracao.allocatedCents)}
               </p>

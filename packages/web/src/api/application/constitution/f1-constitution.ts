@@ -24,8 +24,11 @@ import {
 import { DomainError } from "../../domain/errors";
 import {
   PERMILAGEM_CENTESIMAS_TOTAL,
-  centesimasFromQuotaToken,
+  centesimasFromStoredPayload,
+  formatPermilagemCentesimas,
   legacyIntegerPermilagem,
+  positiveSafeInteger,
+  type PermilagemCentesimasRead,
 } from "../../domain/permilagem-centesimas";
 import { assertSha256ContentHash } from "../../infra/content-blob-store";
 import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
@@ -46,40 +49,43 @@ type StoredFracaoPayload = {
   permilagem_centesimas: number;
 };
 
+/** Centésimas: Number.isSafeInteger e ≤ 100000. Não aceita float. */
 function positiveInteger(value: unknown): number | null {
-  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
-  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
-    const parsed = Number(value.trim());
-    if (Number.isInteger(parsed) && parsed > 0) return parsed;
-  }
-  return null;
+  return positiveSafeInteger(value, PERMILAGEM_CENTESIMAS_TOTAL);
 }
 
-/** Lê centésimas do payload. Inteiro ‰ exacto (sem casas) vale ×100. Não arredonda. */
-export function readPermilagemCentesimas(raw: Record<string, unknown>): number | null {
-  const direct = positiveInteger(raw.permilagem_centesimas ?? raw.permilagemCentesimas);
-  if (direct != null) return direct;
-  const perm = raw.permilagem;
-  if (typeof perm === "string" && /[.,]/.test(perm)) {
-    const parsed = centesimasFromQuotaToken(perm, "permille");
-    return parsed.ok && parsed.centesimas > 0 ? parsed.centesimas : null;
+const REEXTRACT_MESSAGE =
+  "A permilagem inteira não recupera as centésimas. Re-extraia o regulamento para ler o token original; não se converte um inteiro arredondado.";
+
+function classifyPermilagem(raw: Record<string, unknown>): PermilagemCentesimasRead {
+  const directField = raw.permilagem_centesimas ?? raw.permilagemCentesimas;
+  if (directField != null) {
+    const direct = positiveInteger(directField);
+    return direct == null ? { ok: false, reason: "missing" } : { ok: true, centesimas: direct };
   }
-  const asInt = positiveInteger(perm);
-  if (asInt != null) return asInt * 100;
-  return null;
+  return centesimasFromStoredPayload(raw);
+}
+
+/** Lê centésimas do payload. Inteiro ‰ exacto (sem casas) vale ×100 só sem evidência de arredondamento. */
+export function readPermilagemCentesimas(raw: Record<string, unknown>): number | null {
+  const read = classifyPermilagem(raw);
+  return read.ok ? read.centesimas : null;
 }
 
 function asFracaoPayload(raw: Record<string, unknown>): StoredFracaoPayload {
   const codigo = String(raw.codigo ?? "").trim();
   if (!codigo) throw new DomainError("invalid_fracao", "código de fração obrigatório", 400);
-  const centesimas = readPermilagemCentesimas(raw);
-  if (centesimas == null) {
+  const read = classifyPermilagem(raw);
+  if (!read.ok) {
     throw new DomainError(
-      "invalid_permilagem",
-      "permilagem_centesimas em falta ou com mais de 2 casas decimais no ‰",
+      read.reason === "reextract" ? "permilagem_reextract" : "invalid_permilagem",
+      read.reason === "reextract"
+        ? REEXTRACT_MESSAGE
+        : "permilagem_centesimas em falta ou com mais de 2 casas decimais no ‰",
       400,
     );
   }
+  const centesimas = read.centesimas;
   return {
     codigo,
     tipo: raw.tipo ? String(raw.tipo) : "fracao",
@@ -111,6 +117,7 @@ async function writeAudit(
     entityType: string;
     entityId: string;
     actor?: Actor;
+    before?: Record<string, unknown> | null;
     after?: Record<string, unknown> | null;
     reason?: string | null;
   },
@@ -123,6 +130,7 @@ async function writeAudit(
     actorPersonId: input.actor?.personId ?? null,
     actorUserId: input.actor?.userId ?? null,
     requestId: input.actor?.requestId ?? null,
+    before: input.before ?? null,
     after: input.after ?? null,
     reason: input.reason ?? null,
     source: "f1",
@@ -441,7 +449,10 @@ export async function editExtractLine(
           line: line.lineNo,
           cell: null,
           region: null,
-          originalText: String(input.payload.permilagem ?? ""),
+          originalText:
+            fracao.permilagem == null
+              ? formatPermilagemCentesimas(fracao.permilagem_centesimas)
+              : String(fracao.permilagem),
           transform: "human_edit",
         },
       ],
@@ -479,6 +490,11 @@ export async function editExtractLine(
   });
 
   return { document, line: updated! };
+}
+
+function isUniqueCodigoConstraint(err: unknown): boolean {
+  const msg = String((err as { message?: string })?.message ?? err).toLowerCase();
+  return msg.includes("unique") && msg.includes("codigo");
 }
 
 export async function confirmFracaoLines(
@@ -569,26 +585,94 @@ export async function confirmFracaoLines(
     );
   }
 
+  const existingRows = await deps.db
+    .select()
+    .from(constitutionFracoes)
+    .where(eq(constitutionFracoes.tenantId, input.tenantId));
+  const existingByCodigo = new Map(existingRows.map((row) => [row.codigo, row]));
+  for (const item of batch) {
+    const existing = existingByCodigo.get(item.payload.codigo);
+    if (existing && existing.permilagemCentesimas != null) {
+      throw new DomainError(
+        "duplicate_codigo",
+        `O código ${item.payload.codigo} já está confirmado com permilagem em centésimas. Não crie outra fração com o mesmo código. Nada foi alterado.`,
+        409,
+      );
+    }
+  }
+
   const created = [];
   for (const item of batch) {
-    const [fracao] = await deps.db
-      .insert(constitutionFracoes)
-      .values({
-        id: crypto.randomUUID(),
+    const existing = existingByCodigo.get(item.payload.codigo);
+    const permilagem = item.payload.permilagem;
+    let fracao;
+    if (existing && existing.permilagemCentesimas == null) {
+      const [updated] = await deps.db
+        .update(constitutionFracoes)
+        .set({
+          permilagem,
+          permilagemCentesimas: item.payload.permilagem_centesimas,
+          confirmedAt: now,
+          confirmedByPersonId: input.actor?.personId ?? null,
+        })
+        .where(eq(constitutionFracoes.id, existing.id))
+        .returning();
+      fracao = updated!;
+      await writeAudit(deps, {
         tenantId: input.tenantId,
-        codigo: item.payload.codigo,
-        tipo: item.payload.tipo ?? "fracao",
-        permilagem: item.payload.permilagem,
-        permilagemCentesimas: item.payload.permilagem_centesimas,
-        sourceDocumentId: document.id,
-        sourceLineId: item.lineId,
-        sourceExcerpt: item.excerpt,
-        status: "confirmed",
-        createdAt: now,
-        confirmedAt: now,
-        confirmedByPersonId: input.actor?.personId ?? null,
-      })
-      .returning();
+        type: "constitution.fracao_centesimas_completed",
+        entityType: "constitution_fracao",
+        entityId: existing.id,
+        actor: input.actor,
+        before: {
+          id: existing.id,
+          codigo: existing.codigo,
+          permilagem: existing.permilagem,
+          permilagem_centesimas: null,
+        },
+        after: {
+          id: existing.id,
+          codigo: existing.codigo,
+          permilagem,
+          permilagem_centesimas: item.payload.permilagem_centesimas,
+          sourceDocumentId: document.id,
+          sourceLineId: item.lineId,
+        },
+        reason:
+          "Reconfirmação do regulamento: centésimas gravadas na fração existente. O id mantém-se para as obligations.",
+      });
+    } else {
+      try {
+        const [inserted] = await deps.db
+          .insert(constitutionFracoes)
+          .values({
+            id: crypto.randomUUID(),
+            tenantId: input.tenantId,
+            codigo: item.payload.codigo,
+            tipo: item.payload.tipo ?? "fracao",
+            permilagem,
+            permilagemCentesimas: item.payload.permilagem_centesimas,
+            sourceDocumentId: document.id,
+            sourceLineId: item.lineId,
+            sourceExcerpt: item.excerpt,
+            status: "confirmed",
+            createdAt: now,
+            confirmedAt: now,
+            confirmedByPersonId: input.actor?.personId ?? null,
+          })
+          .returning();
+        fracao = inserted!;
+      } catch (err) {
+        if (isUniqueCodigoConstraint(err)) {
+          throw new DomainError(
+            "duplicate_codigo",
+            `O código ${item.payload.codigo} já existe neste condomínio. Não crie outra fração com o mesmo código. Se a constituição é anterior a 0011 e as centésimas estão vazias, reconfirme o regulamento sobre a fração existente. Nada foi alterado.`,
+            409,
+          );
+        }
+        throw err;
+      }
+    }
 
     await deps.db
       .update(extractLines)
@@ -600,7 +684,7 @@ export async function confirmFracaoLines(
       })
       .where(eq(extractLines.id, item.lineId));
 
-    created.push(fracao!);
+    created.push(fracao);
   }
 
   const pending = await deps.db
@@ -898,8 +982,16 @@ export async function approveBudgetAndCreateObligations(
   }
 
   const missing = fracoes.filter((f) => f.permilagemCentesimas == null);
+  if (missing.length > 0) {
+    const codigos = missing.map((f) => f.codigo).join(", ");
+    throw new DomainError(
+      "permilagem_centesimas_missing",
+      `Faltam permilagem_centesimas nas frações ${codigos}. A constituição é anterior à migração 0011: reconfirme o regulamento para gravar as centésimas de ‰. Nada foi aprovado.`,
+      400,
+    );
+  }
   const sum = fracoes.reduce((a, f) => a + (f.permilagemCentesimas ?? 0), 0);
-  if (missing.length > 0 || sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
+  if (sum !== PERMILAGEM_CENTESIMAS_TOTAL) {
     throw new DomainError(
       "permilagem_sum",
       `Σ permilagem_centesimas do tenant = ${sum}; tem de ser ${PERMILAGEM_CENTESIMAS_TOTAL}.`,

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   centesimasFromQuotaToken,
+  centesimasFromStoredPayload,
   formatPermilagemCentesimas,
   legacyIntegerPermilagem,
 } from "./permilagem-centesimas";
@@ -43,5 +44,33 @@ describe("permilagem_centesimas", () => {
       ok: false,
       reason: "too_many_decimals",
     });
+  });
+
+  test("payload legado com evidência usa o token, não o inteiro arredondado", () => {
+    expect(
+      centesimasFromStoredPayload({
+        permilagem: 39,
+        evidence: [{ field: "permilagem", originalText: "38,80" }],
+      }),
+    ).toEqual({ ok: true, centesimas: 3880 });
+    expect(
+      centesimasFromStoredPayload({
+        permilagem: 39,
+        evidence: [{ field: "permilagem", originalText: "38,801" }],
+      }),
+    ).toEqual({ ok: false, reason: "reextract" });
+    expect(
+      centesimasFromStoredPayload({ permilagem: 39, origem: "table" }),
+    ).toEqual({ ok: false, reason: "reextract" });
+    expect(centesimasFromStoredPayload({ permilagem: 600 })).toEqual({
+      ok: true,
+      centesimas: 60000,
+    });
+    expect(centesimasFromStoredPayload({ permilagem_centesimas: 100000 })).toEqual({
+      ok: true,
+      centesimas: 100000,
+    });
+    expect(centesimasFromStoredPayload({ permilagem_centesimas: 100001 }).ok).toBe(false);
+    expect(centesimasFromStoredPayload({ permilagem_centesimas: 39.5 }).ok).toBe(false);
   });
 });
