@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   annualBudgetLines,
   annualBudgets,
@@ -653,10 +653,18 @@ export async function confirmFracaoLines(
           and(
             eq(constitutionFracoes.id, existing.id),
             eq(constitutionFracoes.tenantId, input.tenantId),
+            isNull(constitutionFracoes.permilagemCentesimas),
           ),
         )
         .returning();
-      fracao = updated!;
+      if (!updated) {
+        throw new DomainError(
+          "reconfirm_conflict",
+          `O código ${item.payload.codigo} já não tem centésimas vazias. O valor pedido não foi escrito nesta fração.`,
+          409,
+        );
+      }
+      fracao = updated;
       await writeAudit(deps, {
           tenantId: input.tenantId,
           type: "constitution.fracao_centesimas_completed",
