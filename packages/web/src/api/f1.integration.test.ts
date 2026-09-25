@@ -568,11 +568,11 @@ describe("F1 constituição", () => {
     expect(afterConflict.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
   });
 
-  test("M1-race: segunda reconfirmação, depois das centésimas preenchidas, é 409 e não substitui a primeira", async () => {
+  test("M1-race: reconfirmações concorrentes, um 200 e um 409 reconfirm_conflict, sem mistura", async () => {
     await insertLegacyFracao("legacy-a", "A", 600);
     await insertLegacyFracao("legacy-b", "B", 400);
 
-    async function confirmPair(filename: string, a: number, b: number) {
+    async function readyPair(filename: string, a: number, b: number) {
       const doc = await registerIngestDocument(deps, {
         tenantId: TENANT,
         kind: INGEST_DOCUMENT_KINDS.regulamento,
@@ -596,39 +596,52 @@ describe("F1 constituição", () => {
           ],
         },
       });
-      return confirmFracaoLines(deps, {
-        tenantId: TENANT,
-        documentId: doc.id,
-        confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
-      });
+      return () =>
+        confirmFracaoLines(deps, {
+          tenantId: TENANT,
+          documentId: doc.id,
+          confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
+        });
     }
 
-    await confirmPair("reconfirm-primeira.pdf", 60000, 40000);
-    const auditsAfterFirst = await client.execute(
-      "SELECT type, entity_id FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
-    );
-    expect(auditsAfterFirst.rows).toHaveLength(2);
-
-    const second = await confirmPair("reconfirm-segunda.pdf", 55000, 45000).then(
-      () => null,
-      (err: unknown) => err,
-    );
-    expect(second).toBeInstanceOf(DomainError);
-    const domain = second as DomainError;
+    const confirmSixty = await readyPair("reconfirm-60000.pdf", 60000, 40000);
+    const confirmFifty = await readyPair("reconfirm-55000.pdf", 55000, 45000);
+    const results = await Promise.allSettled([confirmSixty(), confirmFifty()]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    const err = rejected[0]?.status === "rejected" ? rejected[0].reason : null;
+    expect(err).toBeInstanceOf(DomainError);
+    const domain = err as DomainError;
+    expect(domain.code).toBe("reconfirm_conflict");
     expect(domain.httpStatus).toBe(409);
 
+    const winnerIsSixty = results[0]?.status === "fulfilled";
+    const winnerA = winnerIsSixty ? 60000 : 55000;
+    const winnerB = winnerIsSixty ? 40000 : 45000;
     const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
     expect(stored.map((row) => row.id).sort()).toEqual(["legacy-a", "legacy-b"]);
-    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(60000);
-    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(40000);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(winnerA);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(winnerB);
 
-    const auditsAfterSecond = await client.execute(
-      "SELECT type, entity_id FROM audit_events WHERE type IN ('constitution.fracao_centesimas_completed', 'constitution.fracoes_confirmed')",
+    const audits = await client.execute(
+      "SELECT entity_id, after_json FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
     );
-    expect(auditsAfterSecond.rows).toHaveLength(3);
-    expect(
-      auditsAfterSecond.rows.filter((row) => row.type === "constitution.fracao_centesimas_completed"),
-    ).toHaveLength(2);
+    expect(audits.rows).toHaveLength(2);
+    const byId = new Map(stored.map((row) => [row.id, row.codigo]));
+    const audited = new Map(
+      audits.rows.map((row) => {
+        const after = JSON.parse(String(row.after_json)) as { permilagem_centesimas?: number };
+        return [byId.get(String(row.entity_id)), after.permilagem_centesimas];
+      }),
+    );
+    expect(audited.get("A")).toBe(winnerA);
+    expect(audited.get("B")).toBe(winnerB);
+    const confirmedDocs = await client.execute(
+      "SELECT COUNT(*) AS n FROM audit_events WHERE type = 'constitution.fracoes_confirmed'",
+    );
+    expect(Number(confirmedDocs.rows[0]!.n)).toBe(1);
   });
 
   test("edição humana sem inteiro grava originalText formatado", async () => {
