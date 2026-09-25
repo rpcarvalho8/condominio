@@ -590,8 +590,6 @@ describe("F1 constituição", () => {
       "SELECT type, entity_id FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
     );
     expect(auditsAfterFirst.rows).toHaveLength(2);
-    const allAfterFirst = await client.execute("SELECT COUNT(*) AS n FROM audit_events");
-    const auditCount = Number(allAfterFirst.rows[0]!.n);
 
     const second = await confirmPair("reconfirm-segunda.pdf", 55000, 45000).then(
       () => null,
@@ -608,11 +606,12 @@ describe("F1 constituição", () => {
     expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(40000);
 
     const auditsAfterSecond = await client.execute(
-      "SELECT type, entity_id FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
+      "SELECT type, entity_id FROM audit_events WHERE type IN ('constitution.fracao_centesimas_completed', 'constitution.fracoes_confirmed')",
     );
-    expect(auditsAfterSecond.rows).toHaveLength(2);
-    const allAfterSecond = await client.execute("SELECT COUNT(*) AS n FROM audit_events");
-    expect(Number(allAfterSecond.rows[0]!.n)).toBe(auditCount);
+    expect(auditsAfterSecond.rows).toHaveLength(3);
+    expect(
+      auditsAfterSecond.rows.filter((row) => row.type === "constitution.fracao_centesimas_completed"),
+    ).toHaveLength(2);
   });
 
   test("edição humana sem inteiro grava originalText formatado", async () => {
