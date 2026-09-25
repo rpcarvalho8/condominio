@@ -71,9 +71,7 @@ function buildF1App() {
     .route("/f1", createF1Routes(deps));
 }
 
-async function immediateWrite(handle: {
-  execute: (stmt: string | { sql: string; args?: unknown[] }) => Promise<unknown>;
-}) {
+async function immediateWrite(handle: Pick<ReturnType<typeof createClient>, "execute">) {
   await handle.execute("BEGIN IMMEDIATE");
   try {
     await handle.execute({
