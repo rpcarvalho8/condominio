@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   annualBudgetLines,
   annualBudgets,
@@ -654,7 +654,8 @@ function withClientMutex<T>(client: object, fn: () => Promise<T>): Promise<T> {
  * (ligação nova = base vazia). As repetições são só para outro processo.
  *
  * Turso (hrana, protocol http/ws) abre uma transacção interactiva remota.
- * Não há ligação local envenenada; um BUSY remoto repete-se, sem reconnect.
+ * Não há ligação local envenenada. Um BUSY remoto propaga-se como
+ * DrizzleQueryError e não se repete.
  */
 async function withConfirmTransaction<T>(
   deps: KernelDeps,
@@ -820,10 +821,18 @@ export async function confirmFracaoLines(
             and(
               eq(constitutionFracoes.id, existing.id),
               eq(constitutionFracoes.tenantId, input.tenantId),
+              isNull(constitutionFracoes.permilagemCentesimas),
             ),
           )
           .returning();
-        fracao = updated!;
+        if (!updated) {
+          throw new DomainError(
+            "reconfirm_conflict",
+            `O código ${item.payload.codigo} já não tem centésimas vazias. O valor pedido não foi escrito nesta fração.`,
+            409,
+          );
+        }
+        fracao = updated;
         await writeAudit(txDeps, {
           tenantId: input.tenantId,
           type: "constitution.fracao_centesimas_completed",

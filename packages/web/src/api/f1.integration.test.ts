@@ -568,6 +568,70 @@ describe("F1 constituição", () => {
     expect(afterConflict.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
   });
 
+  test("M1-race: segunda reconfirmação, depois das centésimas preenchidas, é 409 e não substitui a primeira", async () => {
+    await insertLegacyFracao("legacy-a", "A", 600);
+    await insertLegacyFracao("legacy-b", "B", 400);
+
+    async function confirmPair(filename: string, a: number, b: number) {
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename,
+      });
+      const extracted = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: [
+            {
+              kind: "fracao",
+              payload: { codigo: "A", permilagem_centesimas: a },
+              sourceExcerpt: "A",
+            },
+            {
+              kind: "fracao",
+              payload: { codigo: "B", permilagem_centesimas: b },
+              sourceExcerpt: "B",
+            },
+          ],
+        },
+      });
+      return confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        confirmations: extracted.lines.map((line) => ({ lineId: line.id })),
+      });
+    }
+
+    await confirmPair("reconfirm-primeira.pdf", 60000, 40000);
+    const auditsAfterFirst = await client.execute(
+      "SELECT type, entity_id FROM audit_events WHERE type = 'constitution.fracao_centesimas_completed'",
+    );
+    expect(auditsAfterFirst.rows).toHaveLength(2);
+
+    const second = await confirmPair("reconfirm-segunda.pdf", 55000, 45000).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(second).toBeInstanceOf(DomainError);
+    const domain = second as DomainError;
+    expect(domain.httpStatus).toBe(409);
+    expect(domain.message).not.toMatch(/não ficou gravada|Nada foi alterado|Nenhum valor foi alterado/i);
+
+    const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(stored.map((row) => row.id).sort()).toEqual(["legacy-a", "legacy-b"]);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(60000);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(40000);
+
+    const auditsAfterSecond = await client.execute(
+      "SELECT type, entity_id FROM audit_events WHERE type IN ('constitution.fracao_centesimas_completed', 'constitution.fracoes_confirmed')",
+    );
+    expect(auditsAfterSecond.rows).toHaveLength(3);
+    expect(
+      auditsAfterSecond.rows.filter((row) => row.type === "constitution.fracao_centesimas_completed"),
+    ).toHaveLength(2);
+  });
+
   test("edição humana sem inteiro grava originalText formatado", async () => {
     const doc = await registerIngestDocument(deps, {
       tenantId: TENANT,
