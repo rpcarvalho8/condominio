@@ -31,7 +31,7 @@ import {
   type PermilagemCentesimasRead,
 } from "../../domain/permilagem-centesimas";
 import { assertSha256ContentHash } from "../../infra/content-blob-store";
-import { kernelNow, type KernelDb, type KernelDeps } from "../../infra/kernel-deps";
+import { kernelNow, type KernelDeps } from "../../infra/kernel-deps";
 import { createAuditEventRepo } from "../../infra/repos/audit-event-repo";
 import { publishDomainEvent } from "../events/emit";
 import { UNIT_SHARE_PROFILE_ID, type IngestPipelineSummary } from "./ingest/contracts";
@@ -526,172 +526,6 @@ export function isUniqueCodigoConstraint(err: unknown): boolean {
   return false;
 }
 
-function isSqliteBusy(err: unknown): boolean {
-  const seen = new Set<unknown>();
-  let current: unknown = err;
-  while (current != null && typeof current === "object" && !seen.has(current)) {
-    seen.add(current);
-    const anyErr = current as {
-      message?: unknown;
-      code?: unknown;
-      extendedCode?: unknown;
-      rawCode?: unknown;
-      cause?: unknown;
-    };
-    const codes = [anyErr.code, anyErr.extendedCode, anyErr.rawCode]
-      .filter((value) => value != null)
-      .map((value) => String(value).toUpperCase());
-    const msg = String(anyErr.message ?? "").toLowerCase();
-    if (
-      codes.some((code) => code.includes("SQLITE_BUSY") || code === "5") ||
-      msg.includes("database is locked") ||
-      msg.includes("sqlite_busy") ||
-      msg.includes("statements in progress")
-    ) {
-      return true;
-    }
-    current = anyErr.cause;
-  }
-  return false;
-}
-
-/** BUSY no BEGIN, não numa query já dentro da transacção (DrizzleQueryError). */
-function isBeginBusy(err: unknown): boolean {
-  if (err instanceof DomainError || !isSqliteBusy(err)) return false;
-  return (err as { constructor?: { name?: string } }).constructor?.name !== "DrizzleQueryError";
-}
-
-type LibsqlHandle = {
-  protocol?: string;
-  reconnect?: () => Promise<void>;
-  execute: (stmt: string) => Promise<{ rows: Array<{ file?: unknown; 0?: unknown }> }>;
-};
-
-const confirmPathMutexes = new Map<string, Promise<void>>();
-const confirmClientMutexes = new WeakMap<object, Promise<void>>();
-const databaseFiles = new WeakMap<object, string | null>();
-
-function sessionClient(db: KernelDb): LibsqlHandle | null {
-  const client = (db as { session?: { client?: unknown } }).session?.client;
-  if (!client || typeof client !== "object") return null;
-  const handle = client as LibsqlHandle;
-  return typeof handle.execute === "function" ? handle : null;
-}
-
-async function databaseFile(client: LibsqlHandle): Promise<string | null> {
-  const cached = databaseFiles.get(client);
-  if (cached !== undefined) return cached;
-  if (client.protocol !== "file") {
-    databaseFiles.set(client, null);
-    return null;
-  }
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      const listed = await client.execute("SELECT file FROM pragma_database_list WHERE name = 'main'");
-      const row = listed.rows[0];
-      const file = String(row?.file ?? row?.[0] ?? "");
-      const path = file.length > 0 && !file.includes(":memory:") ? file : null;
-      databaseFiles.set(client, path);
-      return path;
-    } catch (err) {
-      if (isSqliteBusy(err) && client.reconnect) await client.reconnect();
-      if (!isSqliteBusy(err) || attempt === 3) {
-        databaseFiles.set(client, null);
-        return null;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
-    }
-  }
-  return null;
-}
-
-function withKeyedMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = confirmPathMutexes.get(key) ?? Promise.resolve();
-  let unlock: () => void = () => {};
-  const held = new Promise<void>((resolve) => {
-    unlock = resolve;
-  });
-  confirmPathMutexes.set(
-    key,
-    prev.catch(() => undefined).then(() => held),
-  );
-  return prev.catch(() => undefined).then(async () => {
-    try {
-      return await fn();
-    } finally {
-      unlock();
-    }
-  });
-}
-
-function withClientMutex<T>(client: object, fn: () => Promise<T>): Promise<T> {
-  const prev = confirmClientMutexes.get(client) ?? Promise.resolve();
-  let unlock: () => void = () => {};
-  const held = new Promise<void>((resolve) => {
-    unlock = resolve;
-  });
-  confirmClientMutexes.set(
-    client,
-    prev.catch(() => undefined).then(() => held),
-  );
-  return prev.catch(() => undefined).then(async () => {
-    try {
-      return await fn();
-    } finally {
-      unlock();
-    }
-  });
-}
-
-/**
- * Mesmo processo: um mutex por ficheiro (ou por cliente, em :memory: e no Turso)
- * para duas confirmações não fazerem BEGIN IMMEDIATE ao mesmo tempo.
- *
- * Cliente file do @libsql/client 0.17: se BEGIN IMMEDIATE falha com SQLITE_BUSY,
- * a ligação em cache fica com a statement por finalizar ("cannot commit
- * transaction - SQL statements in progress") e segura o lock até ao GC.
- * reconnect() fecha essa ligação antes de repetir. Não se usa em :memory:
- * (ligação nova = base vazia). As repetições são só para outro processo.
- *
- * Turso (hrana, protocol http/ws) abre uma transacção interactiva remota.
- * Não há ligação local envenenada; um BUSY remoto repete-se, sem reconnect.
- */
-async function withConfirmTransaction<T>(
-  deps: KernelDeps,
-  fn: (txDeps: KernelDeps) => Promise<T>,
-): Promise<T> {
-  const client = sessionClient(deps.db);
-  const file = client ? await databaseFile(client) : null;
-  const run = () => runConfirmAttempts(deps, client, file != null, fn);
-  if (file) return withKeyedMutex(file, run);
-  if (client) return withClientMutex(client, run);
-  return withKeyedMutex("fallback", run);
-}
-
-async function runConfirmAttempts<T>(
-  deps: KernelDeps,
-  client: LibsqlHandle | null,
-  fileBacked: boolean,
-  fn: (txDeps: KernelDeps) => Promise<T>,
-): Promise<T> {
-  let last: unknown;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      return await deps.db.transaction(async (tx) => fn({ ...deps, db: tx as unknown as KernelDb }));
-    } catch (err) {
-      last = err;
-      if (err instanceof DomainError) throw err;
-      const beginBusy = isBeginBusy(err);
-      if (beginBusy && fileBacked && client?.reconnect) {
-        await client.reconnect();
-      }
-      if (!beginBusy || attempt === 3) throw err;
-      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
-    }
-  }
-  throw last;
-}
-
 export async function confirmFracaoLines(
   deps: KernelDeps,
   input: {
@@ -778,53 +612,52 @@ export async function confirmFracaoLines(
     );
   }
 
-  const created = await withConfirmTransaction(deps, async (txDeps) => {
-    for (const lineId of rejectedLineIds) {
-      await txDeps.db
-        .update(extractLines)
-        .set({ status: EXTRACT_LINE_STATUS.rejected })
-        .where(eq(extractLines.id, lineId));
-    }
+  for (const lineId of rejectedLineIds) {
+    await deps.db
+      .update(extractLines)
+      .set({ status: EXTRACT_LINE_STATUS.rejected })
+      .where(eq(extractLines.id, lineId));
+  }
 
-    const rows = [];
-    const existingRows = await txDeps.db
-      .select()
-      .from(constitutionFracoes)
-      .where(eq(constitutionFracoes.tenantId, input.tenantId));
-    const existingByCodigo = new Map(existingRows.map((row) => [row.codigo, row]));
-    for (const item of batch) {
-      const existing = existingByCodigo.get(item.payload.codigo);
-      if (existing && existing.permilagemCentesimas != null) {
-        throw new DomainError(
-          "duplicate_codigo",
-          `O código ${item.payload.codigo} já está confirmado com permilagem em centésimas. Não crie outra fração com o mesmo código. Esta confirmação não ficou gravada.`,
-          409,
-        );
-      }
+  const rows = [];
+  const existingRows = await deps.db
+    .select()
+    .from(constitutionFracoes)
+    .where(eq(constitutionFracoes.tenantId, input.tenantId));
+  const existingByCodigo = new Map(existingRows.map((row) => [row.codigo, row]));
+  for (const item of batch) {
+    const existing = existingByCodigo.get(item.payload.codigo);
+    if (existing && existing.permilagemCentesimas != null) {
+      throw new DomainError(
+        "duplicate_codigo",
+        `O código ${item.payload.codigo} já está confirmado com permilagem em centésimas. Não crie outra fração com o mesmo código.`,
+        409,
+      );
     }
+  }
 
-    for (const item of batch) {
-      const existing = existingByCodigo.get(item.payload.codigo);
-      const permilagem = item.payload.permilagem;
-      let fracao;
-      if (existing && existing.permilagemCentesimas == null) {
-        const [updated] = await txDeps.db
-          .update(constitutionFracoes)
-          .set({
-            permilagem,
-            permilagemCentesimas: item.payload.permilagem_centesimas,
-            confirmedAt: now,
-            confirmedByPersonId: input.actor?.personId ?? null,
-          })
-          .where(
-            and(
-              eq(constitutionFracoes.id, existing.id),
-              eq(constitutionFracoes.tenantId, input.tenantId),
-            ),
-          )
-          .returning();
-        fracao = updated!;
-        await writeAudit(txDeps, {
+  for (const item of batch) {
+    const existing = existingByCodigo.get(item.payload.codigo);
+    const permilagem = item.payload.permilagem;
+    let fracao;
+    if (existing && existing.permilagemCentesimas == null) {
+      const [updated] = await deps.db
+        .update(constitutionFracoes)
+        .set({
+          permilagem,
+          permilagemCentesimas: item.payload.permilagem_centesimas,
+          confirmedAt: now,
+          confirmedByPersonId: input.actor?.personId ?? null,
+        })
+        .where(
+          and(
+            eq(constitutionFracoes.id, existing.id),
+            eq(constitutionFracoes.tenantId, input.tenantId),
+          ),
+        )
+        .returning();
+      fracao = updated!;
+      await writeAudit(deps, {
           tenantId: input.tenantId,
           type: "constitution.fracao_centesimas_completed",
           entityType: "constitution_fracao",
@@ -849,7 +682,7 @@ export async function confirmFracaoLines(
         });
       } else {
         try {
-          const [inserted] = await txDeps.db
+          const [inserted] = await deps.db
             .insert(constitutionFracoes)
             .values({
               id: crypto.randomUUID(),
@@ -872,7 +705,7 @@ export async function confirmFracaoLines(
           if (isUniqueCodigoConstraint(err)) {
             throw new DomainError(
               "duplicate_codigo",
-              `O código ${item.payload.codigo} já existe neste condomínio. Não crie outra fração com o mesmo código. Se a constituição é anterior a 0011 e as centésimas estão vazias, reconfirme o regulamento sobre a fração existente. Esta confirmação não ficou gravada.`,
+              `O código ${item.payload.codigo} já existe neste condomínio. Não crie outra fração com o mesmo código. Se a constituição é anterior a 0011 e as centésimas estão vazias, reconfirme o regulamento sobre a fração existente.`,
               409,
             );
           }
@@ -880,7 +713,7 @@ export async function confirmFracaoLines(
         }
       }
 
-      await txDeps.db
+      await deps.db
         .update(extractLines)
         .set({
           status: EXTRACT_LINE_STATUS.confirmed,
@@ -893,7 +726,7 @@ export async function confirmFracaoLines(
       rows.push(fracao);
     }
 
-    const pending = await txDeps.db
+    const pending = await deps.db
       .select()
       .from(extractLines)
       .where(
@@ -906,7 +739,7 @@ export async function confirmFracaoLines(
         ),
       );
 
-    await txDeps.db
+    await deps.db
       .update(ingestDocuments)
       .set({
         status:
@@ -916,7 +749,7 @@ export async function confirmFracaoLines(
       })
       .where(eq(ingestDocuments.id, document.id));
 
-    await writeAudit(txDeps, {
+    await writeAudit(deps, {
       tenantId: input.tenantId,
       type: "constitution.fracoes_confirmed",
       entityType: "ingest_document",
@@ -933,7 +766,7 @@ export async function confirmFracaoLines(
       },
     });
 
-    await publishDomainEvent(txDeps, {
+    await publishDomainEvent(deps, {
       tenantId: input.tenantId,
       type: "ConstitutionFracoesConfirmed",
       aggregateType: "ingest_document",
@@ -942,10 +775,7 @@ export async function confirmFracaoLines(
       correlationId: input.actor?.requestId ?? null,
     });
 
-    return rows;
-  });
-
-  return { fracoes: created, permilagemSum: sum, permilagemCentesimasSum: sum };
+  return { fracoes: rows, permilagemSum: sum, permilagemCentesimasSum: sum };
 }
 
 export async function confirmContactLines(
