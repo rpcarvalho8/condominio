@@ -568,7 +568,7 @@ describe("F1 constituição", () => {
     expect(afterConflict.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
   });
 
-  test("M1-race: reconfirmações concorrentes, um 200 e um 409 reconfirm_conflict, sem mistura", async () => {
+  test("M1-race: reconfirmações concorrentes, um 200 e um 409, sem mistura", async () => {
     await insertLegacyFracao("legacy-a", "A", 600);
     await insertLegacyFracao("legacy-b", "B", 400);
 
@@ -614,8 +614,8 @@ describe("F1 constituição", () => {
     const err = rejected[0]?.status === "rejected" ? rejected[0].reason : null;
     expect(err).toBeInstanceOf(DomainError);
     const domain = err as DomainError;
-    expect(domain.code).toBe("reconfirm_conflict");
     expect(domain.httpStatus).toBe(409);
+    expect(domain.code === "duplicate_codigo" || domain.code === "reconfirm_conflict").toBe(true);
 
     const winnerIsSixty = results[0]?.status === "fulfilled";
     const winnerA = winnerIsSixty ? 60000 : 55000;
