@@ -2,6 +2,15 @@ import { KERNEL_ROLE_CATALOG } from "../domain/roles";
 
 export type SqlExecutor = {
   execute: (sql: string) => Promise<unknown>;
+  /**
+   * Escrita atómica. O cliente libSQL já expõe `batch(stmts, "write")`
+   * (e `transaction("write")`). Quando falta, o chamador não pode apagar
+   * a única cópia dos dados entre dois `execute`.
+   */
+  batch?: (
+    stmts: string[],
+    mode?: "write" | "read" | "deferred",
+  ) => Promise<unknown>;
 };
 
 function isAlreadyExists(err: unknown): boolean {

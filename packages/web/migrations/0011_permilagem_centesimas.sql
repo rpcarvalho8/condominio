@@ -1,16 +1,18 @@
--- Migration 0011: permilagem canónica em centésimas de ‰.
--- Aplicar via applyF1ConstitutionSchema (idempotente).
+-- WARNING: DESTRUCTIVE SCRIPT. THIS DROPS constitution_fracoes.
+-- DO NOT RUN IT TWICE. DO NOT RUN IT ON A DATABASE THAT ALREADY HAS permilagem_centesimas.
+-- THE FIRST STATEMENT FAILS FAST WHEN THE COLUMN ALREADY EXISTS.
+-- RUN WITH sqlite3 -bail (OR AN EQUIVALENT THAT STOPS ON THE FIRST ERROR).
+-- WITHOUT -bail, SQLITE KEEPS GOING AFTER A FAILED ALTER AND CAN DROP THE LIVE TABLE.
+-- PREFER applyF1ConstitutionSchema. IF THIS SCRIPT STOPS AFTER THE ALTER, RE-RUN THE APPLIER, NOT THIS FILE.
+-- THIS SCRIPT COPIES permilagem_centesimas. IT DOES NOT WRITE NULL OVER EXISTING CENTESIMAS.
 --
--- SQLite não remove NOT NULL com ALTER. O applier reconstrói a tabela
--- com cópia integral quando `permilagem` ainda é NOT NULL ou quando
--- `permilagem_centesimas` ainda não existe. Se aparecer uma coluna
--- desconhecida, a migração pára e a tabela original fica intacta.
--- Reexecutar o applier numa tabela já migrada é no-op.
--- Não correr este script à mão uma segunda vez: o DROP abaixo só é
--- seguro dentro do guarda do applier.
---
--- Linhas existentes: `permilagem` inteira mantém-se; `permilagem_centesimas`
--- fica NULL. Não se reconstrói o decimal a partir do arredondamento antigo.
+-- SQLite não remove NOT NULL com ALTER. O resto da migração reconstrói a tabela.
+-- Linhas que já existiam ficam com centésimas NULL porque a coluna acaba de ser criada;
+-- um valor já gravado em permilagem_centesimas é copiado, não substituído por NULL.
+
+ALTER TABLE constitution_fracoes ADD COLUMN permilagem_centesimas INTEGER;
+
+BEGIN;
 
 CREATE TABLE constitution_fracoes__centesimas_rebuild (
   id TEXT PRIMARY KEY NOT NULL,
@@ -34,7 +36,7 @@ INSERT INTO constitution_fracoes__centesimas_rebuild (
   created_at, confirmed_at, confirmed_by_person_id
 )
 SELECT
-  id, tenant_id, codigo, tipo, permilagem, NULL,
+  id, tenant_id, codigo, tipo, permilagem, permilagem_centesimas,
   source_document_id, source_line_id, source_excerpt, status,
   created_at, confirmed_at, confirmed_by_person_id
 FROM constitution_fracoes;
@@ -47,3 +49,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS constitution_fracoes_tenant_codigo_uq
   ON constitution_fracoes (tenant_id, codigo);
 CREATE INDEX IF NOT EXISTS constitution_fracoes_tenant_idx
   ON constitution_fracoes (tenant_id);
+
+COMMIT;
