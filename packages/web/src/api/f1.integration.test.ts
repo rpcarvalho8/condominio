@@ -71,6 +71,24 @@ function buildF1App() {
     .route("/f1", createF1Routes(deps));
 }
 
+async function immediateWrite(handle: Pick<ReturnType<typeof createClient>, "execute">) {
+  await handle.execute("BEGIN IMMEDIATE");
+  try {
+    await handle.execute({
+      sql: "UPDATE constitution_fracoes SET status = status WHERE tenant_id = ?",
+      args: [TENANT],
+    });
+    await handle.execute("COMMIT");
+  } catch (err) {
+    try {
+      await handle.execute("ROLLBACK");
+    } catch {
+      /* a ligação já não tem transacção */
+    }
+    throw err;
+  }
+}
+
 function xlsxFracoes(rows: Array<[string, number]>): Buffer {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([["codigo", "permilagem"], ...rows]);
@@ -550,7 +568,7 @@ describe("F1 constituição", () => {
     expect(afterConflict.map((f) => f.id).sort()).toEqual(["legacy-e", "legacy-m"]);
   });
 
-  test("M1-race: reconfirmações concorrentes, um 200 e um 409 reconfirm_conflict, sem mistura", async () => {
+  test("M1-race: reconfirmações concorrentes, um 200 e um 409, sem mistura", async () => {
     await insertLegacyFracao("legacy-a", "A", 600);
     await insertLegacyFracao("legacy-b", "B", 400);
 
@@ -596,8 +614,8 @@ describe("F1 constituição", () => {
     const err = rejected[0]?.status === "rejected" ? rejected[0].reason : null;
     expect(err).toBeInstanceOf(DomainError);
     const domain = err as DomainError;
-    expect(domain.code).toBe("reconfirm_conflict");
     expect(domain.httpStatus).toBe(409);
+    expect(domain.code).toBe("duplicate_codigo");
 
     const winnerIsSixty = results[0]?.status === "fulfilled";
     const winnerA = winnerIsSixty ? 60000 : 55000;
@@ -624,6 +642,180 @@ describe("F1 constituição", () => {
       "SELECT COUNT(*) AS n FROM audit_events WHERE type = 'constitution.fracoes_confirmed'",
     );
     expect(Number(confirmedDocs.rows[0]!.n)).toBe(1);
+  });
+
+  test("M39-T: ordem inversa concorrente, um 200 e um 409, sem mistura nem escrita parcial", async () => {
+    async function prepared(filename: string, rows: Array<[string, number]>) {
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename,
+      });
+      const extracted = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: rows.map(([codigo, centesimas]) => ({
+            kind: "fracao",
+            payload: { codigo, permilagem_centesimas: centesimas },
+            sourceExcerpt: codigo,
+          })),
+        },
+      });
+      const idByCodigo = new Map<string, string>();
+      for (const line of extracted.lines) {
+        const payload = JSON.parse(line.payloadJson) as { codigo?: string };
+        if (payload.codigo) idByCodigo.set(payload.codigo, line.id);
+      }
+      return { documentId: doc.id, idByCodigo };
+    }
+
+    function confirmInOrder(
+      prep: { documentId: string; idByCodigo: Map<string, string> },
+      order: string[],
+    ) {
+      return confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: prep.documentId,
+        confirmations: order.map((codigo) => {
+          const lineId = prep.idByCodigo.get(codigo);
+          if (!lineId) throw new Error(`linha ${codigo} em falta`);
+          return { lineId };
+        }),
+      });
+    }
+
+    const ab = await prepared("ordem-ab.pdf", [
+      ["A", 60000],
+      ["B", 40000],
+    ]);
+    const ba = await prepared("ordem-ba.pdf", [
+      ["B", 45000],
+      ["A", 55000],
+    ]);
+    const results = await Promise.allSettled([
+      confirmInOrder(ab, ["A", "B"]),
+      confirmInOrder(ba, ["B", "A"]),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    const err = rejected[0]?.status === "rejected" ? rejected[0].reason : null;
+    expect(err).toBeInstanceOf(DomainError);
+    const domain = err as DomainError;
+    expect(domain.httpStatus).toBe(409);
+    expect(domain.code).toBe("duplicate_codigo");
+
+    const winnerIsAb = results[0]?.status === "fulfilled";
+    const winnerA = winnerIsAb ? 60000 : 55000;
+    const winnerB = winnerIsAb ? 40000 : 45000;
+    const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(stored).toHaveLength(2);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(winnerA);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(winnerB);
+
+    const loserId = winnerIsAb ? ba.documentId : ab.documentId;
+    const winnerId = winnerIsAb ? ab.documentId : ba.documentId;
+    const loserLines = await listExtractLines(deps, { tenantId: TENANT, documentId: loserId });
+    const winnerLines = await listExtractLines(deps, { tenantId: TENANT, documentId: winnerId });
+    expect(loserLines.lines.map((line) => line.status)).toEqual(["pending_review", "pending_review"]);
+    expect(winnerLines.lines.map((line) => line.status)).toEqual(["confirmed", "confirmed"]);
+  });
+
+  test("M39-T: B2-atómica, 409 com rejeição no lote deixa a linha em pending_review", async () => {
+    const first = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "b2-atomica-base.pdf",
+    });
+    const seeded = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: first.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "A", permilagem_centesimas: 60000 },
+            sourceExcerpt: "A",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "B", permilagem_centesimas: 40000 },
+            sourceExcerpt: "B",
+          },
+        ],
+      },
+    });
+    await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: first.id,
+      confirmations: seeded.lines.map((line) => ({ lineId: line.id })),
+    });
+
+    const second = await registerIngestDocument(deps, {
+      tenantId: TENANT,
+      kind: INGEST_DOCUMENT_KINDS.regulamento,
+      filename: "b2-atomica-409.pdf",
+    });
+    const extracted = await extractDocumentLines(deps, {
+      tenantId: TENANT,
+      documentId: second.id,
+      extraction: {
+        lines: [
+          {
+            kind: "fracao",
+            payload: { codigo: "R", permilagem_centesimas: 1 },
+            sourceExcerpt: "R",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "A", permilagem_centesimas: 55000 },
+            sourceExcerpt: "A",
+          },
+          {
+            kind: "fracao",
+            payload: { codigo: "B", permilagem_centesimas: 45000 },
+            sourceExcerpt: "B",
+          },
+        ],
+      },
+    });
+    const rejectedLineId = extracted.lines[0]!.id;
+    const auditsBefore = await client.execute("SELECT COUNT(*) AS n FROM audit_events");
+    const failed = await confirmFracaoLines(deps, {
+      tenantId: TENANT,
+      documentId: second.id,
+      confirmations: [
+        { lineId: rejectedLineId, reject: true },
+        { lineId: extracted.lines[1]!.id },
+        { lineId: extracted.lines[2]!.id },
+      ],
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(failed).toBeInstanceOf(DomainError);
+    const domain = failed as DomainError;
+    expect(domain.httpStatus).toBe(409);
+    expect(domain.code).toBe("duplicate_codigo");
+    expect(domain.message).toMatch(/não ficou gravada/);
+
+    const after = await listExtractLines(deps, { tenantId: TENANT, documentId: second.id });
+    const rejectedLine = after.lines.find((line) => line.id === rejectedLineId);
+    expect(rejectedLine?.status).toBe("pending_review");
+    const rejectionAudits = await client.execute({
+      sql: "SELECT COUNT(*) AS n FROM audit_events WHERE entity_id = ?",
+      args: [rejectedLineId],
+    });
+    expect(Number(rejectionAudits.rows[0]!.n)).toBe(0);
+    const auditsAfter = await client.execute("SELECT COUNT(*) AS n FROM audit_events");
+    expect(Number(auditsAfter.rows[0]!.n)).toBe(Number(auditsBefore.rows[0]!.n));
+
+    const stored = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(stored).toHaveLength(2);
+    expect(stored.find((row) => row.codigo === "A")!.permilagemCentesimas).toBe(60000);
+    expect(stored.find((row) => row.codigo === "B")!.permilagemCentesimas).toBe(40000);
   });
 
   test("edição humana sem inteiro grava originalText formatado", async () => {
@@ -755,6 +947,152 @@ describe("F1 constituição", () => {
     expect(domain.httpStatus).toBe(400);
     const still = await listConstitutionFracoes(deps, { tenantId: TENANT });
     expect(still.map((row) => row.codigo).sort()).toEqual(["A", "B"]);
+  });
+
+  test("duas confirmações concorrentes: uma grava, a outra é 409 duplicate_codigo", async () => {
+    async function documentWithPair(filename: string) {
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename,
+      });
+      const extracted = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: [
+            {
+              kind: "fracao",
+              payload: { codigo: "A", permilagem_centesimas: 60000 },
+              sourceExcerpt: "A",
+            },
+            {
+              kind: "fracao",
+              payload: { codigo: "B", permilagem_centesimas: 40000 },
+              sourceExcerpt: "B",
+            },
+          ],
+        },
+      });
+      return { doc, lines: extracted.lines };
+    }
+
+    const first = await documentWithPair("concorrente-1.pdf");
+    const second = await documentWithPair("concorrente-2.pdf");
+    const client2 = createClient({ url: `file:${DB_PATH}` });
+    const deps2: KernelDeps = { db: drizzle(client2, { schema }), getTenantId: () => TENANT };
+    try {
+      const results = await Promise.allSettled([
+        confirmFracaoLines(deps, {
+          tenantId: TENANT,
+          documentId: first.doc.id,
+          confirmations: first.lines.map((line) => ({ lineId: line.id })),
+        }),
+        confirmFracaoLines(deps2, {
+          tenantId: TENANT,
+          documentId: second.doc.id,
+          confirmations: second.lines.map((line) => ({ lineId: line.id })),
+        }),
+      ]);
+      const fulfilled = results.filter((result) => result.status === "fulfilled");
+      const rejected = results.filter((result) => result.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      const err = rejected[0]?.status === "rejected" ? rejected[0].reason : null;
+      expect(err).toBeInstanceOf(DomainError);
+      const domain = err as DomainError;
+      expect(domain.code).toBe("duplicate_codigo");
+      expect(domain.httpStatus).toBe(409);
+      expect(domain.message).not.toMatch(/UNIQUE constraint|SQLITE|Failed query/i);
+      expect(domain.message).not.toMatch(/Nada foi alterado/);
+      const rows = await listConstitutionFracoes(deps, { tenantId: TENANT });
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.codigo).sort()).toEqual(["A", "B"]);
+      await immediateWrite(client);
+      await immediateWrite(client2);
+    } finally {
+      client2.close();
+    }
+  });
+
+  test("duas confirmações sem conflito gravam as duas, no mesmo cliente e em clientes diferentes", async () => {
+    async function documentWith(
+      filename: string,
+      rows: Array<[string, number]>,
+    ) {
+      const doc = await registerIngestDocument(deps, {
+        tenantId: TENANT,
+        kind: INGEST_DOCUMENT_KINDS.regulamento,
+        filename,
+      });
+      const extracted = await extractDocumentLines(deps, {
+        tenantId: TENANT,
+        documentId: doc.id,
+        extraction: {
+          lines: rows.map(([codigo, centesimas]) => ({
+            kind: "fracao",
+            payload: { codigo, permilagem_centesimas: centesimas },
+            sourceExcerpt: codigo,
+          })),
+        },
+      });
+      return { doc, lines: extracted.lines };
+    }
+
+    const sameA = await documentWith("mesmo-cliente-a.pdf", [
+      ["A", 60000],
+      ["B", 40000],
+    ]);
+    const sameB = await documentWith("mesmo-cliente-b.pdf", [
+      ["C", 70000],
+      ["D", 30000],
+    ]);
+    const sameClient = await Promise.all([
+      confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: sameA.doc.id,
+        confirmations: sameA.lines.map((line) => ({ lineId: line.id })),
+      }),
+      confirmFracaoLines(deps, {
+        tenantId: TENANT,
+        documentId: sameB.doc.id,
+        confirmations: sameB.lines.map((line) => ({ lineId: line.id })),
+      }),
+    ]);
+    expect(sameClient).toHaveLength(2);
+
+    const otherA = await documentWith("outro-cliente-a.pdf", [
+      ["E", 55000],
+      ["F", 45000],
+    ]);
+    const otherB = await documentWith("outro-cliente-b.pdf", [
+      ["G", 25000],
+      ["H", 75000],
+    ]);
+    const client2 = createClient({ url: `file:${DB_PATH}` });
+    const deps2: KernelDeps = { db: drizzle(client2, { schema }), getTenantId: () => TENANT };
+    try {
+      const both = await Promise.all([
+        confirmFracaoLines(deps, {
+          tenantId: TENANT,
+          documentId: otherA.doc.id,
+          confirmations: otherA.lines.map((line) => ({ lineId: line.id })),
+        }),
+        confirmFracaoLines(deps2, {
+          tenantId: TENANT,
+          documentId: otherB.doc.id,
+          confirmations: otherB.lines.map((line) => ({ lineId: line.id })),
+        }),
+      ]);
+      expect(both).toHaveLength(2);
+      await immediateWrite(client);
+      await immediateWrite(client2);
+    } finally {
+      client2.close();
+    }
+
+    const rows = await listConstitutionFracoes(deps, { tenantId: TENANT });
+    expect(rows.map((row) => row.codigo).sort()).toEqual(["A", "B", "C", "D", "E", "F", "G", "H"]);
   });
 
   test("Σ inválida não grava a rejeição pedida no mesmo lote", async () => {
